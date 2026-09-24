@@ -1,6 +1,6 @@
 # OpenKFO / KFO Server Emulator
 
-面向学习与技术研究的《功夫小子》兼容服务器模拟器项目，研究网络协议、服务端架构、数据持久化及客户端互操作，包含服务端、客户端配套工具和GM管理器源码。
+面向学习与技术研究格斗游戏服务器模拟器项目，研究网络协议、服务端架构、数据持久化及客户端互操作，包含服务端、客户端配套工具和GM管理器源码。
 
 > **非商业 · 学习研究 · 非官方项目**
 >
@@ -216,7 +216,7 @@ go -C server/go-server build -ldflags "-H windowsgui" -o ../../gm/build/windows/
 dotnet publish tools/local-server-monitor/LocalServerMonitor.csproj -c Release -r win-x64 --self-contained true -o dist/server
 ```
 
-入口：`dist/server/功夫小子本地服务器.exe`。Go 统一输出日志，窗口只读取本地文件，显示账号、玩家、方向、协议和原始 JSON/HEX，不向公网传送日志。
+入口：`dist/server/本地服务器.exe`。Go 统一输出日志，窗口只读取本地文件，显示账号、玩家、方向、协议和原始 JSON/HEX，不向公网传送日志。
 
 如果服务器按第 3 步启动：先创建 `dist/server/logs`，在启动命令追加 `-trace-protocol -protocol-log dist/server/logs/protocol-current.log`，窗口可接入该日志。
 
@@ -229,7 +229,7 @@ go -C server/go-server build -o ../../dist/tester-components/ProtocolTesterCore.
 dotnet publish launcher/protocol-tester/ProtocolTester.csproj -c Release -o dist/协议测试器
 ```
 
-入口：`dist/协议测试器/功夫小子协议测试器.exe`。先启动测试服，再选择本地登录器的 `bridge.json`，使用空闲测试账号；无需打开游戏即可测试收发协议。用例可能修改账号数据，使用独立测试库。详见 [测试器说明](launcher/protocol-tester/README.md)。
+入口：`dist/协议测试器/协议测试器.exe`。先启动测试服，再选择本地登录器的 `bridge.json`，使用空闲测试账号；无需打开游戏即可测试收发协议。用例可能修改账号数据，使用独立测试库。详见 [测试器说明](launcher/protocol-tester/README.md)。
 
 ### 自动更新（可选）
 
