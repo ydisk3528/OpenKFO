@@ -50,6 +50,11 @@ func NewServer(hub *Hub, certificate tls.Certificate) *Server {
 
 func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if server.Hub.Config.ExperimentalNeutralNPC {
+		mux.HandleFunc("GET /experimental/neutral-npc", server.Hub.neutralNPCStatus)
+		mux.HandleFunc("GET /experimental/neutral-npc-plan", server.Hub.neutralNPCStatus)
+		mux.HandleFunc("POST /experimental/neutral-npc-failure", server.Hub.neutralNPCFailure)
+	}
 	mux.HandleFunc("GET /health", func(writer http.ResponseWriter, request *http.Request) {
 		ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		defer cancel()

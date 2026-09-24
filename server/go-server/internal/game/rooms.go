@@ -12,6 +12,7 @@ import (
 )
 
 type Config struct {
+	ExperimentalNeutralNPC bool                             `json:"-"`
 	SuitBundles            map[uint32][]uint32              `json:"suit_bundles,omitempty"`
 	RandomWeaponTypes      map[uint32]uint32                `json:"random_weapon_types,omitempty"`
 	TeamSeriesRounds       uint32                           `json:"team_series_rounds,omitempty"`
@@ -47,6 +48,7 @@ type Member struct {
 	BattleEvents         map[battleEventKey]battleSequence
 }
 type Room struct {
+	NeutralNPC            *neutralNPCSession
 	Series                *teamSeries
 	HealthReceipts        map[[2]uint64]uint32
 	PairSelectionVersions map[uint64]uint32
@@ -1016,6 +1018,7 @@ func (hub *Hub) startBattle(room *Room) error {
 		room.FosterRetired = make([]int, len(foster.Groups))
 	}
 	room.PVEActors = nil
+	room.NeutralNPC = nil
 	room.HealthReceipts = nil
 	room.PVEBlocks = nil
 	room.FosterPositions = nil

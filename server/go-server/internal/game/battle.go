@@ -50,6 +50,12 @@ func (hub *Hub) battleMessage(session *Session, channel *Channel, message protoc
 		return rejectBattle("battle packet fields invalid")
 	}
 	id := protocol.ReadUint32(payload, 0)
+	if id == neutralNPCRequest {
+		return hub.neutralNPCRequest(session, message)
+	}
+	if id == neutralNPCReady {
+		return hub.neutralNPCReady(session, message)
+	}
 	if id >= seriesInterval && id <= seriesFinish {
 		return hub.seriesEvent(session, message, nil)
 	}

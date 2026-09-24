@@ -37,6 +37,7 @@ func main() {
 	traceProtocol := flag.Bool("trace-protocol", false, "print every decoded protocol packet (sensitive login fields redacted)")
 	protocolLog := flag.String("protocol-log", "", "append console and protocol logs to this file")
 	bannedWordsPath := flag.String("banned-words", "", "optional UTF-8 seed word list; existing GM settings take precedence")
+	neutralNPC := flag.Bool("experimental-neutral-npc", os.Getenv("OPENKFO_NEUTRAL_NPC_EXPERIMENT") == "1", "enable local team NPC experiment; all clients need the diagnostic EXE")
 	flag.Parse()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.SetOutput(os.Stdout)
@@ -174,6 +175,18 @@ func main() {
 		certificate, certErr := tunnel.Certificate(*certificateDirectory)
 		if certErr != nil {
 			log.Fatal(certErr)
+		}
+		if *neutralNPC {
+			for _, endpoint := range []string{*address, *tlsAddress, *udpAddress} {
+				if endpoint == "" {
+					continue
+				}
+				host, _, splitErr := net.SplitHostPort(endpoint)
+				if splitErr != nil || !net.ParseIP(host).IsLoopback() {
+					log.Fatal("neutral NPC experiment requires loopback listeners")
+				}
+			}
+			config.ExperimentalNeutralNPC = true
 		}
 		hub := game.NewHub(store, config)
 		if *traceProtocol {

@@ -34,6 +34,14 @@ func (h *Hub) observeRelayedBattle(s *Session, body []byte, recipients map[uint6
 		s.tracePacket("C->S", s.game().ID, "udp-observed", message.ID, p, false)
 		var err error
 		switch id {
+		case neutralNPCRequest:
+			if r.Stage == "battle" && s.game().Phase == "battle" {
+				err = h.neutralNPCRequest(s, message)
+			}
+		case neutralNPCReady:
+			if r.Stage == "battle" && s.game().Phase == "battle" {
+				err = h.neutralNPCReady(s, message)
+			}
 		case seriesInterval, seriesContinue, seriesReady, seriesFinish:
 			err = h.seriesEvent(s, message, recipients)
 		case 8291, 8292:

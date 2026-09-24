@@ -17,7 +17,7 @@ type pveActor struct {
 }
 
 func (r *Room) hasPVEActor(uid uint64) bool {
-	return (r.Type() == protocol.StageAssault || r.Type() == protocol.FosterMode) && r.PVEActors[uid].active
+	return ((r.Type() == protocol.StageAssault || r.Type() == protocol.FosterMode) && r.PVEActors[uid].active) || r.hasNeutralNPC(uid)
 }
 
 func (r *Room) controlsBattleActor(s *Session, uid uint64) bool {
