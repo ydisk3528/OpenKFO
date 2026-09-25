@@ -11,6 +11,8 @@ func loginFailureMessage(err error) string {
 		return "连接登录服务失败，请检查网络后重试。"
 	}
 	switch string(rejection) {
+	case "client_update_required":
+		return "版本过旧，请使用群里 学习资料2.zip 进行更新。"
 	case "peer_receipt_invalid_restart_game":
 		return "账号密码验证已通过，但当前游戏窗口的旧连接凭据已失效。请关闭这个游戏窗口，再从启动器重新启动；其他窗口不用关闭。"
 	case "peer_receipt_occupied_restart_game":

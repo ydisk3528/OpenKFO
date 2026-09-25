@@ -22,3 +22,9 @@ func TestLoginFailureReasons(t *testing.T) {
 		t.Fatal("raw endpoint exposed")
 	}
 }
+
+func TestRequiredUpdateMessage(t *testing.T) {
+	if got := loginFailureMessage(loginRejected("client_update_required")); got != "版本过旧，请使用群里 学习资料2.zip 进行更新。" {
+		t.Fatal(got)
+	}
+}
