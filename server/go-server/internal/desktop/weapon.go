@@ -892,9 +892,108 @@ func effects(info *inspection) []map[string]any {
 	}
 	return result
 }
-func render(a *archive, items []Item, plans map[string][]Rule) ([]byte, error) {
+
+// cloneKey identifies the hit-property clone of one stage: the stage number
+// the rules use (2011..2016 normalized to 1..6) plus the property id before
+// the clone.
+func cloneKey(stage int, oldID string) string {
+	return strconv.Itoa(stage) + "|" + oldID
+}
+
+// cloneMapOf returns the live clone-id map of the edit set, creating it on
+// first use so render can record its allocations for later runs.
+func cloneMapOf(state *weaponState) map[string]map[string]string {
+	if state.PropertyClones == nil {
+		state.PropertyClones = map[string]map[string]string{}
+	}
+	return state.PropertyClones
+}
+
+func copyCloneMap(source map[string]map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(source))
+	for weapon, entries := range source {
+		copied := make(map[string]string, len(entries))
+		for key, value := range entries {
+			copied[key] = value
+		}
+		out[weapon] = copied
+	}
+	return out
+}
+
+// assignCloneIDs fills clones with a stable SkillProId for every (weapon,
+// stage, hit-property) a render of plans will clone. A persisted entry is
+// authoritative — it is what keeps combo-rule numbers valid across edits, so it
+// is never re-issued. Missing entries follow render's allocation order (weapons
+// sorted, stages sorted) starting at 900000000, skipping numbers the archive
+// already uses and ones handed out earlier in this pass. clones is mutated in
+// place; pass a copy (copyCloneMap) when only predicting.
+func assignCloneIDs(info *inspection, plans map[string][]Rule, clones map[string]map[string]string) error {
+	if clones == nil {
+		return nil
+	}
+	weapons := map[string]Weapon{}
+	for _, weapon := range info.weapons {
+		weapons[strconv.Itoa(weapon.ID)] = weapon
+	}
+	keys := make([]string, 0, len(plans))
+	for key := range plans {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	nextID := 900000000
+	assigned := map[string]bool{}
+	occupied := func(id string) bool {
+		return assigned[id] || len(info.properties[id]) > 0
+	}
+	for _, key := range keys {
+		weapon, ok := weapons[key]
+		if !ok {
+			return fmt.Errorf("武器配置已变化")
+		}
+		rules, err := validateRules(plans[key], weapon)
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			var stage Stage
+			for _, candidate := range weapon.Stages {
+				if candidate.Stage == rule.Stage {
+					stage = candidate
+					break
+				}
+			}
+			for _, oldID := range stage.PropertyIDs {
+				reference := cloneKey(rule.Stage, oldID)
+				if id := clones[key][reference]; id != "" {
+					assigned[id] = true
+					continue
+				}
+				for occupied(strconv.Itoa(nextID)) {
+					nextID++
+				}
+				next := strconv.Itoa(nextID)
+				nextID++
+				if clones[key] == nil {
+					clones[key] = map[string]string{}
+				}
+				clones[key][reference] = next
+				assigned[next] = true
+			}
+		}
+	}
+	return nil
+}
+
+func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[string]map[string]string) ([]byte, error) {
 	info, err := inspect(a, items)
 	if err != nil {
+		return nil, err
+	}
+	if cloneIDs == nil {
+		cloneIDs = map[string]map[string]string{}
+	}
+	if err = assignCloneIDs(info, plans, cloneIDs); err != nil {
 		return nil, err
 	}
 	weapons := map[string]Weapon{}
@@ -927,7 +1026,7 @@ func render(a *archive, items []Item, plans map[string][]Rule) ([]byte, error) {
 	}
 	sort.Strings(keys)
 	clones := []string{}
-	nextID := 900000000
+	propertiesChanged := 0
 	for _, key := range keys {
 		weapon, ok := weapons[key]
 		if !ok {
@@ -996,11 +1095,10 @@ func render(a *archive, items []Item, plans map[string][]Rule) ([]byte, error) {
 			}
 			remap := map[string]string{}
 			for _, oldID := range stage.PropertyIDs {
-				for len(info.properties[strconv.Itoa(nextID)]) > 0 {
-					nextID++
+				newID := cloneIDs[key][cloneKey(rule.Stage, oldID)]
+				if newID == "" {
+					return nil, fmt.Errorf("克隆编号缺失：%s 状态 %d 属性 %s", key, rule.Stage, oldID)
 				}
-				newID := strconv.Itoa(nextID)
-				nextID++
 				prop := info.properties[oldID][0].clone()
 				prop.set("SkillProId", newID)
 				if rule.Buff != 0 {
@@ -1023,7 +1121,17 @@ func render(a *archive, items []Item, plans map[string][]Rule) ([]byte, error) {
 				if err != nil {
 					return nil, err
 				}
-				clones = append(clones, encoded)
+				if previous, ok := propertyNodeText(properties, newID); ok {
+					// 归档里已经有这个号 —— 基线吸收了上一轮的克隆节点（重新采集
+					// 基线后必然如此）。**原位替换**，不能再追加一条：同号两条既会
+					// 让客户端取到哪条全看运气，也会让我们自己的唯一性校验挂掉。
+					if previous != encoded {
+						properties = strings.Replace(properties, previous, encoded, 1)
+						propertiesChanged++
+					}
+				} else {
+					clones = append(clones, encoded)
+				}
 				remap[oldID] = newID
 			}
 			changed.walk(func(node *xmlNode) {
@@ -1058,7 +1166,7 @@ func render(a *archive, items []Item, plans map[string][]Rule) ([]byte, error) {
 			animations[file] = animation
 		}
 	}
-	if len(clones) == 0 {
+	if len(clones) == 0 && propertiesChanged == 0 {
 		return append([]byte(nil), a.data...), nil
 	}
 	ending := regexp.MustCompile(`</SkillProperty\s*>`)
@@ -1522,6 +1630,13 @@ type weaponState struct {
 	// lists). Unlike Chains it is additive: an entry replaces only the blocks
 	// that weapon owns, and the shipped rules of other weapons stay intact.
 	ComboRules map[string]ComboRuleSet `json:"combo_rules,omitempty"`
+	// PropertyClones pins the SkillProId each (weapon, stage, hit-property)
+	// receives when render clones it. render allocates fresh 9000000xx ids in
+	// weapon-then-stage order, so without this map every rule-set change would
+	// renumber them and silently break the combo rules that name the previous
+	// ids — the client matches rules by number and never notices the miss.
+	// Keyed by weapon id, then "stage|pre-clone property id".
+	PropertyClones map[string]map[string]string `json:"property_clones,omitempty"`
 }
 
 // 武器配置操作的独占锁。两个细节缺一不可：
@@ -1749,6 +1864,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			delete(state.Chains, key)
 			delete(state.ComboRules, key)
 			delete(state.FrameSwitches, key)
+			delete(state.PropertyClones, key)
 			message = "已移除自建武器；重新应用或发布后才会从配置包消失"
 		} else {
 			if request.Blueprint == nil {
@@ -2327,6 +2443,15 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if strings.TrimSpace(request.Notes) == "" || len(request.Notes) > 8000 {
 			return nil, fmt.Errorf("请填写更新说明（最多 8000 字节）")
 		}
+		// 连招限制按 skillproid 匹配，而 render 会给已应用招式换号：发布前先把
+		// 对得上的旧号翻译成新号，翻不动的直接拒绝，别把死规则发上线。
+		if changed, err := reconcileComboRules(info, &state); err != nil {
+			return nil, err
+		} else if changed {
+			if base, err = applyComboRules(base, state.ComboRules); err != nil {
+				return nil, err
+			}
+		}
 		// Publish saved plans plus this editor, without overwriting local resources.
 		plans := make(map[string][]Rule)
 		for id, rules := range state.Applied {
@@ -2336,7 +2461,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			plans[id] = rules
 		}
 		plans[key] = rules
-		data, err := render(base, items, plans)
+		data, err := render(base, items, plans, cloneMapOf(&state))
 		if err != nil {
 			return nil, err
 		}

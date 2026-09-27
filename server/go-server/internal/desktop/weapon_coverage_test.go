@@ -131,7 +131,7 @@ func TestSharedAndCrossFileWeaponActions(t *testing.T) {
 			t.Fatal("omitted state", state)
 		}
 	}
-	data, err := render(source, items, map[string][]Rule{"253030": rules})
+	data, err := render(source, items, map[string][]Rule{"253030": rules}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestSharedAndCrossFileWeaponActions(t *testing.T) {
 			t.Fatal("unrelated archive entry changed", name)
 		}
 	}
-	restored, err := render(source, items, map[string][]Rule{})
+	restored, err := render(source, items, map[string][]Rule{}, nil)
 	if err != nil || !bytes.Equal(restored, source.data) {
 		t.Fatal("restore does not recover original archive")
 	}

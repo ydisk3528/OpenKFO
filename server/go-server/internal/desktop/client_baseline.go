@@ -184,6 +184,13 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if digest(current) != expected {
 		return nil, fmt.Errorf("游戏配置已被其他程序修改，已停止覆盖；如确认无误可「重新采集基线」")
 	}
+	// Combo rules match the client by skillproid number, but render renumbers
+	// the hit properties of every applied stage. Translate what is
+	// unambiguous and refuse the rest before anything is written, so a saved
+	// black/white list can never silently stop matching.
+	if _, err := reconcileComboRules(info, state); err != nil {
+		return nil, err
+	}
 	base, err := buildWeaponBase(source, state)
 	if err != nil {
 		return nil, err
@@ -208,8 +215,15 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 			return nil, fmt.Errorf("同步特效登记：%w", err)
 		}
 	}
-	data, err := render(base, items, plans)
+	data, err := render(base, items, plans, cloneMapOf(state))
 	if err != nil {
+		return nil, err
+	}
+	// 这一次渲染内部走过好几次追加式写入（蓝图 / applyRemaps / applyFrameSwitches /
+	// render），每写一次就把被改条目的旧副本留在文件里。落盘前紧凑重建一次，
+	// 让写出去的文件大小等于真实内容大小。放在校验之前，好让下面所有守卫
+	// 都跑在「最终要落盘的字节」上。
+	if data, err = compactArchive(data); err != nil {
 		return nil, err
 	}
 	verified, err := parseArchive(data)

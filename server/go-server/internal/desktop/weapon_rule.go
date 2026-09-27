@@ -381,6 +381,151 @@ func skillOptions(info *inspection, weapon Weapon) []SkillOption {
 	return options
 }
 
+// appliedSkillOptions rewrites the picker's numbers to the ids the client will
+// read after the next 应用到游戏. render clones the hit properties of every
+// applied stage onto fresh 9000000xx ids, so a rule naming the pre-clone id
+// matches nothing once the config is written — the picker has to offer the
+// post-clone id or every rule configured through it is dead on arrival. The
+// prediction runs on a copy of the persisted clone map: reading a catalogue
+// must not pin ids for later runs.
+func appliedSkillOptions(info *inspection, state *weaponState, key string, options []SkillOption) []SkillOption {
+	if state == nil || len(state.Applied) == 0 || len(options) == 0 {
+		return options
+	}
+	predicted := copyCloneMap(state.PropertyClones)
+	if err := assignCloneIDs(info, state.Applied, predicted); err != nil {
+		// Broken applied rules surface in render with better context; the raw
+		// numbers are the least surprising thing to show meanwhile.
+		return options
+	}
+	applied := map[int]bool{}
+	for _, rule := range state.Applied[key] {
+		applied[rule.Stage] = true
+	}
+	for index := range options {
+		stage, err := strconv.Atoi(options[index].State)
+		if err != nil {
+			continue
+		}
+		number := ruleStageOf(stage)
+		if !applied[number] {
+			continue
+		}
+		if id := predicted[key][cloneKey(number, options[index].Skill)]; id != "" {
+			options[index].Skill = id
+		}
+	}
+	return options
+}
+
+// comboRuleIDIndex lists the skillproid numbers the client will read for one
+// weapon after the next apply, plus a reverse index from the numbers a saved
+// rule may still carry (pre-clone originals of applied stages, stale clones of
+// stages that no longer carry rules) to their current counterpart. A number
+// that would translate to two different targets is dropped from the reverse
+// index — rewriting those would be a guess.
+func comboRuleIDIndex(weapon Weapon, applied []Rule, cloneIDs map[string]string) (map[string]bool, map[string]string) {
+	ruled := map[int]bool{}
+	for _, rule := range applied {
+		ruled[rule.Stage] = true
+	}
+	effective := map[string]bool{}
+	reverse := map[string]string{}
+	conflict := map[string]bool{}
+	link := func(from, to string) {
+		if from == "" || from == to {
+			return
+		}
+		if previous, seen := reverse[from]; seen && previous != to {
+			conflict[from] = true
+			return
+		}
+		reverse[from] = to
+	}
+	for _, stage := range weapon.Stages {
+		for _, oldID := range stage.PropertyIDs {
+			clone := cloneIDs[cloneKey(stage.Stage, oldID)]
+			if ruled[stage.Stage] && clone != "" {
+				effective[clone] = true
+				link(oldID, clone)
+				continue
+			}
+			effective[oldID] = true
+			if clone != "" {
+				link(clone, oldID)
+			}
+		}
+	}
+	for from := range conflict {
+		delete(reverse, from)
+	}
+	return effective, reverse
+}
+
+// reconcileComboRules keeps the saved combo rules effective against the config
+// the client will read. render renumbers the hit properties of every applied
+// stage, so a rule naming the previous number (or a stale clone of a stage
+// that no longer carries a rule) matches nothing and the client silently
+// ignores it — measured 2026-09-27: a whole black/white list was inert that
+// way. Each reference that maps to exactly one current number is rewritten in
+// place; anything still unknown fails the write with the numbers named, so the
+// author re-picks instead of shipping a rule that does nothing. The clone ids
+// the translation assumes are pinned into state, so the render that follows
+// cannot hand out different ones. Reports whether the stored rules changed, so
+// the caller can re-bake the base.
+func reconcileComboRules(info *inspection, state *weaponState) (bool, error) {
+	if state == nil || len(state.ComboRules) == 0 {
+		return false, nil
+	}
+	predicted := cloneMapOf(state)
+	if err := assignCloneIDs(info, state.Applied, predicted); err != nil {
+		// render reports this with the full context; do not double up here.
+		return false, nil
+	}
+	changed := false
+	for key, set := range state.ComboRules {
+		weapon, ok := weaponByID(info, key)
+		if !ok {
+			continue
+		}
+		effective, reverse := comboRuleIDIndex(weapon, state.Applied[key], predicted[key])
+		dead := map[string]bool{}
+		rewrite := func(value string) string {
+			if value == "" || effective[value] {
+				return value
+			}
+			if target, unique := reverse[value]; unique && effective[target] {
+				changed = true
+				return target
+			}
+			dead[value] = true
+			return value
+		}
+		for index := range set.Max {
+			set.Max[index].Skill = rewrite(set.Max[index].Skill)
+			set.Max[index].ExceedSkillProID = rewrite(set.Max[index].ExceedSkillProID)
+		}
+		for index := range set.Black {
+			set.Black[index].Prev = rewrite(set.Black[index].Prev)
+			set.Black[index].Cur = rewrite(set.Black[index].Cur)
+		}
+		for index := range set.White {
+			set.White[index].Prev = rewrite(set.White[index].Prev)
+			set.White[index].Cur = rewrite(set.White[index].Cur)
+		}
+		if len(dead) > 0 {
+			numbers := make([]string, 0, len(dead))
+			for number := range dead {
+				numbers = append(numbers, number)
+			}
+			sort.Strings(numbers)
+			return false, fmt.Errorf("武器 %s（%s）的连招限制引用了客户端读不到的被动编号：%s。这些招式应用后编号会变化，请打开「连招限制」卡片重新选择后保存", weapon.Name, key, strings.Join(numbers, "、"))
+		}
+		state.ComboRules[key] = set
+	}
+	return changed, nil
+}
+
 // weaponByID finds one inspected weapon by its id.
 func weaponByID(info *inspection, key string) (Weapon, bool) {
 	for _, weapon := range info.weapons {
@@ -425,7 +570,8 @@ func comboRuleView(shipped *archive, info *inspection, state *weaponState, key, 
 		effective = officialRules
 	}
 	weapon, _ := weaponByID(info, key)
-	options := skillOptions(info, weapon)
+	// 下拉必须给「应用之后客户端会读到的编号」，否则选出来的规则写进去就永不匹配。
+	options := appliedSkillOptions(info, state, key, skillOptions(info, weapon))
 	editable := comboRuleEditable(state, key, official, overridden)
 	reason := ""
 	if !editable {
@@ -444,6 +590,7 @@ func comboRuleView(shipped *archive, info *inspection, state *weaponState, key, 
 		"revision":       revision,
 	}
 }
+
 // validateComboRuleSet keeps the editor from writing a rule the client cannot
 // use. Skill identifiers are free-form on purpose: a clone weapon legitimately
 // names its donor's block ids, which live outside its own 2xxx stages, so an
@@ -453,8 +600,11 @@ func validateComboRuleSet(set ComboRuleSet) error {
 		if value == "" {
 			return fmt.Errorf("%s 不能为空", field)
 		}
+		// 九位：编辑器自己发的编号就是这个量级 —— 命中属性克隆号
+		// 900000000+ 起、新增属性节点 800000001+ 起。以前卡在 99999999（八位），
+		// 结果「应用到游戏」后块里真正生效的号，保存时反而被自己拒掉。
 		number, err := strconv.Atoi(value)
-		if err != nil || number < 1000 || number > 99999999 {
+		if err != nil || number < 1000 || number > 999999999 {
 			return fmt.Errorf("%s 必须是动作块被动编号（如 1330310）", field)
 		}
 		return nil

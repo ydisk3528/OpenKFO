@@ -2273,6 +2273,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   '${sizeText(exportResult['size'])} · ${files.length} 个素材',
                   style: const TextStyle(fontSize: 12, color: Colors.black54),
                 ),
+                // 结果卡片是常驻的，必须给一个关闭入口，否则只能靠下一次导出
+                // 或重启 GM 才消失。
+                IconButton(
+                  tooltip: '关闭这张导出结果',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () => setState(() {
+                    exportResult = {};
+                    lastExportMerge = false;
+                  }),
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -2426,6 +2437,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 Text(
                   '${entries.length} 个条目 · ${mergeImportResult['assets']} 个素材',
                   style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+                IconButton(
+                  tooltip: '关闭这张导入结果',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () => setState(() => mergeImportResult = {}),
                 ),
               ],
             ),
@@ -4455,13 +4472,40 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             if (message.isNotEmpty)
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.all(14),
+                padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
                 color: failed ? Colors.red.shade50 : Colors.teal.shade50,
-                child: SelectableText(
-                  message,
-                  style: TextStyle(
-                    color: failed ? Colors.red.shade900 : Colors.teal.shade900,
-                  ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: SelectableText(
+                          message,
+                          style: TextStyle(
+                            color: failed
+                                ? Colors.red.shade900
+                                : Colors.teal.shade900,
+                          ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '关闭提示',
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(
+                        Icons.close,
+                        size: 18,
+                        color: failed
+                            ? Colors.red.shade900
+                            : Colors.teal.shade900,
+                      ),
+                      onPressed: () => setState(() {
+                        message = '';
+                        failed = false;
+                      }),
+                    ),
+                  ],
                 ),
               ),
           ],

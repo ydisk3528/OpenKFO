@@ -45,14 +45,14 @@ type packageFile struct {
 }
 
 type packageResult struct {
-	Path      string           `json:"path"`
-	Name      string           `json:"name"`
-	Size      int64            `json:"size"`
-	SHA256    string           `json:"sha256"`
-	Files     []packageFile    `json:"files"`
-	Missing   []string         `json:"missing"`
-	Config    []string         `json:"config_changes"`
-	Weapons   []map[string]any `json:"weapons"`
+	Path    string           `json:"path"`
+	Name    string           `json:"name"`
+	Size    int64            `json:"size"`
+	SHA256  string           `json:"sha256"`
+	Files   []packageFile    `json:"files"`
+	Missing []string         `json:"missing"`
+	Config  []string         `json:"config_changes"`
+	Weapons []map[string]any `json:"weapons"`
 	// Plans 列出配置包里实际带着方案的武器：配置是整包发的，别的武器
 	// 已保存/已应用的方案也会一起进包，写清楚免得事后猜测。
 	Plans     []map[string]any `json:"plans"`
@@ -87,9 +87,17 @@ func weaponPackage(request Request, client string, folder string, source, base *
 		}
 	}
 
+	// 同一个理由：先翻译/校验连招限制，再渲染，包里才不会带死编号。
+	if changed, err := reconcileComboRules(info, state); err != nil {
+		return nil, err
+	} else if changed {
+		if base, err = applyComboRules(base, state.ComboRules); err != nil {
+			return nil, err
+		}
+	}
 	// 渲染一份"将要发版"的配置。用基线 + 当前编辑集渲染，不要求本地客户端
 	// 处于已同步状态：发版包描述的是设计结果，不该被本机客户端的临时状态卡住。
-	data, err := render(base, items, plans)
+	data, err := render(base, items, plans, cloneMapOf(state))
 	if err != nil {
 		return nil, err
 	}

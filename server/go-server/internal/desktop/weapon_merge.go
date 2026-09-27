@@ -97,7 +97,11 @@ func tabRowOf(text string, column int, value string) (string, bool) {
 	return "", false
 }
 
-var propertyNodePattern = regexp.MustCompile(`(?s)<PropertyItem\b[^>]*>.*?</PropertyItem\s*>`)
+// 出厂自带的 PropertyItem 是**自闭合**写法（`... />`），编辑器克隆出来的却是
+// 成对写法。两条都不能漏：只认成对写法时，出厂节点既导不进包、也不会被当成
+// 「目标端已存在」，于是导入会追加一条同号节点（同号两条 → 客户端取哪条看运气，
+// 我们自己的唯一性校验也会挂）。
+var propertyNodePattern = regexp.MustCompile(`(?s)<PropertyItem\b[^>]*?/>|<PropertyItem\b[^>]*>.*?</PropertyItem\s*>`)
 var propertyIdInPattern = regexp.MustCompile(`SkillProId\s*=\s*"([^"]+)"`)
 
 // propertyNodeText 从 skillproperty.xml 原文里抓指定 SkillProId 的节点原文。
@@ -112,13 +116,179 @@ func propertyNodeText(text, id string) (string, bool) {
 	return "", false
 }
 
+var propertyTagPattern = regexp.MustCompile(`(?s)^\s*<PropertyItem\b[^>]*>`)
+var skillProIdAttrPattern = regexp.MustCompile(`(?i)\bskillproid\s*=\s*"([^"]*)"`)
+var comboSkillAttrPattern = regexp.MustCompile(`(?i)\b(PrevSkill|CurSkill|Skill|ExceedSkillProID)\s*=\s*"([^"]*)"`)
+
+// propertyTagOf 取 PropertyItem 的开始标签并压缩空白。这个节点是「属性式」的 ——
+// 全部字段都在属性里、没有子节点，所以开始标签就代表整条内容，拿来判断
+// 「同一个号是不是同一件事」足够。
+func propertyTagOf(nodeText string) string {
+	match := propertyTagPattern.FindString(nodeText)
+	if match == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(match), " ")
+}
+
+// freshMergePropertyID 在编辑器自建节点的号段里找一个两边都没用到的号。
+func freshMergePropertyID(used map[string]bool) string {
+	for id := 800000001; id <= 899999999; id++ {
+		key := strconv.Itoa(id)
+		if !used[key] {
+			return key
+		}
+	}
+	return ""
+}
+
+// planMergePropertyIDs 决定包里哪些命中属性号必须换掉。
+//
+// 9000000xx 是**机器相关**的：两台客户端各自编辑过之后，同一个号完全可能指向
+// 不同的招式。按号硬合并会出现两种坏结果 ——
+//   - 目标端已有同号节点（内容却是别的招式）时，插入被当成「已存在」跳过，
+//     于是包里的动作块指向了别人的命中属性，连招限制里的号也跟着错位，
+//     黑/白名单等于没配；
+//   - 就算没撞号，只要两边各自编过，动作块引用的号在目标端也未必是同一个意思。
+//
+// 这里给「同号但内容不同」的节点换一个新号，调用方再把动作块与连招限制里的
+// 引用一起改写，导入后包内引用保持自洽。内容完全一致（重复导入同一个包）时
+// 不换号，保持幂等。
+func planMergePropertyIDs(existingText string, manifest *mergeManifest) (map[string]string, error) {
+	existing := map[string]string{}
+	for _, node := range propertyNodePattern.FindAllString(existingText, -1) {
+		if m := propertyIdInPattern.FindStringSubmatch(node); m != nil {
+			if _, seen := existing[m[1]]; !seen {
+				existing[m[1]] = propertyTagOf(node)
+			}
+		}
+	}
+	incoming := map[string]string{}
+	for _, weapon := range manifest.Weapons {
+		for _, node := range weapon.SkillProperties {
+			if m := propertyIdInPattern.FindStringSubmatch(node); m != nil {
+				if _, seen := incoming[m[1]]; !seen {
+					incoming[m[1]] = propertyTagOf(node)
+				}
+			}
+		}
+	}
+	used := map[string]bool{}
+	for id := range existing {
+		used[id] = true
+	}
+	for id := range incoming {
+		used[id] = true
+	}
+	// 内容相同、只是号被换过的节点：上一次导入把 X 换成了 Y，再导同一个包时 X 在
+	// 目标端当然不存在，认不出来就会再插一条（而且号会来回翻）。只在「编辑器自己
+	// 发的号段」里找同内容节点，免得把包里的节点接到出厂数据上。
+	byTag := map[string]string{}
+	for id, tag := range existing {
+		if !editorIssuedID(id) {
+			continue
+		}
+		key := propertyContentKey(tag)
+		if key == "" {
+			continue
+		}
+		if _, taken := byTag[key]; !taken {
+			byTag[key] = id
+		}
+	}
+	remap := map[string]string{}
+	for id, tag := range incoming {
+		current, present := existing[id]
+		if present && current == tag {
+			continue // 同一件事，保持原号（重复导入幂等）
+		}
+		// 目标端已经有「同一条内容」的编辑器自建节点：上一次导入已经把它放进来了
+		// （可能还换过号），直接复用，别再插一条 —— 否则重复导入会越积越多、
+		// 号还会来回翻。只在自建号段里找，所以不会把包里的节点接到出厂数据上。
+		if reused, ok := byTag[propertyContentKey(tag)]; ok {
+			if reused != id {
+				remap[id] = reused
+			}
+			continue
+		}
+		if !present {
+			continue // 目标端没有这个号 → 直接用原号插入
+		}
+		next := freshMergePropertyID(used)
+		if next == "" {
+			return nil, fmt.Errorf("目标客户端命中属性编号空间不足，无法合并")
+		}
+		used[next] = true
+		remap[id] = next
+	}
+	return remap, nil
+}
+
+// editorIssuedID 判断一个编号是否落在编辑器自己发的号段里（自建命中属性
+// 800000001+ 起、克隆号 900000000+ 起）。出厂数据的编号都在更小的量级，
+// 据此可以把「自己上一轮换号留下的节点」和「出厂节点」区分开。
+func editorIssuedID(id string) bool {
+	number, err := strconv.Atoi(id)
+	return err == nil && number >= 800000001 && number <= 999999999
+}
+
+var propertyIdAttrPattern = regexp.MustCompile(`(?i)SkillProId\s*=\s*"[^"]*"`)
+
+// propertyContentKey 抹掉节点标签里的 SkillProId 值，用来判断「同一条属性内容」——
+// 号被换过的同一条属性，只有这样才认得出来。
+func propertyContentKey(nodeText string) string {
+	tag := propertyTagOf(nodeText)
+	if tag == "" {
+		return ""
+	}
+	return propertyIdAttrPattern.ReplaceAllString(tag, `SkillProId="*"`)
+}
+
+// rewritePropertyRefs 把动作块（以及属性节点自己的 SkillProId）里的引用换号。
+// 大小写不敏感，CustomStateSwitch 之类的同名属性一并覆盖。
+func rewritePropertyRefs(text string, remap map[string]string) string {
+	if len(remap) == 0 {
+		return text
+	}
+	return skillProIdAttrPattern.ReplaceAllStringFunc(text, func(match string) string {
+		parts := skillProIdAttrPattern.FindStringSubmatch(match)
+		if next, ok := remap[strings.TrimSpace(parts[1])]; ok {
+			return strings.Replace(match, parts[1], next, 1)
+		}
+		return match
+	})
+}
+
+// rewriteSkillNumbers 把连招限制里的被动编号换号：<MaxComboForSkill Skill>、
+// 黑/白名单的 PrevSkill/CurSkill、以及 ExceedSkillProID。
+func rewriteSkillNumbers(text string, remap map[string]string) string {
+	if len(remap) == 0 {
+		return text
+	}
+	return comboSkillAttrPattern.ReplaceAllStringFunc(text, func(match string) string {
+		parts := comboSkillAttrPattern.FindStringSubmatch(match)
+		if next, ok := remap[strings.TrimSpace(parts[2])]; ok {
+			return strings.Replace(match, parts[2], next, 1)
+		}
+		return match
+	})
+}
+
 // weaponMergeExport 渲染当前编辑集后，只把指定武器自己的配置条目和素材打成
 // 合并包。渲染管线与整包导出一致（基线 + 编辑集），保证包里是「设计结果」。
 func weaponMergeExport(request Request, client string, folder string, base *archive, items []Item, state *weaponState, info *inspection, plans map[string][]Rule) (any, error) {
 	if request.Weapon == 0 && !request.All {
 		return nil, fmt.Errorf("请指定要导出的武器")
 	}
-	data, err := render(base, items, plans)
+	// 合并包要能被别的客户端直接用，连招限制里的编号更得先对齐再渲染。
+	if changed, err := reconcileComboRules(info, state); err != nil {
+		return nil, err
+	} else if changed {
+		if base, err = applyComboRules(base, state.ComboRules); err != nil {
+			return nil, err
+		}
+	}
+	data, err := render(base, items, plans, cloneMapOf(state))
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +554,9 @@ type mergeImportReport struct {
 	Assets    int    `json:"assets"`
 	Backup    string `json:"backup"`
 	Path      string `json:"path"`
+	// Renumbered 列出为了避开目标端已有节点而改过号的命中属性（旧号 → 新号）。
+	// 动作块与连招限制里的引用已同步改写，所以包里的黑/白名单在目标端依然命中。
+	Renumbered map[string]string `json:"renumbered,omitempty"`
 }
 
 // mergePreview 是导入前的差异预览：把包里的武器按「目标客户端里有没有」拆成
@@ -546,6 +719,16 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 	// 一并回报。正常流程是前端先调 weapon_merge_preview 让用户确认再进来。
 	// replace 只能改已有条目，包里用到的动画文件目标端也必须先存在。
 	existing := weaponIDsOf(target)
+	// 命中属性号是机器相关的：目标端已经占用的号必须换掉，否则包里的动作块会
+	// 指向别人的命中属性，连招限制里的黑/白名单跟着错位（等于没配）。
+	propertyText, err := target.text("skillproperty.xml")
+	if err != nil {
+		return nil, err
+	}
+	propertyRemap, err := planMergePropertyIDs(propertyText, manifest)
+	if err != nil {
+		return nil, err
+	}
 	importable := []mergeWeapon{}
 	newWeapons := []map[string]any{}
 	modified := []map[string]any{}
@@ -651,7 +834,7 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		ruleText, err = replaceComboRuleInner(ruleText, number, weapon.ComboRuleInner)
+		ruleText, err = replaceComboRuleInner(ruleText, number, rewriteSkillNumbers(weapon.ComboRuleInner, propertyRemap))
 		if err != nil {
 			return nil, err
 		}
@@ -673,7 +856,8 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 			}
 			replaced, inserted := 0, 0
 			for _, blockText := range weapon.AnimationBlocks[prefix] {
-				animation, replaced, inserted, err = mergeAnimationBlock(animation, blockText)
+				animation, replaced, inserted, err = mergeAnimationBlock(
+					animation, rewritePropertyRefs(blockText, propertyRemap))
 				if err != nil {
 					return nil, fmt.Errorf("%s：%w", name, err)
 				}
@@ -692,7 +876,8 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 			return nil, err
 		}
 		insertedProps := 0
-		for _, nodeText := range weapon.SkillProperties {
+		for _, raw := range weapon.SkillProperties {
+			nodeText := rewritePropertyRefs(raw, propertyRemap)
 			id := ""
 			if m := propertyIdInPattern.FindStringSubmatch(nodeText); m != nil {
 				id = m[1]
@@ -701,6 +886,8 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 				continue
 			}
 			if _, ok := propertyNodeText(propertyText, id); ok {
+				// 已存在且内容一致（planMergePropertyIDs 已经把「同号不同内容」换掉了），
+				// 说明是重复导入，保持目标端原样。
 				continue
 			}
 			propertyText, err = insertPropertyNode(propertyText, nodeText)
@@ -724,6 +911,11 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 	}
 	data, err := target.replace(replacements)
 	if err != nil {
+		return nil, err
+	}
+	// 与「应用到游戏」一致：写盘前紧凑重建。replace 是追加式写入，不重建的话
+	// 每导入一次就往目标配置里留一批旧副本（同一包重复导入还会导致文件字节变化）。
+	if data, err = compactArchive(data); err != nil {
 		return nil, err
 	}
 	merged, err := parseArchive(data)
@@ -792,6 +984,7 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 		Weapons: weapons, Entries: report,
 		New: newWeapons, Modified: modified, Reference: configPath(client),
 		Assets: extracted, Backup: backup, Path: path,
+		Renumbered: propertyRemap,
 	}, nil
 }
 
