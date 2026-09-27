@@ -1,6 +1,8 @@
 package game
 
 import (
+	"time"
+
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
 )
@@ -35,7 +37,10 @@ func validateFosterFinish(r *Room, payload []byte) (string, error) {
 			}
 		}
 		return persistence.StageOutcomeFailed, nil
+	case protocol.StageFinishCounterZero:
+		if pveDeadlineReached(r, time.Now()) {
+			return persistence.StageOutcomeFailed, nil
+		}
 	}
-	// Counter-zero reason 3 remains unknown, never invent a rewarded outcome.
 	return "", nil
 }

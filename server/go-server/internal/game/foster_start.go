@@ -33,6 +33,17 @@ func (c Config) persistedFosterPlan(access persistence.StageAccess, mapID uint32
 		plan.Groups = slices.Clone(plan.Groups)
 		for i := range plan.Groups {
 			plan.Groups[i].Spawns = slices.Clone(plan.Groups[i].Spawns)
+			plan.Groups[i].TriggerBoxes = slices.Clone(plan.Groups[i].TriggerBoxes)
+			if delay := plan.Groups[i].EndAfter; delay != nil {
+				value := *delay
+				plan.Groups[i].EndAfter = &value
+			}
+			for j := range plan.Groups[i].Spawns {
+				if box := plan.Groups[i].Spawns[j].BornBox; box != nil {
+					value := *box
+					plan.Groups[i].Spawns[j].BornBox = &value
+				}
+			}
 		}
 		return &plan, nil
 	}
@@ -45,7 +56,7 @@ func (h *Hub) prepareFosterBattle(r *Room) (*protocol.FosterPlan, error) {
 		return nil, err
 	}
 	mapID := protocol.ReadUint32(r.Request, protocol.RoomMapOffset)
-	plan, err := h.Config.persistedFosterPlan(access, mapID, len(r.Members))
+	plan, err := h.Config.persistedFosterPlan(access, mapID, r.fighterCount())
 	if err != nil {
 		return nil, err
 	}

@@ -16,7 +16,7 @@ func tutorialRequest(p []byte) bool {
 func tutorialRoom(r *Room) bool { return r != nil && tutorialRequest(r.Request) }
 
 func (h *Hub) acknowledgeCreatedRoomJoin(s *Session, r *Room) error {
-	a, err := h.Store.RoleManager().Snapshot(s.UID)
+	a, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ func (h *Hub) completeTutorial(s *Session, ch *Channel, payload []byte) error {
 		r.Members[s.UID].Session != s || !r.Members[s.UID].Input {
 		return nil
 	}
-	result, err := h.Store.RewardManager().CompleteTutorial(s.UID, h.Config.ConfigHash)
+	result, err := storage2_2(h, h.Store.RewardManager().CompleteTutorial, s.UID, h.Config.ConfigHash)
 	if err != nil {
 		// The completion transaction rolls back on invalid reward definitions or
 		// storage failure. Keep the guide session alive so completion can retry;
@@ -100,7 +100,7 @@ func (h *Hub) announceTutorialReward(s *Session) (bool, error) {
 	if s.TitleOffer != 0 && s.TitleOffer != 2 {
 		return false, nil
 	}
-	choices, catalog, err := h.Store.RewardManager().TutorialChoices(s.UID)
+	choices, catalog, err := storage3_1(h, h.Store.RewardManager().TutorialChoices, s.UID)
 	if err != nil || len(choices) == 0 {
 		return false, err
 	}

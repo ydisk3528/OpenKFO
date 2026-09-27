@@ -15,7 +15,7 @@ func (hub *Hub) characterMessage(s *Session, ch *Channel, m protocol.Message) (b
 		return true, protocol.ErrFrame
 	}
 	if m.ID == protocol.MsgCreateCharacter {
-		account, err := hub.Store.RoleManager().CreateCharacter(s.UID, m.Payload, hub.Config.CharacterChoices)
+		account, err := storage2_3(hub, hub.Store.RoleManager().CreateCharacter, s.UID, m.Payload, hub.Config.CharacterChoices)
 		if err != nil {
 			// Current 822BC0 uses WORD >= 0x82 for its generic failure path.
 			// Do not index an undocumented message table or expose DB errors.
@@ -34,7 +34,7 @@ func (hub *Hub) characterMessage(s *Session, ch *Channel, m protocol.Message) (b
 	if len(m.Payload) != 4 {
 		return true, protocol.ErrFrame
 	}
-	account, err := hub.Store.RoleManager().Snapshot(s.UID)
+	account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return true, err
 	}

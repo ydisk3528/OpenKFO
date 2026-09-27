@@ -34,7 +34,7 @@ func (h *Hub) prepareStageBattle(r *Room) (*stageWaves, error) {
 		return nil, err
 	}
 	mapID := protocol.ReadUint32(r.Request, protocol.RoomMapOffset)
-	waves, err := h.Config.persistedStagePlan(access, mapID, len(r.Members))
+	waves, err := h.Config.persistedStagePlan(access, mapID, r.fighterCount())
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (h *Hub) prepareStageBattle(r *Room) (*stageWaves, error) {
 }
 
 func (h *Hub) validateStageRewards(mapID uint32) error {
-	settings, err := h.Store.RewardManager().BattleRewards(h.Config.Settlement)
+	settings, err := storage2_1(h, h.Store.RewardManager().BattleRewards, h.Config.Settlement)
 	if err != nil {
 		return err
 	}

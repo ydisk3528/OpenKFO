@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"kungfu.local/server/internal/protocol"
 	"math"
+	"time"
 )
 
 // The controller emits 20405 immediately before its 4160. Hold the snapshot
@@ -34,7 +35,10 @@ func (h *Hub) fosterPositions(s *Session, ch *Channel, payload []byte) error {
 			continue
 		}
 		if r.Members[row.UID] == nil {
-			return protocol.ErrFrame
+			if _, departed := r.DepartedSlots[row.UID]; !departed {
+				return protocol.ErrFrame
+			}
+			continue // A queued initial snapshot may still contain a departed fighter.
 		}
 		count++
 	}
@@ -68,10 +72,22 @@ func (r *Room) triggerFosterGroups(position [3]float32) {
 		}
 	}
 	for i, group := range r.FosterPlan.Groups {
-		inside := true
-		for axis, v := range position {
-			inside = inside && v >= group.TriggerBox[axis] && v <= group.TriggerBox[axis+3]
+		boxes := group.TriggerBoxes
+		if len(boxes) == 0 {
+			boxes = [][6]float32{group.TriggerBox}
 		}
-		r.FosterTriggered[i] = r.FosterTriggered[i] || inside
+		for _, box := range boxes {
+			inside := true
+			for axis, v := range position {
+				inside = inside && v >= box[axis] && v <= box[axis+3]
+			}
+			if inside && !r.FosterTriggered[i] {
+				r.FosterTriggered[i] = true
+				if r.FosterActivated == nil {
+					r.FosterActivated = map[int]time.Time{}
+				}
+				r.FosterActivated[i] = time.Now()
+			}
+		}
 	}
 }

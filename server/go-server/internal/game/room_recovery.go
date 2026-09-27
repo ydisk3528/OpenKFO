@@ -15,8 +15,9 @@ func (hub *Hub) watchLoading(room *Room) {
 	}
 	serial := room.Serial
 	room.LoadTimer = time.AfterFunc(90*time.Second, func() {
-		hub.Mutex.Lock()
-		defer hub.Mutex.Unlock()
+		hub.lockState()
+		hub.scopeRoom(room)
+		defer hub.unlockState()
 		hub.expireLoading(room, serial)
 	})
 }
@@ -34,7 +35,7 @@ func (hub *Hub) expireLoading(room *Room, serial uint32) {
 func (hub *Hub) recoverRoom(room *Room, reason string) error {
 	peers := make([]roomPeer, 0, len(room.Members))
 	for uid, member := range room.Members {
-		account, err := hub.Store.RoleManager().Snapshot(uid)
+		account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, uid)
 		if err != nil {
 			return err
 		}
@@ -61,6 +62,8 @@ func (hub *Hub) restoreRoom(room *Room, peers []roomPeer, reason string) {
 		room.Series = newTeamSeries(room.Series.limit)
 	}
 	room.FosterPositions = nil
+	room.FosterActivated = nil
+	room.FosterBatchEnded = nil
 	room.FosterPlan = nil
 	room.FosterSpawned = nil
 	room.FosterTriggered = nil

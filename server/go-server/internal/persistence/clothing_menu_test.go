@@ -12,7 +12,7 @@ import (
 )
 
 func TestClothingMenuRepairDoesNotChangeItemTypeOrSlot(t *testing.T) {
-	for kind := byte(12); kind <= 17; kind++ {
+	for _, kind := range []byte{12, 13, 14, 15, 16, 17, 20, 21} {
 		r := make([]byte, 68)
 		r[4] = kind
 		protocol.WriteUint32(r, 5, 121002)

@@ -20,7 +20,7 @@ func (h *Hub) honourRules() (persistence.HonourRules, error) {
 	if h.Store == nil {
 		return rules, rules.Validate()
 	}
-	s, err := h.Store.HonourSettings(rules)
+	s, err := storage2_1(h, h.Store.HonourSettings, rules)
 	return s.Rules, err
 }
 func (h *Hub) honourProfile(s *Session, p []byte) error {
@@ -37,7 +37,7 @@ func (h *Hub) honourProfile(s *Session, p []byte) error {
 		empty()
 		return nil
 	}
-	r, err := h.Store.Honour(protocol.ReadUint64(p, 0), period)
+	r, err := storage2_2(h, h.Store.Honour, protocol.ReadUint64(p, 0), period)
 	if err == sql.ErrNoRows {
 		empty()
 		return nil

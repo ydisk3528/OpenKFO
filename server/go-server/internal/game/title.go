@@ -12,7 +12,7 @@ func (h *Hub) announceTitleReward(s *Session) error {
 	}
 	supported := h.Config.TitleLevels
 	if h.Config.ConfigHash != "" {
-		settings, err := h.Store.TitleManager().TitleSettings()
+		settings, err := storage2_0(h, h.Store.TitleManager().TitleSettings)
 		if err != nil {
 			return err
 		}
@@ -24,11 +24,11 @@ func (h *Hub) announceTitleReward(s *Session) error {
 		return nil
 	}
 	if s.TitleOffer == 0 {
-		if _, err := h.Store.TitleManager().AdvanceTitle(s.UID, supported, h.Config.ConfigHash); err != nil {
+		if _, err := storage2_3(h, h.Store.TitleManager().AdvanceTitle, s.UID, supported, h.Config.ConfigHash); err != nil {
 			return err
 		}
 	}
-	level, choices, err := h.Store.TitleManager().PendingTitleReward(s.UID)
+	level, choices, err := storage3_1(h, h.Store.TitleManager().PendingTitleReward, s.UID)
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,7 @@ func (h *Hub) announceTitleReward(s *Session) error {
 	if s.TitleOffer != 0 && s.TitleOffer != level {
 		return nil
 	}
-	catalog, err := h.Store.RewardManager().WeaponChoiceCatalog(choices)
+	catalog, err := storage2_1(h, h.Store.RewardManager().WeaponChoiceCatalog, choices)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func (h *Hub) claimTitleReward(s *Session, payload []byte) error {
 		s.sendGame(notice("称号领奖未完成，请先取得并打开本人的奖励资格。"))
 		return nil
 	}
-	item, err := h.Store.TitleManager().ClaimTitleReward(s.UID, s.TitleOffer, key)
+	item, err := storage2_3(h, h.Store.TitleManager().ClaimTitleReward, s.UID, s.TitleOffer, key)
 	if err != nil {
 		s.sendGame(notice("称号领奖未完成，请核对奖励资格及所选商品。"))
 		return nil

@@ -27,8 +27,8 @@ func (h *Hub) neutralNPCStatus(w http.ResponseWriter, req *http.Request) {
 	}
 	id, _ := strconv.ParseUint(req.URL.Query().Get("room"), 10, 16)
 	serial, _ := strconv.ParseUint(req.URL.Query().Get("serial"), 10, 32)
-	h.Mutex.Lock()
-	defer h.Mutex.Unlock()
+	h.lockState()
+	defer h.unlockState()
 	r := h.Rooms[uint16(id)]
 	if r == nil || r.Serial != uint32(serial) || r.Stage != "battle" || !r.Type().IsTeam() {
 		http.Error(w, "team battle not active", http.StatusConflict)
@@ -225,8 +225,8 @@ func (h *Hub) neutralNPCFailure(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid reason", 400)
 		return
 	}
-	h.Mutex.Lock()
-	defer h.Mutex.Unlock()
+	h.lockState()
+	defer h.unlockState()
 	r := h.Rooms[uint16(id)]
 	if r == nil || r.Serial != uint32(serial) || r.Stage != "battle" || r.NeutralNPC == nil {
 		http.Error(w, "stale plan", 409)

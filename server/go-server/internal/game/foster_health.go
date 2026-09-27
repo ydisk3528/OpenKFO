@@ -2,6 +2,7 @@ package game
 
 import (
 	"log"
+	"time"
 
 	"kungfu.local/server/internal/protocol"
 )
@@ -36,6 +37,11 @@ func (r *Room) trackFosterHealth(payload []byte) {
 	before := actor.reportedHP
 	actor.reportedHP = min(actor.maximumHP, max(float32(0), before-event.Damage))
 	r.PVEActors[event.Target] = actor
+	r.refreshFosterBatchEnds()
+	if time.Since(r.lastFosterHealthLog) < 5*time.Second {
+		return
+	}
+	r.lastFosterHealthLog = time.Now()
 	log.Printf("怪物血量（按收包累计，非通关依据） foster_health room=%d serial=%d sender=%d target=%d source=%d amount=%g hp_before=%g hp_after=%g max_hp=%g basis=received_events",
 		r.ID, r.Serial, event.Sender, event.Target, event.Source, event.Damage, before, actor.reportedHP, actor.maximumHP)
 }

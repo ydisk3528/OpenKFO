@@ -20,9 +20,19 @@ func TestConfigHashMismatchReachesLoginAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(NewHub(nil, Config{ConfigHash: strings.Repeat("a", 64)}), cert)
+	s := NewServer(NewHub(nil, Config{ConfigHash: strings.Repeat("a", 64), RequiredClientRelease: "new"}), cert)
 	s.hashing <- struct{}{}
 	s.hashing <- struct{}{}
+	// Hold more than the former 80-connection ceiling; admission must still
+	// complete TLS and return a protocol response, rather than dropping EOF.
+	for i := 0; i < 80; i++ {
+		s.connections <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < 80; i++ {
+			<-s.connections
+		}
+	}()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -35,13 +45,14 @@ func TestConfigHashMismatchReachesLoginAdmission(t *testing.T) {
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(parsed)
-	for _, hash := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64), ""} {
+	for _, version := range []string{"", "old", "new"} {
+		hash := strings.Repeat("b", 64)
 		c, err := tls.Dial("tcp", l.Addr().String(), &tls.Config{RootCAs: roots, ServerName: "kk-origin", MinVersion: tls.VersionTLS12})
 		if err != nil {
 			t.Fatal(err)
 		}
 		c.SetDeadline(time.Now().Add(5 * time.Second))
-		if err := json.NewEncoder(c).Encode(tunnel.Frame{Op: "auth", Account: "hashcheck", Password: strings.Repeat("0", 64), ConfigHash: hash}); err != nil {
+		if err := json.NewEncoder(c).Encode(tunnel.Frame{Op: "auth", ClientRelease: version, Account: "hashcheck", Password: strings.Repeat("0", 64), ConfigHash: hash}); err != nil {
 			t.Fatal(err)
 		}
 		data, err := tunnel.ReadFrame(bufio.NewReader(c), 8192)
@@ -53,7 +64,8 @@ func TestConfigHashMismatchReachesLoginAdmission(t *testing.T) {
 		if err := json.Unmarshal(data, &reply); err != nil {
 			t.Fatal(err)
 		}
-		if reply.Error != "busy" {
+		want := "busy"
+		if reply.Error != want {
 			t.Fatalf("hash %q: wanted normal admission busy, got %q", hash, reply.Error)
 		}
 	}

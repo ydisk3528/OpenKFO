@@ -106,3 +106,32 @@ func TestFosterPositionsLoadingBarrier(t *testing.T) {
 		}
 	}
 }
+
+func TestFosterInitialPositionsAfterPeerDeparture(t *testing.T) {
+	h, owner, peer, _ := combatFixture()
+	r := owner.Room
+	r.Request[46] = byte(protocol.FosterMode)
+	r.Stage = "loading"
+	owner.game().Phase = "loading"
+	peer.game().Phase = "loading"
+	p := make([]byte, 183)
+	protocol.WriteUint32(p, 0, protocol.BattleEventFosterPositions)
+	protocol.WriteUint64(p, 4, owner.UID)
+	protocol.WriteUint64(p, 39, owner.UID)
+	protocol.WriteUint64(p, 63, peer.UID)
+	h.leave(peer, false)
+	roomOutputs(t, owner, protocol.MsgPlayerLeftRoom)
+	if err := h.fosterPositions(owner, owner.game(), p); err != nil {
+		t.Fatal("in-flight snapshot rejected", err)
+	}
+	if !bytes.Equal(r.FosterPositions, p) {
+		t.Fatal("snapshot changed")
+	}
+	if err := h.route(owner, owner.game(), protocol.Message{ID: 4160}); err != nil {
+		t.Fatal(err)
+	}
+	roomOutputs(t, owner, 4170, 8071, 4180)
+	if r.Stage != "wait_ready" {
+		t.Fatal("departed player blocks loading")
+	}
+}

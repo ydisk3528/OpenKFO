@@ -21,16 +21,27 @@ import (
 // Hub serializes room transitions. Network writes run outside this lock so a
 // slow player cannot block the other players. Split by room if scale requires it.
 type Hub struct {
+	ioCond               *sync.Cond
+	ioPaused             bool
+	ioScope              *storageScope
+	lastSlowHandleLog    time.Time
+	slowLogMutex         sync.Mutex
+	auditWriteMutex      sync.Mutex
+	releaseVersion       atomic.Value
 	Invites              map[uint64]roomInvitation
 	SecurityLogDirectory string
-	Trace                *log.Logger
-	Mutex                sync.Mutex
-	Store                *persistence.Store
-	Config               Config
-	Rooms                map[uint16]*Room
-	Sessions             map[uint64]*Session
-	NextPlayer           uint32
-	PeerKey              []byte
+	// Configured before serving. Audit jobs must execute serially.
+	SubmitSecurityAudit     func(func()) bool
+	securityAuditRetryAfter time.Time
+	securityAuditSkipped    uint64
+	Trace                   *log.Logger
+	Mutex                   sync.RWMutex
+	Store                   *persistence.Store
+	Config                  Config
+	Rooms                   map[uint16]*Room
+	Sessions                map[uint64]*Session
+	NextPlayer              uint32
+	PeerKey                 []byte
 }
 
 type Channel struct {
@@ -43,6 +54,8 @@ type Channel struct {
 }
 
 type Session struct {
+	ClientRelease        string
+	UpdateNoticeVersion  string
 	RandomWeaponMode     uint32
 	StageViewRequested   bool
 	StageViewReady       bool
@@ -89,25 +102,41 @@ type Session struct {
 	MailAttachment       uint32
 	MailClaimFailed      bool
 	MailDirty            bool
+	refreshBusy          bool
+	refreshRevision      uint64
+	mailRevision         uint64
 }
+
+var errAccountOnline = errors.New("account already online")
+var errServerFull = errors.New("server session capacity reached")
+var errClientPort = errors.New("invalid client port")
 
 func NewHub(store *persistence.Store, config Config) *Hub {
 	return &Hub{Store: store, Config: config, Rooms: map[uint16]*Room{}, Sessions: map[uint64]*Session{}, NextPlayer: 1001}
 }
 
 func (hub *Hub) Attach(account persistence.Account, port uint16, peerReceipt ...string) (*Session, error) {
-	hub.Mutex.Lock()
-	defer hub.Mutex.Unlock()
+	hub.lockState()
+	defer hub.unlockState()
 	if previous := hub.Sessions[account.UID]; previous != nil {
 		select {
 		case <-previous.Done:
+			hub.scopeSession(previous)
 			hub.leave(previous, false)
 			delete(hub.Sessions, account.UID)
 		default:
 		}
 	}
-	if hub.Sessions[account.UID] != nil || len(hub.Sessions) >= 64 || port == 0 {
-		return nil, persistence.ErrDenied
+	if hub.Sessions[account.UID] != nil {
+		return nil, errAccountOnline
+	}
+	if port == 0 {
+		return nil, errClientPort
+	}
+	limit := hub.Config.sessionLimit()
+	if len(hub.Sessions) >= limit {
+		log.Printf("login_capacity_reached sessions=%d limit=%d", len(hub.Sessions), limit)
+		return nil, errServerFull
 	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
@@ -130,6 +159,7 @@ func (hub *Hub) Attach(account persistence.Account, port uint16, peerReceipt ...
 
 func (session *Session) Close() { session.closeOnce.Do(func() { close(session.Done) }) }
 func (session *Session) emit(frame tunnel.Frame) bool {
+	frame.QueuedAt = time.Now()
 	select {
 	case <-session.Done:
 		return false
@@ -164,8 +194,9 @@ func (session *Session) sendGame(message protocol.Message) {
 }
 func (hub *Hub) Detach(session *Session) {
 	defer session.Close()
-	hub.Mutex.Lock()
-	defer hub.Mutex.Unlock()
+	hub.lockState()
+	hub.scopeSession(session)
+	defer hub.unlockState()
 	if hub.Sessions[session.UID] != session {
 		return
 	}
@@ -178,7 +209,7 @@ func (hub *Hub) profileReady(session *Session) error {
 	if !session.TablesReady || channel == nil || channel.Phase != "bootstrap" {
 		return nil
 	}
-	account, err := hub.Store.RoleManager().Snapshot(session.UID)
+	account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 	if err != nil {
 		return err
 	}
@@ -191,7 +222,7 @@ func (hub *Hub) profileReady(session *Session) error {
 		session.send(channel.ID, protocol.Message{ID: protocol.MsgCharacterOptions, Payload: options})
 		return nil
 	}
-	state, err := hub.Store.RandomWeapon(session.UID)
+	state, err := storage2_1(hub, hub.Store.RandomWeapon, session.UID)
 	if err != nil {
 		return err
 	}
@@ -209,8 +240,46 @@ func (hub *Hub) profileReady(session *Session) error {
 // Handle accepts authenticated tunnel operations. UID is bound by Attach;
 // native packet fields can only confirm it, never select another account.
 func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
-	hub.Mutex.Lock()
-	defer hub.Mutex.Unlock()
+	started := time.Now()
+	roomUnlock := hub.lockRoomFrame(session, frame)
+	owner := false
+	if roomUnlock == nil {
+		owner = hub.lockFrame(session, frame)
+	}
+	var scope *storageScope
+	if owner {
+		scope = hub.ioScope
+	}
+	acquired := time.Now()
+	defer func() {
+		finished := time.Now()
+		storageTime := time.Duration(0)
+		if scope != nil {
+			storageTime = scope.ioTime
+		}
+		held := finished.Sub(acquired) - storageTime
+		hub.slowLogMutex.Lock()
+		report := (acquired.Sub(started) > 100*time.Millisecond || held > 100*time.Millisecond || storageTime > 100*time.Millisecond) && finished.Sub(hub.lastSlowHandleLog) > 5*time.Second
+		uid := session.UID
+		if report {
+			hub.lastSlowHandleLog = finished
+		}
+		hub.slowLogMutex.Unlock()
+		if owner {
+			hub.ioScope = nil
+		}
+		if roomUnlock != nil {
+			roomUnlock()
+		} else {
+			hub.Mutex.Unlock()
+		}
+		if report {
+			log.Printf("game_handle_slow uid=%d op=%s channel=%d wait_ms=%d hold_ms=%d storage_ms=%d", uid, frame.Op, frame.Channel, acquired.Sub(started).Milliseconds(), held.Milliseconds(), storageTime.Milliseconds())
+		}
+	}()
+	if frame.Op == "data" || frame.Op == "logout" || frame.Op == "open" || frame.Op == "close" {
+		session.refreshRevision++
+	}
 	if hub.Sessions[session.UID] != session {
 		if session.LoggedOut {
 			// A native 2060 already released this account. The unchanged bridge
@@ -348,7 +417,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			}
 			session.BootstrapChannel = channel.ID
 			channel.Phase = "bootstrap"
-			account, err := hub.Store.RoleManager().Snapshot(session.UID)
+			account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 			if err != nil {
 				return err
 			}
@@ -360,7 +429,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			session.VIPKind = account.VIPKind()
 			session.VIPShopPercent = 0
 			if session.VIPKind >= 2 {
-				session.VIPShopPercent, err = hub.Store.ShopManager().VIPShopPercent(session.UID)
+				session.VIPShopPercent, err = storage2_1(hub, hub.Store.ShopManager().VIPShopPercent, session.UID)
 				if err != nil {
 					return err
 				}
@@ -560,7 +629,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			return protocol.ErrFrame
 		}
 		target := protocol.ReadUint64(payload, 0)
-		account, err := hub.Store.RoleManager().Snapshot(target)
+		account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, target)
 		if err != nil {
 			session.sendGame(notice("未找到该玩家的资料。"))
 			return nil
@@ -576,7 +645,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			return protocol.ErrFrame
 		}
 		target := protocol.ReadUint64(payload, 0)
-		account, err := hub.Store.RoleManager().Snapshot(target)
+		account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, target)
 		if err != nil {
 			session.sendGame(notice("未找到该玩家的武器资料。"))
 			return nil
@@ -589,7 +658,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if (message.ID == 2540 && len(payload) != 1) || (message.ID == 2560 && len(payload) != 9) {
 			return protocol.ErrFrame
 		}
-		directory, own, err := hub.Store.Rankings(session.UID, payload[0])
+		directory, own, err := storage3_2(hub, hub.Store.Rankings, session.UID, payload[0])
 		if err != nil {
 			return err
 		}
@@ -611,7 +680,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if err != nil {
 			return err
 		}
-		oldName, err := hub.Store.RoleManager().Rename(session.UID, nickname)
+		oldName, err := storage2_2(hub, hub.Store.RoleManager().Rename, session.UID, nickname)
 		if err != nil {
 			rejected := make([]byte, 54)
 			protocol.WriteUint32(rejected, 0, 130)
@@ -667,7 +736,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if message.ID == 1500 && len(payload) != 9 {
 			return protocol.ErrFrame
 		}
-		offers, err := hub.Store.ShopManager().Offers(category, variant)
+		offers, err := storage2_2(hub, hub.Store.ShopManager().Offers, category, variant)
 		if err != nil {
 			return err
 		}
@@ -710,7 +779,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			return nil
 		}
 		operationID := fmt.Sprintf("%s:%d:%d", session.Namespace, channel.ID, channel.Sequence)
-		result, err := hub.Store.MailManager().Gift(session.UID, operationID, payload)
+		result, err := storage2_3(hub, hub.Store.MailManager().Gift, session.UID, operationID, payload)
 		if err != nil {
 			// Unknown native 9110 codes index a client string table directly.
 			// Use the established notice path rather than inventing an error code.
@@ -724,6 +793,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if result.Created {
 			if recipient := hub.Sessions[result.Recipient]; recipient != nil {
 				recipient.MailDirty = true
+				recipient.mailRevision++
 				if e := hub.refreshMail(recipient); e != nil {
 					log.Printf("mail_refresh_failed uid=%d", recipient.UID)
 				}
@@ -743,7 +813,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			return nil
 		}
 		operationID := fmt.Sprintf("%s:%d:%d", session.Namespace, channel.ID, channel.Sequence)
-		balance, item, catalog, err := hub.Store.ShopManager().Purchase(session.UID, operationID, payload)
+		balance, item, catalog, err := storage4_3(hub, hub.Store.ShopManager().Purchase, session.UID, operationID, payload)
 		if err != nil {
 			session.sendGame(protocol.Message{ID: 9060, Payload: []byte{130, 0}})
 			log.Printf("purchase_rejected uid=%d", session.UID)
@@ -755,7 +825,11 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		}
 		session.sendGame(protocol.Message{ID: balanceMessage, Payload: protocol.Uint32Bytes(balance)})
 		if len(item) == 68 {
-			session.sendGame(protocol.Message{ID: protocol.MsgItemAdded, Payload: item})
+			messageID := uint32(protocol.MsgItemAdded)
+			if _, exists := session.Inventory[protocol.ReadUint32(item, 0)]; exists {
+				messageID = 2161 // Existing stack: replace its quantity, do not add a second row.
+			}
+			session.sendGame(protocol.Message{ID: messageID, Payload: item})
 			if session.Inventory == nil {
 				session.Inventory = map[uint32][]byte{}
 			}
@@ -779,7 +853,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			}
 		}
 		instance := protocol.ReadUint32(payload, 0)
-		if err := hub.Store.InventoryManager().Discard(session.UID, instance); err != nil {
+		if err := storage1_2(hub, hub.Store.InventoryManager().Discard, session.UID, instance); err != nil {
 			log.Printf("discard_rejected uid=%d instance=%d error=%v", session.UID, instance, err)
 			session.sendGame(notice("丢弃失败：道具不存在、已装备、状态不允许，或是最后一件必需装备。"))
 			return nil
@@ -813,7 +887,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if message.ID == protocol.MsgEquipItem {
 			equip = hub.Store.EquipmentManager().EquipDefault
 		}
-		changed, err := equip(session.UID, protocol.ReadUint32(payload, 0), uint16(slot))
+		changed, err := storage2_3(hub, equip, session.UID, protocol.ReadUint32(payload, 0), uint16(slot))
 		// Ownership and usability are checked against the authenticated owner's
 		// inventory in the equipment transaction. Never acknowledge or broadcast
 		// an item that was not admitted by that check.
@@ -831,7 +905,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if changed == nil {
 			return nil
 		}
-		account, err := hub.Store.RoleManager().Snapshot(session.UID)
+		account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 		if err != nil {
 			return err
 		}
@@ -845,7 +919,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if len(payload) != 0 {
 			return protocol.ErrFrame
 		}
-		account, err := hub.Store.RoleManager().Snapshot(session.UID)
+		account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 		if err != nil {
 			return err
 		}
@@ -874,7 +948,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			// training status. This UID is a read target, not an auth identity.
 			target = protocol.ReadUint64(payload, 0)
 		}
-		minutes, active, err := hub.Store.TrainingManager().Training(target, message.ID == 21002)
+		minutes, active, err := storage3_2(hub, hub.Store.TrainingManager().Training, target, message.ID == 21002)
 		if err != nil {
 			if message.ID == 21000 && err == sql.ErrNoRows {
 				session.sendGame(notice("未找到该玩家的训练资料。"))
@@ -882,11 +956,11 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			}
 			return err
 		}
-		rank, err := hub.Store.TrainingManager().TrainingRank(target)
+		rank, err := storage2_1(hub, hub.Store.TrainingManager().TrainingRank, target)
 		if err != nil {
 			return err
 		}
-		rules, err := hub.Store.TrainingManager().TrainingSettings()
+		rules, err := storage2_0(hub, hub.Store.TrainingManager().TrainingSettings)
 		if err != nil {
 			return err
 		}

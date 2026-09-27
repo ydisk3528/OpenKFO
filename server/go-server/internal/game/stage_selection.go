@@ -13,7 +13,7 @@ func (h *Hub) stageSelection(s *Session, payload []byte) error {
 		return nil
 	}
 	s.StageViewReady = true
-	view, err := h.Store.StagePlayerView(s.UID, h.Config.ConfigHash)
+	view, err := storage2_2(h, h.Store.StagePlayerView, s.UID, h.Config.ConfigHash)
 	if err != nil {
 		s.sendGame(notice("关卡信息读取失败，请稍后重试。"))
 		return nil
@@ -27,13 +27,13 @@ func (h *Hub) stageSelection(s *Session, payload []byte) error {
 
 // All policies come from one DB snapshot. A second policy read could mix an
 // old player's projection with a new force-open setting.
-func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, explicit bool) error {
+func stageSelectionPayload(config Config, view persistence.StagePlayerView) ([]byte, error) {
 	supported := map[uint32]bool{}
 	// Match resolveWithAllowed's implemented modes/capacities, not arbitrary
 	// pool keys. This must not implicitly open unimplemented PVE game logic.
 	for _, mode := range []int{0, 1, 2, 3, 5} {
 		for _, size := range []int{2, 4, 6, 8} {
-			for _, id := range h.Config.Pools[fmt.Sprintf("%d:%d", mode, size)] {
+			for _, id := range config.Pools[fmt.Sprintf("%d:%d", mode, size)] {
 				supported[id] = true
 			}
 		}
@@ -42,7 +42,7 @@ func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, e
 	// the same validators as room creation for at least one supported size.
 	for _, plan := range view.Access.FosterPlans {
 		for players := 1; players <= 8; players++ {
-			if _, err := h.Config.persistedFosterPlan(view.Access, plan.MapID, players); err == nil {
+			if _, err := config.persistedFosterPlan(view.Access, plan.MapID, players); err == nil {
 				supported[plan.MapID] = true
 				break
 			}
@@ -50,7 +50,7 @@ func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, e
 	}
 	for _, plan := range view.Access.WavePlans {
 		for players := 1; players <= 8; players++ {
-			if _, err := h.Config.persistedStagePlan(view.Access, plan.MapID, players); err == nil {
+			if _, err := config.persistedStagePlan(view.Access, plan.MapID, players); err == nil {
 				supported[plan.MapID] = true
 				break
 			}
@@ -69,8 +69,20 @@ func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, e
 	// Reference trial: 21370 -> 21371, reserved DWORD + NUL-terminated map CSV.
 	p, err := (protocol.StageProgress{MapIDs: ids}).Encode()
 	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, explicit bool) error {
+	p, err := stageSelectionPayload(h.Config, view)
+	if err != nil {
 		return err
 	}
+	return sendStageSelectionPayload(s, p, explicit)
+}
+
+func sendStageSelectionPayload(s *Session, p []byte, explicit bool) error {
 	digest := sha256.Sum256(p)
 	if !explicit && s.StageViewRequested && s.StageViewDigest == digest {
 		return nil
@@ -87,7 +99,7 @@ func (h *Hub) refreshStageSelection(s *Session) error {
 	if !s.StageViewReady {
 		return nil
 	}
-	view, err := h.Store.StagePlayerView(s.UID, h.Config.ConfigHash)
+	view, err := storage2_2(h, h.Store.StagePlayerView, s.UID, h.Config.ConfigHash)
 	if err != nil {
 		return err
 	}

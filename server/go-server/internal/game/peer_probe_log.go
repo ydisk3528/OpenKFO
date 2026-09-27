@@ -3,7 +3,6 @@ package game
 import (
 	"encoding/json"
 	"kungfu.local/server/internal/protocol"
-	"log"
 	"time"
 )
 
@@ -24,6 +23,9 @@ type peerProbeObservation struct {
 // Diagnostics never reject a packet or alter forwarding. One pending sample per
 // directed pair bounds memory and avoids matching duplicates or older replies.
 func (h *Hub) observePeerProbe(sender, recipient *Session, body []byte, now time.Time) {
+	if h.Trace == nil {
+		return
+	}
 	// Exact native wire size for a 24-byte payload; do not allocate for other traffic.
 	if len(body) != 48 {
 		return
@@ -92,7 +94,5 @@ func (h *Hub) observePeerProbe(sender, recipient *Session, body []byte, now time
 	}
 	if h.Trace != nil {
 		h.Trace.Print(string(encoded))
-	} else {
-		log.Print(string(encoded))
 	}
 }

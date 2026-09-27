@@ -16,7 +16,7 @@ func (h *Hub) rewardBalances(s *Session, gifts []persistence.LevelGift) error {
 	if !hasCurrency {
 		return nil
 	}
-	gold, tickets, err := h.Store.WalletManager().Balances(s.UID)
+	gold, tickets, err := storage3_1(h, h.Store.WalletManager().Balances, s.UID)
 	if err != nil {
 		return err
 	}

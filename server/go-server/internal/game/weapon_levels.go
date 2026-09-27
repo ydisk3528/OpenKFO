@@ -47,9 +47,9 @@ func (h *Hub) upgradeWeapon(s *Session, ch *Channel, payload []byte) error {
 			s.sendGame(notice("请先重新打开武器升级面板读取配置。"))
 			return nil
 		}
-		result, err = h.Store.ItemManager().UpgradeWeaponConfigured(s.UID, operation, protocol.ReadUint32(payload, 0), s.WeaponRevision)
+		result, err = storage2_4(h, h.Store.ItemManager().UpgradeWeaponConfigured, s.UID, operation, protocol.ReadUint32(payload, 0), s.WeaponRevision)
 	} else {
-		result, err = h.Store.ItemManager().UpgradeWeapon(s.UID, operation, protocol.ReadUint32(payload, 0), rules)
+		result, err = storage2_4(h, h.Store.ItemManager().UpgradeWeapon, s.UID, operation, protocol.ReadUint32(payload, 0), rules)
 	}
 	if err != nil {
 		s.sendGame(notice("升级未执行，请刷新升级配置，并检查武器归属、期限、等级、熟练度和金币。"))
@@ -85,7 +85,7 @@ func (h *Hub) weaponConfig() (Config, uint64, error) {
 	if h.Store == nil {
 		return c, 0, c.ValidateWeaponLevels()
 	}
-	a, err := h.Store.ItemManager().WeaponSettings()
+	a, err := storage2_0(h, h.Store.ItemManager().WeaponSettings)
 	if err != nil {
 		return c, 0, err
 	}

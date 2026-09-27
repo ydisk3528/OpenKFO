@@ -12,7 +12,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 		if len(m.Payload) != 0 {
 			return protocol.ErrFrame
 		}
-		p, err := h.Store.MailManager().Mailbox(s.UID)
+		p, err := storage2_1(h, h.Store.MailManager().Mailbox, s.UID)
 		if err != nil {
 			return err
 		}
@@ -30,7 +30,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 	}
 	if m.ID == 1320 {
 		s.MailPreview, s.MailAttachment, s.MailClaimFailed = 0, 0, false
-		p, err := h.Store.MailManager().ReadMail(s.UID, key)
+		p, err := storage2_2(h, h.Store.MailManager().ReadMail, s.UID, key)
 		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, persistence.ErrDenied) {
 			s.sendGame(notice("邮件不存在或已经删除。"))
 			return nil
@@ -47,7 +47,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 			s.sendGame(notice("请先打开对应邮件详情再领取。"))
 			return nil
 		}
-		_, err := h.Store.MailManager().ClaimMailItem(s.UID, key)
+		_, err := storage2_2(h, h.Store.MailManager().ClaimMailItem, s.UID, key)
 		if errors.Is(err, persistence.ErrDenied) || errors.Is(err, sql.ErrNoRows) {
 			s.sendGame(notice("附件领取失败，邮件已保留。"))
 			return nil
@@ -55,7 +55,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 		if err != nil {
 			return err
 		}
-		account, err := h.Store.RoleManager().Snapshot(s.UID)
+		account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 		if err != nil {
 			return err
 		}
@@ -72,7 +72,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 		s.sendGame(protocol.Message{ID: 1350, Payload: p})
 		return nil
 	}
-	err = h.Store.MailManager().DeleteMail(s.UID, key)
+	err = storage1_2(h, h.Store.MailManager().DeleteMail, s.UID, key)
 	if err != nil && !errors.Is(err, persistence.ErrDenied) {
 		return err
 	}
@@ -95,7 +95,7 @@ func (h *Hub) refreshMail(s *Session) error {
 	if ch == nil || (ch.Phase != "lobby" && ch.Phase != "room") || (s.Room != nil && s.Room.Stage != "room") {
 		return nil
 	}
-	p, err := h.Store.MailManager().Mailbox(s.UID)
+	p, err := storage2_1(h, h.Store.MailManager().Mailbox, s.UID)
 	if err != nil {
 		return err
 	}

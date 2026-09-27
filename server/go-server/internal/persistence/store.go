@@ -53,6 +53,7 @@ type Export struct {
 }
 
 var schema = []string{
+	`CREATE TABLE IF NOT EXISTS gm_notices(id VARCHAR(100) PRIMARY KEY, content VARCHAR(200) NOT NULL, state VARCHAR(20) NOT NULL, recipients INT NOT NULL DEFAULT 0, created BIGINT NOT NULL, INDEX(state,created)) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS banned_words_config(id TINYINT PRIMARY KEY, revision BIGINT UNSIGNED NOT NULL, words JSON NOT NULL)`,
 	// accounts precedes every FK-dependent table; stage_player_unlocks once
 	// referenced it before creation and fresh databases failed with error 1824.
@@ -153,6 +154,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS training_claims(uid BIGINT UNSIGNED NOT NULL,operation_id VARCHAR(128) NOT NULL,started BIGINT NOT NULL,training_rank INT UNSIGNED NOT NULL,revision BIGINT UNSIGNED NOT NULL,experience INT UNSIGNED NOT NULL,PRIMARY KEY(uid,operation_id),UNIQUE KEY training_cycle(uid,started)) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS training_ranks(uid BIGINT UNSIGNED PRIMARY KEY,training_rank INT UNSIGNED NOT NULL DEFAULT 0,FOREIGN KEY(uid) REFERENCES accounts(uid) ON DELETE CASCADE) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS offer_recommendations(catalog_key BIGINT UNSIGNED PRIMARY KEY,enabled BOOLEAN NOT NULL) ENGINE=InnoDB`,
+	`CREATE TABLE IF NOT EXISTS offer_recommendation_order(catalog_key BIGINT UNSIGNED PRIMARY KEY,priority INT NOT NULL DEFAULT 0) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS vip_shop_rules(id TINYINT PRIMARY KEY,revision BIGINT UNSIGNED NOT NULL,rules MEDIUMBLOB NOT NULL) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS vip_shop_rules_audit(revision BIGINT UNSIGNED PRIMARY KEY,before_data MEDIUMBLOB NOT NULL,after_data MEDIUMBLOB NOT NULL,created TIMESTAMP DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS task_progress(uid BIGINT UNSIGNED NOT NULL,task_key SMALLINT UNSIGNED NOT NULL,state TINYINT UNSIGNED NOT NULL,baseline BINARY(116) NOT NULL,rule_revision BIGINT UNSIGNED NOT NULL,rule_data MEDIUMBLOB NULL,PRIMARY KEY(uid,task_key),FOREIGN KEY(uid) REFERENCES accounts(uid) ON DELETE CASCADE) ENGINE=InnoDB`,

@@ -18,9 +18,10 @@ func (h *Hub) startBattleClock(r *Room) {
 		ticker := time.NewTicker(battleClockInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			h.Mutex.Lock()
+			h.lockState()
+			h.scopeRoom(r)
 			active := h.tickBattleClock(r, serial, started, time.Now())
-			h.Mutex.Unlock()
+			h.unlockState()
 			if !active {
 				return
 			}

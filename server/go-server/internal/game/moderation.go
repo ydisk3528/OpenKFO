@@ -14,7 +14,7 @@ func moderationNotice(err error) string {
 	return "文字审核暂不可用，请稍后重试。"
 }
 func (h *Hub) rejectText(s *Session, text string) bool {
-	if err := h.Store.CheckText(text); err != nil {
+	if err := storage1_1(h, h.Store.CheckText, text); err != nil {
 		s.sendGame(notice(moderationNotice(err)))
 		return true
 	}
@@ -37,7 +37,7 @@ func (h *Hub) checkRoomName(request []byte) error {
 	if err != nil {
 		return err
 	}
-	return h.Store.CheckText(text)
+	return storage1_1(h, h.Store.CheckText, text)
 }
 func (h *Hub) rejectRoomName(s *Session, request []byte) bool {
 	if err := h.checkRoomName(request); err != nil {

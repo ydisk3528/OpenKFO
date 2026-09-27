@@ -56,7 +56,7 @@ func (h *Hub) inspectEquipment(s *Session, payload []byte) error {
 		s.sendGame(notice("未找到该玩家的装备。"))
 		return nil
 	}
-	account, err := h.Store.RoleManager().Snapshot(target)
+	account, err := storage2_1(h, h.Store.RoleManager().Snapshot, target)
 	if err != nil {
 		s.sendGame(notice("未找到该玩家的装备。"))
 		return nil

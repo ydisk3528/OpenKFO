@@ -37,7 +37,7 @@ func TestCharacterCreationLocalDatabase(t *testing.T) {
 		}
 	}()
 	for i := uint64(0); i < 3; i++ {
-		a, err := NewAccount(base+i, fmt.Sprintf("cr%d", base+i), "test123456")
+		a, err := NewAccountWithStarterCharacter(base+i, fmt.Sprintf("cr%d", base+i), "test123456")
 		if err != nil {
 			t.Fatal(err)
 		}

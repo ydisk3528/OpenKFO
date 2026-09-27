@@ -141,7 +141,7 @@ func buildFriendList(list []persistence.Friend, online func(uint64) bool) (proto
 }
 
 func (h *Hub) friendSnapshot(s *Session) error {
-	list, err := h.Store.FriendManager().List(s.UID)
+	list, err := storage2_1(h, h.Store.FriendManager().List, s.UID)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func (h *Hub) friends(s *Session, p []byte) error {
 	s.LastFriendRequest = time.Now()
 	if r.op == friendAdd || r.op == friendRemove {
 		var f persistence.Friend
-		f, err = h.Store.FriendManager().Change(s.UID, r.name, r.op == friendAdd)
+		f, err = storage2_3(h, h.Store.FriendManager().Change, s.UID, r.name, r.op == friendAdd)
 		if errors.Is(err, persistence.ErrDenied) {
 			s.sendGame(notice("好友操作失败：请检查角色名、是否添加自己或好友数量已达100人。"))
 			return nil

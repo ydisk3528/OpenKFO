@@ -126,7 +126,8 @@ func applyRoomSettings(request, payload []byte) ([]byte, error) {
 		return nil, protocol.ErrFrame
 	}
 	duration := protocol.ReadUint16(payload, 46)
-	if duration != 120 && duration != 180 && duration != 240 && duration != 300 {
+	unlimitedPractice := duration == 0 && protocol.RoomTypeFromRequest(request) == protocol.FreePractice
+	if !unlimitedPractice && duration != 120 && duration != 180 && duration != 240 && duration != 300 {
 		return nil, protocol.ErrFrame
 	}
 	for _, field := range [][]byte{payload[14:35], payload[35:46]} {

@@ -35,4 +35,10 @@ func TestActiveConfigHashPrecedence(t *testing.T) {
 	if _, err := ActiveConfigHash(config, dir); err == nil {
 		t.Fatal("invalid active release silently fell back")
 	}
+	if err := os.WriteFile(config, []byte(`{"config_hash":"`+base+`","release_version_url":"https://example.com/version/version.json"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ActiveConfigHash(config, dir); err != nil || got != base {
+		t.Fatal("legacy feed overrode OSS-managed configuration", got, err)
+	}
 }

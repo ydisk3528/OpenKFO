@@ -13,51 +13,56 @@ import (
 )
 
 type AdminOffer struct {
-	Recommended *bool `json:"recommended,omitempty"`
+	RecommendationPriority *int32 `json:"recommendation_priority,omitempty"`
+	Recommended            *bool  `json:"recommended,omitempty"`
 	// nil preserves an existing policy for older GM clients; zero is permanent.
 	ServerExpiryDays *uint32 `json:"server_expiry_days,omitempty"`
 	Offer
 	Enabled bool `json:"enabled"`
 }
 type AdminRequest struct {
-	Reason           string               `json:"reason"`
-	BannedWords      *BannedWordsSettings `json:"banned_words,omitempty"`
-	GMVersion        string               `json:"gm_version"`
-	Definition       *ItemDefinition      `json:"definition,omitempty"`
-	StageUnlocks     *StagePlayerUnlocks  `json:"stage_unlocks,omitempty"`
-	WeaponSettings   *WeaponSettings      `json:"weapon_settings,omitempty"`
-	VIPShopSettings  *VIPShopSettings     `json:"vip_shop_settings,omitempty"`
-	TalismanSettings *TalismanSettings    `json:"talisman_settings,omitempty"`
-	Titles           *TitleSettings       `json:"titles,omitempty"`
-	Tasks            *TaskSettings        `json:"tasks,omitempty"`
-	Training         *TrainingSettings    `json:"training,omitempty"`
-	VIPKind          uint32               `json:"vip_kind,omitempty"`
-	Honour           *HonourSettings      `json:"honour,omitempty"`
-	StageAccess      *StageAccess         `json:"stage_access,omitempty"`
-	Instance         uint32               `json:"instance"`
-	ExpiresAt        *int64               `json:"expires_at,omitempty"`
-	Keys             []string             `json:"keys,omitempty"`
-	Currency         string               `json:"currency,omitempty"`
-	Price            int64                `json:"price,omitempty"`
-	Rewards          *RewardRules         `json:"rewards,omitempty"`
-	RewardRevision   uint64               `json:"reward_revision"`
-	Operation        string               `json:"operation"`
-	ID               string               `json:"id"`
-	UID              uint64               `json:"uid"`
-	Mode             string               `json:"mode"`
-	Amount           uint32               `json:"amount"`
-	Records          [][]byte             `json:"records"`
-	Offers           []AdminOffer         `json:"offers"`
-	Enabled          bool                 `json:"enabled"`
-	All              bool                 `json:"all"`
-	Preserve         bool                 `json:"preserve"`
+	RecommendationPriority int32                `json:"recommendation_priority"`
+	PinRecommended         bool                 `json:"pin_recommended"`
+	BatchItems             []BatchGrantItem     `json:"batch_items,omitempty"`
+	UIDs                   []uint64             `json:"uids,omitempty"`
+	Reason                 string               `json:"reason"`
+	BannedWords            *BannedWordsSettings `json:"banned_words,omitempty"`
+	GMVersion              string               `json:"gm_version"`
+	Definition             *ItemDefinition      `json:"definition,omitempty"`
+	StageUnlocks           *StagePlayerUnlocks  `json:"stage_unlocks,omitempty"`
+	WeaponSettings         *WeaponSettings      `json:"weapon_settings,omitempty"`
+	VIPShopSettings        *VIPShopSettings     `json:"vip_shop_settings,omitempty"`
+	TalismanSettings       *TalismanSettings    `json:"talisman_settings,omitempty"`
+	Titles                 *TitleSettings       `json:"titles,omitempty"`
+	Tasks                  *TaskSettings        `json:"tasks,omitempty"`
+	Training               *TrainingSettings    `json:"training,omitempty"`
+	VIPKind                uint32               `json:"vip_kind,omitempty"`
+	Honour                 *HonourSettings      `json:"honour,omitempty"`
+	StageAccess            *StageAccess         `json:"stage_access,omitempty"`
+	Instance               uint32               `json:"instance"`
+	ExpiresAt              *int64               `json:"expires_at,omitempty"`
+	Keys                   []string             `json:"keys,omitempty"`
+	Currency               string               `json:"currency,omitempty"`
+	Price                  int64                `json:"price,omitempty"`
+	Rewards                *RewardRules         `json:"rewards,omitempty"`
+	RewardRevision         uint64               `json:"reward_revision"`
+	Operation              string               `json:"operation"`
+	ID                     string               `json:"id"`
+	UID                    uint64               `json:"uid"`
+	Mode                   string               `json:"mode"`
+	Amount                 uint32               `json:"amount"`
+	Records                [][]byte             `json:"records"`
+	Offers                 []AdminOffer         `json:"offers"`
+	Enabled                bool                 `json:"enabled"`
+	All                    bool                 `json:"all"`
+	Preserve               bool                 `json:"preserve"`
 }
 
 func itemKey(record []byte) string {
 	return fmt.Sprintf("%d:%d", record[4], protocol.ReadUint32(record, 5))
 }
 func (store *Store) adminOffers() ([]AdminOffer, error) {
-	rows, err := store.DB.Query(`SELECT o.catalog_key,o.category,o.variant,o.record,o.grant_record,o.enabled,COALESCE(l.days,0),COALESCE(f.enabled,FALSE) FROM offers o LEFT JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key LEFT JOIN offer_recommendations f ON f.catalog_key=o.catalog_key ORDER BY o.catalog_key`)
+	rows, err := store.DB.Query(`SELECT o.catalog_key,o.category,o.variant,o.record,o.grant_record,o.enabled,COALESCE(l.days,0),COALESCE(f.enabled,FALSE),COALESCE(p.priority,0) FROM offers o LEFT JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key LEFT JOIN offer_recommendations f ON f.catalog_key=o.catalog_key LEFT JOIN offer_recommendation_order p ON p.catalog_key=o.catalog_key ORDER BY o.catalog_key`)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +70,7 @@ func (store *Store) adminOffers() ([]AdminOffer, error) {
 	result := []AdminOffer{}
 	for rows.Next() {
 		var offer AdminOffer
-		if err = rows.Scan(&offer.Key, &offer.Category, &offer.Variant, &offer.Record, &offer.Grant, &offer.Enabled, &offer.ServerExpiryDays, &offer.Recommended); err != nil {
+		if err = rows.Scan(&offer.Key, &offer.Category, &offer.Variant, &offer.Record, &offer.Grant, &offer.Enabled, &offer.ServerExpiryDays, &offer.Recommended, &offer.RecommendationPriority); err != nil {
 			return nil, err
 		}
 		result = append(result, offer)
@@ -74,6 +79,8 @@ func (store *Store) adminOffers() ([]AdminOffer, error) {
 }
 func (store *Store) Admin(request AdminRequest) (any, error) {
 	switch request.Operation {
+	case "grant_batch_create", "grant_batch_get", "grant_batch_list", "grant_batch_send", "grant_batch_send_many":
+		return store.adminGrantBatch(request)
 	case "users_list":
 		return store.UsersList()
 	case "user_ban_save":
@@ -230,12 +237,14 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 			result = append(result, map[string]any{"instance": protocol.ReadUint32(record, 0), "expires_at": deadlines[protocol.ReadUint32(record, 0)], "key": itemKey(record), "slot": protocol.ReadUint16(record, 17), "quantity": protocol.ReadUint16(record, 23), "duration_hours": protocol.ReadUint32(record, 13), "duration_state": protocol.ReadUint32(record, 19)})
 		}
 		return result, nil
+	case "notice_send", "notice_status":
+		return store.AdminNotice(request)
 	case "shop_catalog":
 		return store.adminOffers()
 	case "wallet_update":
 		before, after, err := store.WalletManager().AdjustTickets(request.UID, request.Mode, request.Amount, request.ID)
 		return map[string]any{"before": before, "after": after, "backup": "线上 wallet_operations 审计记录：" + request.ID, "message": fmt.Sprintf("线上点券：%d → %d；重新登录游戏刷新", before, after)}, err
-	case "grant", "shop_save", "shop_batch", "shop_prices", "inventory_expiry", "vip_grant":
+	case "grant", "shop_save", "shop_batch", "shop_prices", "shop_rank", "inventory_expiry", "vip_grant":
 	default:
 		return nil, ErrDenied
 	}
@@ -414,7 +423,7 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 		}
 		result["uid"], result["added"], result["updated"], result["skipped"] = uid, added, updated, skipped
 	} else {
-		rows, readErr := tx.Query(`SELECT o.catalog_key,o.category,o.variant,o.record,o.grant_record,o.enabled,COALESCE(l.days,0),COALESCE(f.enabled,FALSE) FROM offers o LEFT JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key LEFT JOIN offer_recommendations f ON f.catalog_key=o.catalog_key ORDER BY o.catalog_key FOR UPDATE`)
+		rows, readErr := tx.Query(`SELECT o.catalog_key,o.category,o.variant,o.record,o.grant_record,o.enabled,COALESCE(l.days,0),COALESCE(f.enabled,FALSE),COALESCE(p.priority,0) FROM offers o LEFT JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key LEFT JOIN offer_recommendations f ON f.catalog_key=o.catalog_key LEFT JOIN offer_recommendation_order p ON p.catalog_key=o.catalog_key ORDER BY o.catalog_key FOR UPDATE`)
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -423,7 +432,7 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 		byKey := map[uint32]AdminOffer{}
 		for rows.Next() {
 			var offer AdminOffer
-			if err = rows.Scan(&offer.Key, &offer.Category, &offer.Variant, &offer.Record, &offer.Grant, &offer.Enabled, &offer.ServerExpiryDays, &offer.Recommended); err != nil {
+			if err = rows.Scan(&offer.Key, &offer.Category, &offer.Variant, &offer.Record, &offer.Grant, &offer.Enabled, &offer.ServerExpiryDays, &offer.Recommended, &offer.RecommendationPriority); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -442,7 +451,43 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 		}
 		before = existing
 		changed := 0
-		if request.Operation == "shop_prices" {
+		if request.Operation == "shop_rank" {
+			if len(request.Keys) != 1 || request.RecommendationPriority < 0 || request.RecommendationPriority > 1000000 {
+				return nil, ErrDenied
+			}
+			matches := byItem[request.Keys[0]]
+			if len(matches) == 0 {
+				return nil, fmt.Errorf("商品尚未配置销售记录")
+			}
+			priority := request.RecommendationPriority
+			if request.PinRecommended {
+				var maximum int64
+				if err = tx.QueryRow("SELECT COALESCE(MAX(priority),0) FROM offer_recommendation_order").Scan(&maximum); err != nil {
+					return nil, err
+				}
+				if maximum >= 1000000 {
+					return nil, fmt.Errorf("排序值已达上限，请先调低其他商品排序")
+				}
+				priority = int32(maximum + 1)
+			}
+			for _, old := range matches {
+				if old.Grant[4] != protocol.ItemWeapon && old.Grant[4] != 21 {
+					return nil, ErrDenied
+				}
+				if _, err = tx.Exec("INSERT INTO offer_recommendation_order(catalog_key,priority) VALUES(?,?) ON DUPLICATE KEY UPDATE priority=VALUES(priority)", old.Key, priority); err != nil {
+					return nil, err
+				}
+				if request.PinRecommended {
+					if _, err = tx.Exec("INSERT INTO offer_recommendations(catalog_key,enabled) VALUES(?,TRUE) ON DUPLICATE KEY UPDATE enabled=TRUE", old.Key); err != nil {
+						return nil, err
+					}
+				}
+				changed++
+			}
+			result["recommendation_priority"] = priority
+			result["recommendation_priority_saved"] = true
+			result["message"] = "推荐排序已保存；刷新商城查看（服务器需已部署排序支持）"
+		} else if request.Operation == "shop_prices" {
 			if len(request.Keys) < 1 || len(request.Keys) > 4000 || request.Price < 1 || request.Price > 2147483647 || (request.Currency != "gold" && request.Currency != "ticket") {
 				return nil, ErrDenied
 			}
@@ -556,7 +601,7 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 			}
 		}
 		result["changed"] = changed
-		if request.Operation != "shop_prices" {
+		if request.Operation != "shop_prices" && request.Operation != "shop_rank" {
 			result["message"] = fmt.Sprintf("商城已更新 %d 条；请重新登录游戏刷新商品缓存", changed)
 		}
 	}
@@ -584,7 +629,7 @@ func validateAdminOffer(offer AdminOffer) error {
 	if len(offer.Record) != 108 || len(offer.Grant) != 68 || offer.Key == 0 || offer.Category != 10 || offer.Variant != offer.Grant[4] || offer.Record[4] != offer.Grant[4] || protocol.ReadUint32(offer.Record, 5) != protocol.ReadUint32(offer.Grant, 5) || protocol.ReadUint32(offer.Record, 9) != offer.Key {
 		return ErrDenied
 	}
-	if offer.Recommended != nil && *offer.Recommended && offer.Grant[4] != protocol.ItemWeapon {
+	if offer.Recommended != nil && *offer.Recommended && offer.Grant[4] != protocol.ItemWeapon && offer.Grant[4] != 21 {
 		return ErrDenied
 	}
 	gold, tickets := protocol.ReadUint32(offer.Record, 30), protocol.ReadUint32(offer.Record, 38)

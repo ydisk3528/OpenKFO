@@ -11,7 +11,7 @@ func (hub *Hub) consume(session *Session, channel *Channel, message protocol.Mes
 		return nil
 	}
 	payload := message.Payload
-	account, err := hub.Store.RoleManager().Snapshot(session.UID)
+	account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 	if err != nil {
 		return err
 	}
@@ -43,7 +43,7 @@ func (hub *Hub) consume(session *Session, channel *Channel, message protocol.Mes
 	}
 	instance := protocol.ReadUint32(record, 0)
 	signature := append(bytes.Clone(payload[23:27]), payload[39:]...)
-	applied, err := hub.Store.InventoryManager().Consume(session.UID, session.Room.Serial, protocol.ReadUint32(payload, 19), instance, signature, session.ConsumeIntents[instance])
+	applied, err := storage2_6(hub, hub.Store.InventoryManager().Consume, session.UID, session.Room.Serial, protocol.ReadUint32(payload, 19), instance, signature, session.ConsumeIntents[instance])
 	delete(session.ConsumeIntents, instance)
 	if err != nil {
 		return nil
@@ -53,7 +53,7 @@ func (hub *Hub) consume(session *Session, channel *Channel, message protocol.Mes
 		// after the transaction commits, never echo the effect to its sender.
 		hub.broadcast(session.Room, message, session.UID)
 	}
-	account, err = hub.Store.RoleManager().Snapshot(session.UID)
+	account, err = storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 	if err != nil {
 		return err
 	}

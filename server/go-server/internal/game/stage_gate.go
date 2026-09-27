@@ -45,7 +45,7 @@ func (h *Hub) stageGateWithAccess(access persistence.StageAccess, request []byte
 		if s == nil {
 			return nil, persistence.ErrDenied
 		}
-		title, err := h.Store.TitleManager().AccountTitle(s.UID)
+		title, err := storage2_1(h, h.Store.TitleManager().AccountTitle, s.UID)
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +53,7 @@ func (h *Hub) stageGateWithAccess(access persistence.StageAccess, request []byte
 			minimum = title
 		}
 		if needsUnlocks {
-			progress, err := h.Store.StagePlayerUnlocks(s.UID, access.ClientHash)
+			progress, err := storage2_2(h, h.Store.StagePlayerUnlocks, s.UID, access.ClientHash)
 			if err != nil {
 				return nil, err
 			}
@@ -82,6 +82,9 @@ func roomPlayers(room *Room) []*Session {
 func (h *Hub) resolveForPlayers(request []byte, players ...*Session) ([]byte, error) {
 	access, err := h.stageAccess()
 	if err != nil {
+		return nil, err
+	}
+	if err := h.Config.ValidateStageAccess(access); err != nil {
 		return nil, err
 	}
 	allows, err := h.stageGateWithAccess(access, request, players...)

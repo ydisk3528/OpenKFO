@@ -45,7 +45,9 @@ func NewServer(hub *Hub, certificate tls.Certificate) *Server {
 		digest := sha256.Sum256(append([]byte("openkfo/peer-receipt/v1\x00"), key...))
 		hub.PeerKey = digest[:]
 	}
-	return &Server{Hub: hub, Certificate: certificate, connections: make(chan struct{}, 80), hashing: make(chan struct{}, 2), attempts: map[string]loginLimit{}}
+	// Active game connections must not exhaust admission before MaxSessions.
+	// Leave space for launcher probes and reconnecting clients as well.
+	return &Server{Hub: hub, Certificate: certificate, connections: make(chan struct{}, hub.Config.sessionLimit()+128), hashing: make(chan struct{}, 2), attempts: map[string]loginLimit{}}
 }
 
 func (server *Server) Handler() http.Handler {
@@ -203,17 +205,34 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		}
 		return
 	}
+	stageAccess, stageErr := server.Hub.Store.StageAccess()
+	if stageErr != nil {
+		deny("server_config_unavailable")
+		return
+	}
+	if stageErr = server.Hub.Config.ValidateStageAccess(stageAccess); stageErr != nil {
+		log.Printf("login_server_config_mismatch: %v", stageErr)
+		deny("server_config_mismatch")
+		return
+	}
 	session, err := server.Hub.Attach(account, auth.Port, auth.PeerReceipt)
 	if err != nil {
 		if errors.Is(err, errPeerOccupied) {
 			deny("peer_receipt_occupied_restart_game")
 		} else if errors.Is(err, errPeerReceipt) {
 			deny("peer_receipt_invalid_restart_game")
-		} else {
+		} else if errors.Is(err, errAccountOnline) {
 			deny("account_already_online")
+		} else if errors.Is(err, errServerFull) {
+			deny("server_full")
+		} else if errors.Is(err, errClientPort) {
+			deny("invalid_client_port")
+		} else {
+			deny("server_error")
 		}
 		return
 	}
+	session.ClientRelease = auth.ClientRelease
 	defer server.Hub.Detach(session)
 	grant, peer := server.registerDatagramPeer(session)
 	defer server.unregisterDatagramPeer(peer)
@@ -253,17 +272,33 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 	go func() {
 		defer session.Close()
 		defer connection.Close()
+		var lastSlowWrite time.Time
 		for {
 			select {
 			case <-session.Done:
 				return
 			case frame := <-session.Output:
 				session.queuedBytes.Add(-int64(len(frame.Data) + 128))
+				started := time.Now()
+				queued := time.Duration(0)
+				if !frame.QueuedAt.IsZero() {
+					queued = started.Sub(frame.QueuedAt)
+				}
+				report := func() {
+					finished := time.Now()
+					if (queued > 100*time.Millisecond || finished.Sub(started) > 100*time.Millisecond) && finished.Sub(lastSlowWrite) > 5*time.Second {
+						lastSlowWrite = finished
+						log.Printf("game_send_slow uid=%d op=%s queue_ms=%d write_ms=%d remaining=%d", session.UID, frame.Op, queued.Milliseconds(), finished.Sub(started).Milliseconds(), len(session.Output))
+					}
+				}
 				if peer != nil && frame.Op == "udp" && frame.PeerReceipt == "" && peer.send(frame) {
+					report()
 					continue
 				}
 				connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if encoder.Encode(frame) != nil {
+				writeErr := encoder.Encode(frame)
+				report()
+				if writeErr != nil {
 					return
 				}
 			}

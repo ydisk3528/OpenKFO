@@ -9,6 +9,7 @@ type reliableActor struct {
 type reliableExchange struct {
 	Object            uint32
 	Pending, Approved bool
+	Completed         bool // An accepted phase 2, awaiting the object's 8276 action completion.
 	Last              [3]battleSequence
 	Seen              [3]bool
 }
@@ -71,6 +72,7 @@ func (h *Hub) reliableBattleEvent(s *Session, m protocol.Message) error {
 			} // Never replace an outstanding reservation.
 			x.Object, x.Pending, x.Approved = r.ObjectKey, true, false
 		}
+		x.Completed = false
 	case 1:
 		if !x.Pending || x.Object != r.ObjectKey || x.Approved {
 			return nil
@@ -95,6 +97,7 @@ func (h *Hub) reliableBattleEvent(s *Session, m protocol.Message) error {
 			return nil
 		}
 		x.Object, x.Pending, x.Approved = r.ObjectKey, false, false
+		x.Completed = true
 	}
 	x.Seen[phase] = true
 	x.Last[phase] = battleSequence{Sequence: seq, Payload: string(m.Payload)}

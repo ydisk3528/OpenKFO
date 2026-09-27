@@ -25,7 +25,7 @@ type talismanQuote struct {
 
 func (h *Hub) talismanRules() (persistence.TalismanSettings, error) {
 	if h.Store != nil {
-		settings, err := h.Store.ItemManager().TalismanSettings()
+		settings, err := storage2_0(h, h.Store.ItemManager().TalismanSettings)
 		if err != nil || settings.Revision != 0 {
 			return settings, err
 		}
@@ -58,7 +58,7 @@ func (h *Hub) repairTalisman(s *Session, ch *Channel, m protocol.Message) error 
 		reject()
 		return nil
 	}
-	account, err := h.Store.RoleManager().Snapshot(s.UID)
+	account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}
@@ -108,16 +108,16 @@ func (h *Hub) repairTalisman(s *Session, ch *Channel, m protocol.Message) error 
 			reject()
 			return nil
 		}
-		_, err = h.Store.ItemManager().RepairTalismanConfigured(s.UID, operation, instance, quote.Rule, quote.Revision)
+		_, err = storage2_5(h, h.Store.ItemManager().RepairTalismanConfigured, s.UID, operation, instance, quote.Rule, quote.Revision)
 	} else {
-		_, err = h.Store.ItemManager().RepairTalisman(s.UID, operation, instance, rule)
+		_, err = storage2_4(h, h.Store.ItemManager().RepairTalisman, s.UID, operation, instance, rule)
 	}
 	if err != nil {
 		reject()
 		return nil
 	}
 
-	account, err = h.Store.RoleManager().Snapshot(s.UID)
+	account, err = storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}

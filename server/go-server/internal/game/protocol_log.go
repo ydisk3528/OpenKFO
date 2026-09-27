@@ -13,8 +13,9 @@ import (
 	"kungfu.local/server/internal/tunnel"
 )
 
-// Trace is opt-in. Each line is one complete decoded packet, never sampled or
-// truncated. Queued output is distinguished from a successful socket write.
+// Trace is opt-in. Each emitted line is a complete decoded packet. The bounded
+// diagnostic writer may drop lines under congestion and reports that count.
+// Queued output is distinguished from a successful socket write.
 func (s *Session) tracePacket(direction string, channel uint32, transport string, opcode uint32, payload []byte, redact bool) {
 	if s.Trace == nil {
 		return

@@ -110,13 +110,24 @@ func (m *ShopManager) Offers(category, variant int) ([]Offer, error) {
 	query := `SELECT catalog_key,category,variant,record,grant_record FROM offers WHERE enabled=TRUE`
 	args := []any{}
 	if category == protocol.ShopCategoryRecommended {
-		query += ` AND variant=? AND EXISTS(SELECT 1 FROM offer_recommendations f WHERE f.catalog_key=offers.catalog_key AND f.enabled=TRUE)`
+		// The native recommendation tab always requests 255/25, even for
+		// non-weapon recommendations. Preserve each item's actual type and ID.
+		if variant == protocol.ItemWeapon {
+			query += ` AND variant IN (?,21)`
+		} else {
+			query += ` AND variant=?`
+		}
+		query += ` AND EXISTS(SELECT 1 FROM offer_recommendations f WHERE f.catalog_key=offers.catalog_key AND f.enabled=TRUE)`
 		args = append(args, variant)
 	} else if category >= 0 {
 		query += ` AND category=? AND variant=?`
 		args = append(args, category, variant)
 	}
-	query += ` ORDER BY catalog_key LIMIT 4000`
+	if category == protocol.ShopCategoryRecommended {
+		query += ` ORDER BY COALESCE((SELECT p.priority FROM offer_recommendation_order p WHERE p.catalog_key=offers.catalog_key),0) DESC, catalog_key LIMIT 4000`
+	} else {
+		query += ` ORDER BY catalog_key LIMIT 4000`
+	}
 	rows, err := m.store.DB.Query(query, args...)
 	if err != nil {
 		return nil, err

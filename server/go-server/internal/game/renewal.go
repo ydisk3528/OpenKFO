@@ -21,7 +21,7 @@ func (h *Hub) renewalReminders(s *Session, p []byte) error {
 		s.sendGame(notice("续费列表请求格式不正确。"))
 		return nil
 	}
-	rows, err := h.Store.ShopManager().RenewalReminders(s.UID)
+	rows, err := storage2_1(h, h.Store.ShopManager().RenewalReminders, s.UID)
 	if err != nil {
 		s.sendGame(notice("续费列表读取失败，请稍后重试。"))
 		return nil
@@ -39,7 +39,7 @@ func (h *Hub) ignoreRenewalReminder(s *Session, p []byte) error {
 		s.sendGame(notice("忽略续费提醒请求格式不正确。"))
 		return nil
 	}
-	if err := h.Store.ShopManager().IgnoreRenewalReminder(s.UID, protocol.ReadUint32(p, 0)); err != nil {
+	if err := storage1_2(h, h.Store.ShopManager().IgnoreRenewalReminder, s.UID, protocol.ReadUint32(p, 0)); err != nil {
 		s.sendGame(notice("忽略提醒失败，请刷新续费列表。"))
 		return nil
 	}
@@ -49,7 +49,7 @@ func (h *Hub) ignoreRenewalReminder(s *Session, p []byte) error {
 
 func (h *Hub) renewalPrices(s *Session, p []byte) error {
 	s.RenewalQuote = nil
-	quotes, err := h.Store.ShopManager().RenewalQuotes(p[0], protocol.ReadUint32(p, 1))
+	quotes, err := storage2_2(h, h.Store.ShopManager().RenewalQuotes, p[0], protocol.ReadUint32(p, 1))
 	if err != nil {
 		s.sendGame(notice("续费价目读取失败，请稍后重试。"))
 		return nil
@@ -82,7 +82,7 @@ func (h *Hub) renewItem(s *Session, p []byte) error {
 		fail()
 		return nil
 	}
-	out, err := h.Store.ShopManager().RenewItem(s.UID, q.Operation, p, offer)
+	out, err := storage2_4(h, h.Store.ShopManager().RenewItem, s.UID, q.Operation, p, offer)
 	if err != nil {
 		fail()
 		return nil

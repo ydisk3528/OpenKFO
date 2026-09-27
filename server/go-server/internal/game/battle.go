@@ -56,6 +56,9 @@ func (hub *Hub) battleMessage(session *Session, channel *Channel, message protoc
 	if id == neutralNPCReady {
 		return hub.neutralNPCReady(session, message)
 	}
+	if id == 20406 {
+		return hub.pveActorLoaded(session, message)
+	}
 	if id >= seriesInterval && id <= seriesFinish {
 		return hub.seriesEvent(session, message, nil)
 	}

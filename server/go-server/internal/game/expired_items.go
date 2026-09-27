@@ -8,7 +8,7 @@ import (
 func (h *Hub) expiredItems(s *Session) error {
 	// Snapshot processes explicit server deadlines first. Displayed duration
 	// (including 365+) is never interpreted as a server expiration timestamp.
-	account, err := h.Store.RoleManager().Snapshot(s.UID)
+	account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}

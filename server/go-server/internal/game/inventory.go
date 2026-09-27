@@ -114,7 +114,7 @@ func (h *Hub) refreshVIPShop(s *Session) error {
 	rate := uint32(0)
 	if s.VIPKind >= 2 {
 		var err error
-		rate, err = h.Store.ShopManager().VIPShopPercent(s.UID)
+		rate, err = storage2_1(h, h.Store.ShopManager().VIPShopPercent, s.UID)
 		if err != nil {
 			return err
 		}

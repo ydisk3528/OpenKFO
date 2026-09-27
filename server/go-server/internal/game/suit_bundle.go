@@ -17,12 +17,12 @@ func (h *Hub) consumeSuit(s *Session, instance uint32, confirm bool) error {
 			return nil
 		}
 	}
-	parts, err := h.Store.EquipmentManager().OpenSuit(s.UID, instance, h.Config.SuitBundles)
+	parts, err := storage2_3(h, h.Store.EquipmentManager().OpenSuit, s.UID, instance, h.Config.SuitBundles)
 	if err != nil {
 		s.sendGame(notice("套装使用失败：请检查套装是否可用、部件配置是否完整。"))
 		return nil
 	}
-	a, err := h.Store.RoleManager().Snapshot(s.UID)
+	a, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}

@@ -79,8 +79,8 @@ func (w *stageWaves) canSpawn(template uint32) bool {
 	return !w.finished && w.spawned[template] < w.plans[w.index].Monsters[template]
 }
 
-// Until native controller migration is supported, any member leaving aborts
-// the stage. Reuse ordinary leave cleanup, without DB reads or PvP re-entry.
+// A departing controller dissolves the stage; ordinary peers keep playing.
+// Reuse ordinary leave cleanup, without DB reads or PvP re-entry.
 func (h *Hub) abortStageRoom(r *Room) {
 	if r.LoadTimer != nil {
 		r.LoadTimer.Stop()
@@ -90,6 +90,8 @@ func (h *Hub) abortStageRoom(r *Room) {
 	r.PVEActors, r.StageWaves, r.Reliable = nil, nil, nil
 	r.PVEBlocks = nil
 	r.FosterPositions = nil
+	r.FosterActivated = nil
+	r.FosterBatchEnded = nil
 	r.FosterPlan = nil
 	r.FosterSpawned = nil
 	r.FosterTriggered = nil
@@ -98,7 +100,7 @@ func (h *Hub) abortStageRoom(r *Room) {
 	for _, member := range r.Members {
 		s := member.Session
 		h.leave(s, true)
-		s.sendGame(notice("有玩家离开，关卡已中止并返回大厅。本次中止不发放奖励。"))
+		s.sendGame(notice("房主已退出，闯关房间已解散。"))
 	}
 }
 

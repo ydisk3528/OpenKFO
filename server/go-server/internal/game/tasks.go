@@ -16,12 +16,12 @@ func (h *Hub) tasks(s *Session, m protocol.Message) error {
 			s.sendGame(notice("任务查询格式不正确。"))
 			return nil
 		}
-		growth, err := h.Store.RewardManager().BattleRewards(h.Config.Settlement)
+		growth, err := storage2_1(h, h.Store.RewardManager().BattleRewards, h.Config.Settlement)
 		if err != nil {
 			return err
 		}
 		gifts = growth.Rules.LevelGifts
-		awards, err = h.Store.TaskManager().CompleteTasks(s.UID, growth.Rules)
+		awards, err = storage2_2(h, h.Store.TaskManager().CompleteTasks, s.UID, growth.Rules)
 		if err != nil {
 			s.sendGame(notice("任务完成检查未成功，未确认发奖，请稍后刷新。"))
 			return nil
@@ -34,7 +34,7 @@ func (h *Hub) tasks(s *Session, m protocol.Message) error {
 		}
 		action, key = m.ID, r.Key
 	}
-	rows, changed, err := h.Store.TaskManager().TaskTransition(s.UID, action, key)
+	rows, changed, err := storage3_3(h, h.Store.TaskManager().TaskTransition, s.UID, action, key)
 	if err != nil {
 		s.sendGame(notice("任务操作未完成，请检查任务是否开放及前置条件。"))
 		return nil

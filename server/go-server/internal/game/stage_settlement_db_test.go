@@ -11,6 +11,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
+	"kungfu.local/server/internal/tunnel"
 )
 
 func TestStageSettlementRouteLocalDatabase(t *testing.T) {
@@ -232,4 +233,56 @@ func TestStageSettlementRouteLocalDatabase(t *testing.T) {
 		}
 	}
 
+	// One native finish report arrives before the final UDP progress. No second
+	// report is sent: the retained report must settle both players exactly once.
+	for i, mode := range []protocol.RoomType{protocol.FosterMode, protocol.StageAssault} {
+		h.lockState()
+		r.Serial, r.Stage, r.Reports = uint32(5+i), "battle", nil
+		r.Request[46] = byte(mode)
+		r.FosterPlan, r.FosterFinishReported = foster, false
+		r.StageWaves, _ = newStageWaves([]StageWavePlan{{Monsters: map[uint32]uint32{7: 1}}})
+		p = settlementReport(r)
+		for _, member := range r.Members {
+			member.Session.game().Phase = "battle"
+			protocol.WriteUint16(p, int(member.Slot)*87+65, 1)
+		}
+		h.unlockState()
+		exec("UPDATE counters SET value=? WHERE name='battle'", r.Serial)
+		frame := tunnel.Frame{Op: "data", Channel: 1, Data: mustEncodedMessage(t, protocol.Message{ID: 4110, Payload: p})}
+		if err := h.Handle(owner, frame); err != nil {
+			t.Fatal(err)
+		}
+		h.lockState()
+		pending := r.pendingStageFinish != nil && r.Stage == "battle"
+		r.FosterFinishReported = true
+		r.StageWaves.finished, r.StageWaves.index = true, 1
+		h.unlockState()
+		if !pending {
+			t.Fatal("early finish was discarded")
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			h.Mutex.RLock()
+			settled := r.Stage == "settlement"
+			h.Mutex.RUnlock()
+			if settled {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("late progress did not resume settlement")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		for _, member := range []*Session{owner, peer} {
+			roomOutputs(t, member, 4300, 1240, 1230, 4120)
+		}
+		if err := h.Handle(owner, frame); err != nil {
+			t.Fatal(err)
+		}
+		roomOutputs(t, owner)
+		roomOutputs(t, peer)
+		if err := db.QueryRow("SELECT COUNT(*) FROM battle_settlements WHERE serial=?", r.Serial).Scan(&receipts); err != nil || receipts != 1 {
+			t.Fatal("duplicate deferred payout", receipts, err)
+		}
+	}
 }

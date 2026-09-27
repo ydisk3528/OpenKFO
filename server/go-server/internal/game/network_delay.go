@@ -35,8 +35,8 @@ func (h *Hub) beginNetworkProbe(r *Room) {
 		m.Session.sendGame(protocol.Message{ID: protocol.MsgNetworkDelayProbe})
 	}
 	p.timer = time.AfterFunc(networkProbeTimeout, func() {
-		h.Mutex.Lock()
-		defer h.Mutex.Unlock()
+		h.lockState()
+		defer h.unlockState()
 		h.expireNetworkProbe(r, p)
 	})
 }

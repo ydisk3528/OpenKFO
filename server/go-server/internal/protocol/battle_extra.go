@@ -3,6 +3,7 @@ package protocol
 // Native handlers and exact layouts: reference layouts.py at e2c61c4.
 const (
 	BattleEventReborn           uint32 = 8157
+	BattleEventItemComplete     uint32 = 8276 // 828CF0: finish the picked-up object's action.
 	BattleEventDeathCountdown   uint32 = 8278 // 828EB0: remote owner UI only.
 	BattleEventDeathTerminal    uint32 = 8286 // 8285E0: self or controller.
 	BattleEventActionArgument   uint32 = 8125 // 828120

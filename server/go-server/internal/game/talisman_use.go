@@ -53,7 +53,7 @@ func (h *Hub) useTalismanObserved(s *Session, ch *Channel, m protocol.Message, d
 		if !settings.Rules.Enabled || settings.Validate() != nil {
 			return nil
 		}
-		a, err := h.Store.RoleManager().Snapshot(s.UID)
+		a, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 		if err != nil {
 			return err
 		}
@@ -132,7 +132,7 @@ func (h *Hub) useTalismanObserved(s *Session, ch *Channel, m protocol.Message, d
 		sequence = 0
 	}
 	operation := fmt.Sprintf("%s:%d:%d:%d:%d:%d", s.Namespace, room.ID, room.Serial, p.event.Kind, instance, sequence)
-	item, applied, err := h.Store.ItemManager().UseTalisman(s.UID, operation, p.use)
+	item, applied, err := storage3_3(h, h.Store.ItemManager().UseTalisman, s.UID, operation, p.use)
 	if err == persistence.ErrTalismanQuota {
 		out := make([]byte, 8)
 		protocol.WriteUint32(out, 0, instance)

@@ -39,6 +39,8 @@ func ReadFrame(reader *bufio.Reader, maximum int) ([]byte, error) {
 }
 
 type Frame struct {
+	QueuedAt               time.Time      `json:"-"`
+	ClientRelease          string         `json:"client_release,omitempty"`
 	UDP                    *DatagramGrant `json:"udp_transport,omitempty"`
 	LauncherCredentialsKey string         `json:"launcher_credentials_key,omitempty"`
 	PeerReceipt            string         `json:"peer_receipt,omitempty"`

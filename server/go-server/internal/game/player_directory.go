@@ -74,31 +74,37 @@ func (hub *Hub) playerDirectory(s *Session, payload []byte) error {
 			args[i] = id
 		}
 		// Only page summaries: no passwords, inventory or per-player DB round trips.
-		rows, err := hub.Store.DB.Query("SELECT uid,nickname,profile FROM accounts WHERE uid IN ("+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+") ORDER BY uid", args...)
+		reply, err = storage2_0(hub, func() ([]byte, error) {
+			rows, err := hub.Store.DB.Query("SELECT uid,nickname,profile FROM accounts WHERE uid IN ("+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+") ORDER BY uid", args...)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			count := 0
+			for rows.Next() {
+				var uid uint64
+				var name string
+				var profile []byte
+				if err = rows.Scan(&uid, &name, &profile); err != nil {
+					return nil, err
+				}
+				record, err := playerListRecord(uid, name, profile)
+				if err != nil {
+					return nil, err
+				}
+				reply = append(reply, record...)
+				count++
+			}
+			if err = rows.Err(); err != nil {
+				return nil, err
+			}
+			if count != len(ids) {
+				return nil, persistence.ErrDenied
+			}
+			return reply, nil
+		})
 		if err != nil {
 			return err
-		}
-		defer rows.Close()
-		count := 0
-		for rows.Next() {
-			var uid uint64
-			var name string
-			var profile []byte
-			if err = rows.Scan(&uid, &name, &profile); err != nil {
-				return err
-			}
-			record, err := playerListRecord(uid, name, profile)
-			if err != nil {
-				return err
-			}
-			reply = append(reply, record...)
-			count++
-		}
-		if err = rows.Err(); err != nil {
-			return err
-		}
-		if count != len(ids) {
-			return persistence.ErrDenied
 		}
 	}
 	s.sendGame(protocol.Message{ID: protocol.MsgPlayerList, Payload: reply})

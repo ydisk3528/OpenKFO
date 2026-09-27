@@ -63,7 +63,7 @@ func (h *Hub) extendedBattleEvent(s *Session, msg protocol.Message) (bool, error
 		size, context, matrix = 123, 115, 51
 	case protocol.BattleEventProjectileUpdate:
 		size, context, matrix = 119, 111, 47
-	case protocol.BattleEventProjectileRemove:
+	case protocol.BattleEventProjectileRemove, protocol.BattleEventItemComplete:
 		size, context = 51, 43
 	default:
 		return false, nil
@@ -99,6 +99,24 @@ func (h *Hub) extendedBattleEvent(s *Session, msg protocol.Message) (bool, error
 	}
 	var commit func()
 	switch id {
+	case protocol.BattleEventItemComplete:
+		if s.UID != r.Owner {
+			return bad("item completion requires controller")
+		}
+		if r.ReliableSerial != r.Serial {
+			return true, nil
+		}
+		object := protocol.ReadUint32(p, 39)
+		for actor, exchange := range r.Reliable {
+			member := r.Members[actor.UID]
+			if actor.Family == 9000 && exchange.Completed && exchange.Object == object && member != nil && !member.Spectator {
+				commit = func() { exchange.Completed = false }
+				break
+			}
+		}
+		if commit == nil {
+			return true, nil
+		}
 	case protocol.BattleEventPairTransform:
 		first, second := protocol.ReadUint64(p, 39), protocol.ReadUint64(p, 47)
 		selection, ok := r.PairSelections[first]

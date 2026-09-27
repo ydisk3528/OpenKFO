@@ -11,7 +11,7 @@ func compatibleShelfKinds(category, variant int) []byte {
 	case category == 10 && variant == 67:
 		return []byte{60, 31}
 	case category == 67 && variant == 67:
-		return []byte{64, 77, 31, 20, 21, 79}
+		return []byte{64, 77, 31, 20, 21, 79, 74}
 	case category == 19 && variant == 19:
 		return []byte{20, 21}
 	case category == 10 && variant == 30:
@@ -98,7 +98,7 @@ func arrangeCompatibleShelf(category, variant int, kinds []byte, source []shelfO
 			result = append(result, byKind[kind][:n]...)
 			byKind[kind] = byKind[kind][n:]
 		}
-		kinds = []byte{20, 21, 31, 79, 64, 77}
+		kinds = []byte{20, 21, 31, 79, 64, 77, 74}
 	}
 	for _, kind := range kinds {
 		result = append(result, byKind[kind]...)

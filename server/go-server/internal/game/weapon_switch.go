@@ -40,7 +40,7 @@ func (h *Hub) switchWeapon(s *Session, ch *Channel, p []byte) error {
 		return nil
 	}
 	m.WeaponSwitch = weaponSwitchAttempt{r.Serial, now}
-	remaining, err := h.Store.InventoryManager().ConsumeWeaponSwitchCard(s.UID)
+	remaining, err := storage2_1(h, h.Store.InventoryManager().ConsumeWeaponSwitchCard, s.UID)
 	// Measure the guard from completion; a slow transaction must not exhaust it.
 	m.WeaponSwitch.at = time.Now()
 	if err != nil {

@@ -110,7 +110,7 @@ func (hub *Hub) settleReport(session *Session, payload []byte) error {
 	}
 	outcomes := battleOutcomes(room)
 	var rewards []persistence.BattleReward
-	settings, err := hub.Store.RewardManager().BattleRewards(hub.Config.Settlement)
+	settings, err := storage2_1(hub, hub.Store.RewardManager().BattleRewards, hub.Config.Settlement)
 	if err != nil {
 		return fmt.Errorf("settlement rules: %w", err)
 	}
@@ -141,7 +141,9 @@ func (hub *Hub) settleReport(session *Session, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	rewards, err = hub.Store.BattleManager().SettleBattle(room.Serial, reports, rewards, settings.Rules)
+	rewards, err = storage2_0(hub, func() ([]persistence.BattleReward, error) {
+		return hub.Store.BattleManager().SettleBattle(room.Serial, reports, rewards, settings.Rules)
+	})
 	if err != nil {
 		return fmt.Errorf("settlement persistence: %w", err)
 	}
@@ -229,7 +231,7 @@ func settlementPacket(room *Room, rewards []persistence.BattleReward, recipient 
 
 func (hub *Hub) returnFromSettlement(session *Session) error {
 	room := session.Room
-	account, err := hub.Store.RoleManager().Snapshot(session.UID)
+	account, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, session.UID)
 	if err != nil {
 		return err
 	}
@@ -238,7 +240,7 @@ func (hub *Hub) returnFromSettlement(session *Session) error {
 		if uid == session.UID {
 			continue
 		}
-		other, err := hub.Store.RoleManager().Snapshot(uid)
+		other, err := storage2_1(hub, hub.Store.RoleManager().Snapshot, uid)
 		if err != nil {
 			return err
 		}

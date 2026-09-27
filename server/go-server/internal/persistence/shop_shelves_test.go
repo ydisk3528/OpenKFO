@@ -91,6 +91,15 @@ func TestCompatibleGroupOrderingAndDecorDedup(t *testing.T) {
 	}
 }
 
+func TestCardShelfIncludesWeaponSwitchCard(t *testing.T) {
+	source := []shelfOffer{shelfFixture(1, 10, 74, true), shelfFixture(2, 10, 74, false)}
+	protocol.WriteUint32(source[0].Grant, 5, 743001)
+	got := arrangeCompatibleShelf(67, 67, compatibleShelfKinds(67, 67), source)
+	if len(got) != 1 || !reflect.DeepEqual(got[0], source[0].Offer) {
+		t.Fatal("card shelf lost or changed weapon switch sale")
+	}
+}
+
 // Opt in to a disposable database; only connection-local temporary tables are used.
 func TestCompatibleShelvesMySQL(t *testing.T) {
 	dsn := os.Getenv("KK_TEST_MYSQL_DSN")
@@ -112,6 +121,7 @@ func TestCompatibleShelvesMySQL(t *testing.T) {
 	for _, ddl := range []string{
 		`CREATE TEMPORARY TABLE offers(catalog_key INT UNSIGNED PRIMARY KEY,category TINYINT UNSIGNED,variant TINYINT UNSIGNED,record VARBINARY(108),grant_record VARBINARY(68),enabled BOOLEAN)`,
 		`CREATE TEMPORARY TABLE offer_recommendations(catalog_key INT UNSIGNED PRIMARY KEY,enabled BOOLEAN)`,
+		`CREATE TEMPORARY TABLE offer_recommendation_order(catalog_key BIGINT PRIMARY KEY,priority INT)`,
 		`CREATE TEMPORARY TABLE offer_lifetimes(catalog_key INT UNSIGNED PRIMARY KEY,days INT UNSIGNED)`,
 	} {
 		if _, err = s.DB.Exec(ddl); err != nil {

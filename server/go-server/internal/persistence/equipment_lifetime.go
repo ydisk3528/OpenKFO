@@ -112,7 +112,7 @@ func (s *Store) normalizeEquippedInventory(a *Account) error {
 // Equip menu only when that count is zero; nonzero enables Use instead.
 // Clothing is not stackable. Do not touch consumable counts or pet durability.
 func clothingMenuNeedsRepair(record []byte) bool {
-	return len(record) == protocol.InventoryRecordSize && record[protocol.InventoryKindOffset] >= protocol.ItemTop && record[protocol.InventoryKindOffset] <= protocol.ItemGloves && protocol.ReadUint16(record, inventoryMenuCountOffset) != 0
+	return len(record) == protocol.InventoryRecordSize && (record[protocol.InventoryKindOffset] >= protocol.ItemTop && record[protocol.InventoryKindOffset] <= protocol.ItemGloves || record[protocol.InventoryKindOffset] == 20 || record[protocol.InventoryKindOffset] == 21) && protocol.ReadUint16(record, inventoryMenuCountOffset) != 0
 }
 func suitPackageNeedsRepair(record []byte) bool {
 	return len(record) == protocol.InventoryRecordSize && record[protocol.InventoryKindOffset] == protocol.ItemSuit && protocol.ReadUint32(record, inventoryStateOffset) <= inventoryActive && (protocol.ReadUint16(record, inventoryMenuCountOffset) == 0 || protocol.ReadUint16(record, protocol.InventorySlotOffset) != 0)

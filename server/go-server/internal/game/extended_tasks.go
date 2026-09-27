@@ -17,7 +17,7 @@ func (h *Hub) extendedTaskList(s *Session, selected uint32) error {
 	if h.Config.ConfigHash == "" {
 		return nil
 	}
-	states, err := h.Store.TaskManager().ExtendedTasks(s.UID, h.Config.ConfigHash)
+	states, err := storage2_2(h, h.Store.TaskManager().ExtendedTasks, s.UID, h.Config.ConfigHash)
 	if err != nil {
 		return err
 	}
@@ -114,11 +114,11 @@ func (h *Hub) extendedTaskAction(s *Session, m protocol.Message) error {
 		return nil
 	}
 	if m.ID == 6311 || m.ID == 6312 {
-		growth, err := h.Store.RewardManager().BattleRewards(h.Config.Settlement)
+		growth, err := storage2_1(h, h.Store.RewardManager().BattleRewards, h.Config.Settlement)
 		if err != nil {
 			return err
 		}
-		award, err := h.Store.TaskManager().ClaimExtendedTask(s.UID, h.Config.ConfigHash, m.ID, r.Key, growth.Rules)
+		award, err := storage2_5(h, h.Store.TaskManager().ClaimExtendedTask, s.UID, h.Config.ConfigHash, m.ID, r.Key, growth.Rules)
 		if err != nil {
 			s.sendGame(notice("任务奖励未发放：请确认已完成、尚未领取且配置仍开放。"))
 			return nil
@@ -145,7 +145,7 @@ func (h *Hub) extendedTaskAction(s *Session, m protocol.Message) error {
 		s.sendGame(protocol.Message{ID: m.ID - 10, Payload: p})
 		return nil
 	}
-	state, _, err := h.Store.TaskManager().ExtendedTaskTransition(s.UID, h.Config.ConfigHash, m.ID, r.Key)
+	state, _, err := storage3_4(h, h.Store.TaskManager().ExtendedTaskTransition, s.UID, h.Config.ConfigHash, m.ID, r.Key)
 	if err != nil {
 		s.sendGame(notice("每日/新手任务操作未完成，请检查任务配置、客户端版本和当前状态。"))
 		return nil

@@ -7,7 +7,7 @@ const spectatorSlot byte = 8
 const maxSpectators = 8
 
 func (r *Room) observerLimit() int {
-	if r.Type() != protocol.TeamSurvival || len(r.Request) != 81 || r.Request[34] == 0 {
+	if len(r.Request) != 81 || r.Request[34] == 0 {
 		return 0
 	}
 	if r.SpectatorCapacity < 0 {
@@ -123,7 +123,7 @@ func (h *Hub) toggleSpectator(s *Session) error {
 		}
 		next.Spawn = position
 	}
-	account, err := h.Store.RoleManager().Snapshot(s.UID)
+	account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}

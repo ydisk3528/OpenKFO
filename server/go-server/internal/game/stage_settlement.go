@@ -51,8 +51,12 @@ func validateStageFinish(r *Room, payload []byte) (string, error) {
 			}
 		}
 		return persistence.StageOutcomeFailed, nil
+	case protocol.StageFinishCounterZero:
+		if pveDeadlineReached(r, time.Now()) {
+			return persistence.StageOutcomeFailed, nil
+		}
+		return "", nil
 	default:
-		// Counter-zero reason 3 is not silently relabelled as failure/timeout.
 		return "", nil
 	}
 }
@@ -62,9 +66,14 @@ func validateStageFinish(r *Room, payload []byte) (string, error) {
 // This collects a validated finish for the separate PVE payout/result flow.
 func (h *Hub) stageFinishReport(s *Session, payload []byte) error {
 	accepted, err := recordStageFinish(s, payload)
-	if err != nil || !accepted {
+	if err != nil {
 		return err
 	}
+	if !accepted {
+		h.deferStageFinish(s, payload)
+		return nil
+	}
+	s.Room.pendingStageFinish = nil
 	if err = h.settleStage(s.Room); err != nil {
 		log.Printf("stage_settlement_pending room=%d serial=%d error=%v", s.Room.ID, s.Room.Serial, err)
 		s.sendGame(notice("关卡结果已接收，奖励结算暂未完成，服务器将自动重试。"))
@@ -79,8 +88,9 @@ func (h *Hub) retryStageSettlement(r *Room) {
 	}
 	serial := r.Serial
 	r.LoadTimer = time.AfterFunc(10*time.Second, func() {
-		h.Mutex.Lock()
-		defer h.Mutex.Unlock()
+		h.lockState()
+		h.scopeRoom(r)
+		defer h.unlockState()
 		if h.Rooms[r.ID] != r || r.Serial != serial || r.Stage != "finishing" {
 			return
 		}
@@ -130,30 +140,33 @@ func (h *Hub) settleStage(r *Room) error {
 	if outcome == "" {
 		return nil
 	}
-	settings, err := h.Store.RewardManager().BattleRewards(h.Config.Settlement)
+	settings, err := storage2_1(h, h.Store.RewardManager().BattleRewards, h.Config.Settlement)
 	if err != nil {
 		return err
 	}
 	var awards []persistence.BattleReward
 	for uid, m := range r.Members {
+		if m.Spectator {
+			continue
+		}
 		awards = append(awards, persistence.BattleReward{UID: uid, Outcome: outcome, StartLevel: m.BattleLevel})
 	}
 	reports, err := json.Marshal(r.Reports)
 	if err != nil {
 		return err
 	}
-	awards, err = h.Store.BattleManager().SettleStage(r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), reports, awards, settings.Rules)
+	awards, err = storage2_5(h, h.Store.BattleManager().SettleStage, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), reports, awards, settings.Rules)
 	if err != nil {
 		return err
 	}
 	// Construct every result before changing phases or sending any notification.
 	packets := map[uint64]protocol.Message{}
-	for _, a := range awards {
-		p, err := stageResultPacket(r, awards, a.UID)
+	for uid := range r.Members {
+		p, err := stageResultPacket(r, awards, uid)
 		if err != nil {
 			return err
 		}
-		packets[a.UID] = p
+		packets[uid] = p
 	}
 	r.Stage = "settlement"
 	if r.LoadTimer != nil {
@@ -164,6 +177,9 @@ func (h *Hub) settleStage(r *Room) error {
 		m.Session.game().Phase = "settlement"
 		m.Ready, m.Loaded, m.Input = false, false, false
 		m.Session.ConsumeIntents = nil
+		if m.Spectator {
+			m.Session.sendGame(packets[m.Session.UID])
+		}
 	}
 	for _, a := range awards {
 		s := r.Members[a.UID].Session
@@ -178,6 +194,7 @@ func (h *Hub) settleStage(r *Room) error {
 			s.Inventory[protocol.ReadUint32(item, 0)] = bytes.Clone(item)
 		}
 		s.sendGame(packets[a.UID])
+		log.Printf("stage_settled room=%d serial=%d map=%d uid=%d outcome=%s tickets=%d result_message=4120 result_bytes=%d", r.ID, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), a.UID, a.Outcome, a.TicketBalance, len(packets[a.UID].Payload))
 	}
 	return nil
 }
@@ -231,14 +248,14 @@ func stageResultPacket(r *Room, awards []persistence.BattleReward, recipient uin
 // Reuse its ordinary 140-byte header + complete profile serializer. Only the
 // UI result enum is mapped here; persisted PVE outcomes/reward policy stay PVE.
 func fosterResultPacket(r *Room, awards []persistence.BattleReward, recipient uint64) (protocol.Message, error) {
-	if len(awards) == 0 || len(awards) > 6 || len(awards) != len(r.Members) || r.Members[recipient] == nil {
+	if len(awards) == 0 || len(awards) > 6 || len(awards) != r.fighterCount() || r.Members[recipient] == nil {
 		return protocol.Message{}, protocol.ErrFrame
 	}
 	rows := append([]persistence.BattleReward(nil), awards...)
 	seen := map[uint64]bool{}
 	for i := range rows {
 		row := &rows[i]
-		if row.UID == 0 || seen[row.UID] || r.Members[row.UID] == nil || len(row.Profile) != protocol.RoleProfileSize {
+		if row.UID == 0 || seen[row.UID] || r.Members[row.UID] == nil || r.Members[row.UID].Spectator || len(row.Profile) != protocol.RoleProfileSize {
 			return protocol.Message{}, protocol.ErrFrame
 		}
 		seen[row.UID] = true

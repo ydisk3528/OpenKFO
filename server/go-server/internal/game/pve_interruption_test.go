@@ -13,8 +13,8 @@ func TestPVELeaveAbortsWithoutControllerMigration(t *testing.T) {
 }
 
 func testPVELeaveAbortsWithoutControllerMigration(t *testing.T, mode protocol.RoomType) {
-	for _, phase := range []string{"loading", "wait_ready", "battle", "finishing"} {
-		for _, ownerLeaves := range []bool{true, false} {
+	for _, phase := range []string{"room", "loading", "wait_ready", "battle", "finishing", "settlement"} {
+		for _, ownerLeaves := range []bool{true} {
 			h, owner, peer, outsider := combatFixture()
 			r := owner.Room
 			r.Stage = phase
@@ -73,7 +73,7 @@ func TestPVELeaveAfterSettlementKeepsRemainingResult(t *testing.T) {
 }
 
 func testPVELeaveAfterSettlementKeepsRemainingResult(t *testing.T, mode protocol.RoomType) {
-	for _, ownerLeaves := range []bool{true, false} {
+	for _, ownerLeaves := range []bool{false} {
 		h, owner, peer, outsider := combatFixture()
 		r := owner.Room
 		r.Request[46] = byte(mode)
@@ -102,5 +102,59 @@ func testPVELeaveAfterSettlementKeepsRemainingResult(t *testing.T, mode protocol
 		if len(h.Rooms) != 0 {
 			t.Fatal("empty result room retained")
 		}
+	}
+}
+
+func TestPVEPeerLeaveContinues(t *testing.T) {
+	for _, mode := range []protocol.RoomType{protocol.FosterMode, protocol.StageAssault} {
+		for _, phase := range []string{"loading", "wait_ready", "battle", "finishing"} {
+			for _, ack := range []bool{false, true} {
+				h, owner, peer, outsider := combatFixture()
+				r := owner.Room
+				r.Request[46] = byte(mode)
+				r.Stage = phase
+				owner.game().Phase = phase
+				peer.game().Phase = phase
+				r.FosterPlan = &protocol.FosterPlan{}
+				r.PVEActors = map[uint64]pveActor{42: {active: true}}
+				r.StageWaves, _ = newStageWaves([]StageWavePlan{{Monsters: map[uint32]uint32{7: 1}}})
+				r.FosterSpawned = []int{1}
+				r.FosterRetired = []int{0}
+				report := settlementReport(r)
+				h.leave(peer, ack)
+				if ack {
+					roomOutputs(t, peer, protocol.MsgRoomLeft)
+				} else {
+					roomOutputs(t, peer)
+				}
+				roomOutputs(t, owner, protocol.MsgPlayerLeftRoom)
+				roomOutputs(t, outsider)
+				if h.Rooms[r.ID] != r || r.Stage != phase || owner.Room != r || owner.game().Phase != phase || r.Owner != owner.UID || !r.hasPVEActor(42) || r.FosterPlan == nil || r.StageWaves == nil || r.FosterSpawned[0] != 1 {
+					t.Fatal("peer departure destroyed stage", mode, phase)
+				}
+				hp, err := validateBattleReport(r, report)
+				if err != nil || len(hp) != 1 {
+					t.Fatal("departed player blocked report", err)
+				}
+				if _, ok := hp[peer.UID]; ok {
+					t.Fatal("departed player included in result")
+				}
+			}
+		}
+	}
+}
+
+func TestPVEPeerLeaveReleasesInputBarrier(t *testing.T) {
+	h, owner, peer, _ := combatFixture()
+	r := owner.Room
+	r.Request[46] = byte(protocol.FosterMode)
+	r.Stage = "wait_ready"
+	owner.game().Phase = "wait_ready"
+	peer.game().Phase = "wait_ready"
+	r.Members[owner.UID].Input = true
+	h.leave(peer, false)
+	roomOutputs(t, owner, protocol.MsgPlayerLeftRoom, protocol.MsgBattleStarted, 8090)
+	if r.Stage != "battle" || owner.game().Phase != "battle" {
+		t.Fatal("still waiting for departed player")
 	}
 }

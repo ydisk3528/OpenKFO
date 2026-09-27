@@ -57,7 +57,7 @@ func (h *Hub) randomWeapon(s *Session, message protocol.Message) error {
 }
 
 func (h *Hub) selectRandomWeapon(s *Session, mode uint32, reroll bool) error {
-	record, err := h.Store.SelectRandomWeapon(s.UID, mode, h.Config.RandomWeaponTypes, reroll)
+	record, err := storage2_4(h, h.Store.SelectRandomWeapon, s.UID, mode, h.Config.RandomWeaponTypes, reroll)
 	if errors.Is(err, persistence.ErrDenied) {
 		// Restore the actual persisted mode, since the native picker changes its
 		// local mode before sending 21423. Do not grant a fallback weapon.
@@ -73,7 +73,7 @@ func (h *Hub) selectRandomWeapon(s *Session, mode uint32, reroll bool) error {
 		s.sendRandomWeaponOff()
 		return nil
 	}
-	account, err := h.Store.RoleManager().Snapshot(s.UID)
+	account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
 	if err != nil {
 		return err
 	}

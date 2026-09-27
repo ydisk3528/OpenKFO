@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"kungfu.local/server/internal/logqueue"
 	"kungfu.local/server/internal/moderation"
 	"kungfu.local/server/internal/releases"
 	"log"
@@ -22,6 +23,14 @@ import (
 )
 
 func main() {
+	var output *logqueue.Queue
+	fatal := func(v ...any) {
+		log.Print(v...)
+		if output != nil {
+			output.Close(2 * time.Second)
+		}
+		os.Exit(1)
+	}
 	cleanup, err := prepareLocalConsole()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Local server startup failed:", err)
@@ -39,21 +48,30 @@ func main() {
 	bannedWordsPath := flag.String("banned-words", "", "optional UTF-8 seed word list; existing GM settings take precedence")
 	neutralNPC := flag.Bool("experimental-neutral-npc", os.Getenv("OPENKFO_NEUTRAL_NPC_EXPERIMENT") == "1", "enable local team NPC experiment; all clients need the diagnostic EXE")
 	flag.Parse()
+	// Production can disable legacy -trace-protocol without replacing ExecStart.
+	if os.Getenv("OPENKFO_TRACE_PROTOCOL") == "0" {
+		*traceProtocol = false
+	}
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.SetOutput(os.Stdout)
 	if *protocolLog != "" {
 		file, err := os.OpenFile(*protocolLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		defer file.Close()
 		// Persist first: a detached/closed Windows console can reject stdout
 		// writes. That must not prevent the diagnostic file from being written.
 		log.SetOutput(io.MultiWriter(file, os.Stdout))
 	}
+	if *operation == "serve" {
+		output = logqueue.New(log.Writer(), 1024)
+		log.SetOutput(output)
+		defer output.Close(2 * time.Second)
+	}
 	store, err := persistence.Open(os.Getenv("KK_MYSQL_DSN"))
 	if err != nil {
-		log.Fatal("cannot open game database: ", err)
+		fatal("cannot open game database: ", err)
 	}
 	defer store.DB.Close()
 	input := json.NewDecoder(os.Stdin)
@@ -107,37 +125,37 @@ func main() {
 		if *bannedWordsPath != "" {
 			raw, e := os.ReadFile(*bannedWordsPath)
 			if e != nil {
-				log.Fatal(e)
+				fatal(e)
 			}
 			if len(raw) > moderation.MaxFileBytes {
-				log.Fatal("banned words file too large")
+				fatal("banned words file too large")
 			}
 			words = moderation.Parse(string(raw))
 		}
 		if err = store.SeedBannedWords(words); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		var config game.Config
 		encoded, readErr := os.ReadFile(*configPath)
 		if readErr != nil {
-			log.Fatal(readErr)
+			fatal(readErr)
 		}
 		if err = json.Unmarshal(encoded, &config); err != nil || len(config.ConfigHash) != 64 || len(config.Pools) == 0 {
-			log.Fatal("invalid game configuration")
+			fatal("invalid game configuration")
 		}
 		if err = config.ValidateLauncherCredentials(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = config.ValidateTeamSeries(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = config.ValidateLobbies(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if _, err = persistence.CharacterOptions(config.CharacterChoices); err != nil {
-			log.Fatal("character_choices must contain valid native character creation options: ", err)
+			fatal("character_choices must contain valid native character creation options: ", err)
 		}
-		if dir := os.Getenv("OPENKFO_UPDATES_DIR"); dir != "" {
+		if dir := os.Getenv("OPENKFO_UPDATES_DIR"); dir != "" && config.ReleaseVersionURL == "" {
 			release, loadErr := releases.Load(dir, "client")
 			if os.IsNotExist(loadErr) {
 				release, loadErr = releases.Load(dir, "weapons")
@@ -145,36 +163,43 @@ func main() {
 			if loadErr == nil {
 				config.ConfigHash = release.ConfigHash
 			} else if !os.IsNotExist(loadErr) {
-				log.Fatal(loadErr)
+				fatal(loadErr)
 			}
 		}
+		stageAccess, stageErr := store.StageAccess()
+		if stageErr != nil {
+			fatal("读取地图开放配置失败：", stageErr)
+		}
+		if stageErr = config.ValidateStageAccess(stageAccess); stageErr != nil {
+			fatal("启动检查失败：", stageErr)
+		}
 		if err = config.ValidateWeaponLevels(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = config.ValidateHonour(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = config.ValidateTalismanUses(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = config.ValidateTalismanRepairs(); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = store.RewardManager().SeedBattleRewards(config.Settlement); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = store.SeedHonourSettings(persistence.HonourRules(config.Honour)); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = store.ItemManager().SeedTalismanSettings(persistence.TalismanRules{Enabled: len(config.TalismanUses)+len(config.TalismanRepairs) > 0, Uses: config.TalismanUses, Repairs: config.TalismanRepairs}); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if err = store.ItemManager().SeedWeaponSettings(persistence.WeaponRules{Enabled: config.WeaponUpgradeMode != "", Levels: config.WeaponLevels}); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		certificate, certErr := tunnel.Certificate(*certificateDirectory)
 		if certErr != nil {
-			log.Fatal(certErr)
+			fatal(certErr)
 		}
 		if *neutralNPC {
 			for _, endpoint := range []string{*address, *tlsAddress, *udpAddress} {
@@ -183,12 +208,21 @@ func main() {
 				}
 				host, _, splitErr := net.SplitHostPort(endpoint)
 				if splitErr != nil || !net.ParseIP(host).IsLoopback() {
-					log.Fatal("neutral NPC experiment requires loopback listeners")
+					fatal("neutral NPC experiment requires loopback listeners")
 				}
 			}
 			config.ExperimentalNeutralNPC = true
 		}
 		hub := game.NewHub(store, config)
+		audit := logqueue.New(log.Writer(), 256)
+		defer audit.Close(2 * time.Second)
+		hub.SubmitSecurityAudit = audit.Submit
+		hub.SecurityLogDirectory = os.Getenv("OPENKFO_SECURITY_LOG_DIR")
+		if config.ReleaseVersionURL != "" {
+			if err = hub.RefreshRelease(context.Background()); err != nil {
+				fatal("无法确认OSS发布版本：", err)
+			}
+		}
 		if *traceProtocol {
 			hub.Trace = log.New(log.Writer(), "", 0)
 		}
@@ -197,10 +231,12 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		watchLocalMonitor(stop)
+		go hub.RunNotices(ctx)
+		go hub.WatchRelease(ctx)
 		if *udpAddress != "" {
 			closeUDP, udpErr := gameServer.ListenDatagrams(*udpAddress)
 			if udpErr != nil {
-				log.Fatal(udpErr)
+				fatal(udpErr)
 			}
 			defer closeUDP()
 			go func() {
@@ -212,7 +248,7 @@ func main() {
 		if *tlsAddress != "" {
 			listener, listenErr := net.Listen("tcp", *tlsAddress)
 			if listenErr != nil {
-				log.Fatal(listenErr)
+				fatal(listenErr)
 			}
 			go func() {
 				<-ctx.Done()
@@ -247,6 +283,6 @@ func main() {
 		err = fmt.Errorf("unknown operation")
 	}
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 }

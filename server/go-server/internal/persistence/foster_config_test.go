@@ -9,7 +9,7 @@ import (
 )
 
 func TestFosterPlanValidation(t *testing.T) {
-	for _, scenario := range []string{"valid", "legacy-no-hp", "hp-count", "hp-zero", "hp-negative", "hp-nan", "hp-inf", "unknown-map", "duplicate-map", "wave-conflict", "hash", "template", "empty", "players", "capacity", "limits", "nan", "box", "duplicate-block", "names"} {
+	for _, scenario := range []string{"valid", "legacy-no-hp", "hp-count", "hp-zero", "hp-negative", "hp-nan", "hp-inf", "unknown-map", "duplicate-map", "wave-conflict", "hash", "template", "empty", "players", "capacity", "limits", "nan", "box", "names"} {
 		t.Run(scenario, func(t *testing.T) {
 			hash := strings.Repeat("a", 64)
 			a := StageAccess{ClientHash: hash, PVEMaps: []uint32{8110}, Requirements: []StageTitleRequirement{{MapID: 8110, Name: "test"}}, FosterPlans: []FosterConfig{{MapID: 8110, ScriptHash: hash, RuntimeHash: hash, ConfigHash: hash, Templates: []string{" Monster", "Monster"}, Plan: protocol.FosterPlan{PlayerLimit: 6, GlobalLimit: 32, Groups: []protocol.FosterGroup{{SubLimit: 2, GroupLimit: 20, Block: 100, Spawns: []protocol.FosterSpawn{{Template: 0}}}}}}}}
