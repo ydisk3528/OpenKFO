@@ -31,12 +31,13 @@ String publicError(Object error) => error
 
 class GameDirectoryError implements Exception {
   @override
-  String toString() => '请放到游戏目录下\n\n请将完整启动器文件夹中的文件放到游戏目录，与 Data 文件夹同级，然后重新打开。';
+  String toString() => '请选择完整的游戏目录。该目录需要包含 Data/config.spf2，以及 gfxz.dat 或 gfld.dat。';
 }
 
 const legacyClientHash = '98c43be72ac7600b368d4e185d75205376f79e938ea42e4b16ce8f8c4bae827b';
 
 class LauncherService {
+ String? verifiedRelease;
   final String root;
   late Map<String, dynamic> config;
   late Map<String, dynamic> components;
@@ -105,6 +106,7 @@ class LauncherService {
     game = p.normalize(
       p.absolute(root, config['client_directory'] as String? ?? '.'),
     );
+    await restoreGameDirectory();
     if (config['shared_client'] != true) {
       throw Exception('这个版本需要共享客户端配置，请使用配套完整启动器 ZIP。');
     }
@@ -118,10 +120,42 @@ class LauncherService {
     return bytes;
   }
 
-  Future<void> validate() async {
-    if (!await File(p.join(game, 'Data', 'config.spf2')).exists()) {
-      throw GameDirectoryError();
+  File get gameDirectoryFile => File(p.join(root,
+      p.basename(configPath) == 'bridge.local.json'
+          ? 'game-directory.local.json' : 'game-directory.json'));
+
+  static Future<bool> isGameDirectory(String directory) async {
+    Future<bool> present(String name) async {
+      try {
+        final stat = await File(p.join(directory, name)).stat();
+        return stat.type == FileSystemEntityType.file && stat.size > 0;
+      } on FileSystemException { return false; }
     }
+    return await present(p.join('Data', 'config.spf2')) &&
+        (await present('gfxz.dat') || await present('gfld.dat'));
+  }
+
+  Future<void> restoreGameDirectory() async {
+    if (!await gameDirectoryFile.exists()) return;
+    try {
+      final saved = jsonDecode(await gameDirectoryFile.readAsString());
+      if (saved is Map && saved['path'] is String && p.isAbsolute(saved['path'])) {
+        game = p.normalize(saved['path'] as String);
+      }
+    } on FormatException {
+      // Invalid saved selection falls back to the configured directory.
+    }
+  }
+
+  Future<void> selectGameDirectory(String directory) async {
+    final selected = p.normalize(p.absolute(directory));
+    if (!await isGameDirectory(selected)) throw GameDirectoryError();
+    await writeAtomic(gameDirectoryFile.path, utf8.encode(jsonEncode({'path': selected})));
+    game = selected;
+  }
+
+  Future<void> validate() async {
+    if (!await isGameDirectory(game)) throw GameDirectoryError();
   }
 
   String credentialsPath(int number) {
@@ -292,7 +326,7 @@ class LauncherService {
   Future<void> prepare() async {
     await validate();
     await validateClientExecutable();
-    for (final name in ['SDError.dll', 'libssl-1_1.dll', 'libcrypto-1_1.dll']) {
+    for (final name in ['SDError.dll','lqbz.dll', 'libssl-1_1.dll', 'libcrypto-1_1.dll']) {
       await install(name, p.join(game, name));
     }
     // Private 32-bit runtime for the native login DLLs; no system installation.
@@ -351,6 +385,7 @@ class LauncherService {
         final c = Map<String, dynamic>.from(config)
           ..addAll({
             'client_directory': game,
+            'client_release': verifiedRelease ?? const String.fromEnvironment('LAUNCHER_VERSION', defaultValue: 'development'),
             'client_executable': clientExecutable,
             'client_sha256': await fileHash(p.join(game, clientExecutable)),
             'login_port': 18084,
@@ -374,7 +409,7 @@ class LauncherService {
         await writeAtomic(path, utf8.encode(jsonEncode(c)));
         await writeAtomic(
           p.join(shared, 'performance-$n.json'),
-          utf8.encode(jsonEncode({'high_frame_rate': frameMode == FrameMode.high125, 'show_fps': fps})),
+          utf8.encode(jsonEncode({'high_frame_rate': frameMode == FrameMode.high125, 'unlimited_frame_rate': frameMode == FrameMode.configZero, 'show_fps': fps})),
         );
         await Process.start(
           bridgeExecutable,

@@ -59,7 +59,8 @@ func (s *TaskManager) CompleteTasks(uid uint64, growth RewardRules) (r TaskAward
 	if err = growth.Validate(); err != nil {
 		return r, err
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return r, err
 	}

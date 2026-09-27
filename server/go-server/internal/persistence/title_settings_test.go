@@ -18,9 +18,8 @@ func TestTitlePolicyValidation(t *testing.T) {
 		func(a *TitleSettings) { a.Rules.Titles[0].Level = 0 },
 		func(a *TitleSettings) { a.Rules.Titles = append(a.Rules.Titles, a.Rules.Titles[0]) },
 		func(a *TitleSettings) { a.Rules.Titles[0].Matches = 0 },
-		func(a *TitleSettings) { a.Rules.Titles[0].MinPlayerLevel = 151 },
+		func(a *TitleSettings) { a.Rules.Titles[0].MinPlayerLevel = 201 },
 		func(a *TitleSettings) { a.Rules.Titles[0].Wins = 0x80000000 },
-		func(a *TitleSettings) { a.Rules.Titles[0].Choices = nil },
 		func(a *TitleSettings) { a.Rules.Titles[0].Choices = []uint32{7, 7} },
 		func(a *TitleSettings) { a.Rules.Titles[0].Choices = []uint32{0} },
 		func(a *TitleSettings) { a.Rules.Titles[0].Choices = []uint32{1, 2, 3, 4, 5, 6, 7, 8} },
@@ -185,5 +184,12 @@ func TestTitleSettingsLocalDatabase(t *testing.T) {
 	}
 	if _, err = s.TitleManager().TitleSettings(); err == nil {
 		t.Fatal("corrupt enabled rules accepted")
+	}
+}
+
+func TestTitleWithoutRewardAllowed(t *testing.T) {
+	a := TitleSettings{Rules: TitleRules{Enabled: true, Titles: []TitleRule{{Level: 3, Enabled: true, MinPlayerLevel: 10}}}}
+	if err := a.Validate(); err != nil {
+		t.Fatal(err)
 	}
 }

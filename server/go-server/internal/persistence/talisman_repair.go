@@ -33,7 +33,8 @@ func (s *ItemManager) repairTalisman(uid uint64, operation string, instance uint
 	if uid == 0 || instance == 0 || operation == "" || len(operation) > 128 || !rule.Valid() {
 		return nil, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

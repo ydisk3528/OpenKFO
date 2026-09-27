@@ -13,10 +13,10 @@ const rewardColumns = <String, String>{
 List<Map<String, int>> rewardRows(Map<String, dynamic> rules) {
   final raw = rules['levels'] as List?;
   return List.generate(
-    150,
+    200,
     (i) => {
       for (final key in rewardColumns.keys)
-        key: raw != null
+        key: raw != null && i < raw.length
             ? (raw[i][key] as num).toInt()
             : key == 'level'
             ? i + 1
@@ -26,11 +26,11 @@ List<Map<String, int>> rewardRows(Map<String, dynamic> rules) {
 }
 
 void validateRewardRows(List<Map<String, int>> rows, {bool growth = false}) {
-  if (rows.length != 150) throw const FormatException('必须有 150 行');
-  for (var i = 0; i < 150; i++) {
+  if (rows.length != 200) throw const FormatException('必须有 200 行');
+  for (var i = 0; i < 200; i++) {
     final row = rows[i];
     if (row['level'] != i + 1) {
-      throw const FormatException('等级必须依次为 1–150，不可缺失或重复');
+      throw const FormatException('等级必须依次为 1–200，不可缺失或重复');
     }
     for (final key in rewardColumns.keys.skip(1)) {
       final n = row[key];
@@ -40,11 +40,11 @@ void validateRewardRows(List<Map<String, int>> rows, {bool growth = false}) {
         throw FormatException('第 ${i + 1} 级 ${rewardColumns[key]} 数值超出范围');
       }
     }
-    if (i == 149 && row['next_experience'] != 0) {
-      throw const FormatException('150 级已满级，升级经验必须为 0');
+    if (i == 199 && row['next_experience'] != 0) {
+      throw const FormatException('200 级已满级，升级经验必须为 0');
     }
-    if (growth && i < 149 && row['next_experience'] == 0) {
-      throw const FormatException('启用升级前需填写 1–149 级升级经验');
+    if (growth && i < 199 && row['next_experience'] == 0) {
+      throw const FormatException('启用升级前需填写 1–199 级升级经验');
     }
   }
 }
@@ -127,7 +127,7 @@ List<String> rewardDiff(
       '自动升级：${target['growth_enabled'] == true} → ${source['growth_enabled'] == true}',
     );
   }
-  for (var i = 0; i < 150; i++) {
+  for (var i = 0; i < 200; i++) {
     for (final k in rewardColumns.keys.skip(1)) {
       if (a[i][k] != b[i][k]) {
         result.add('${i + 1} 级 ${rewardColumns[k]}：${b[i][k]} → ${a[i][k]}');

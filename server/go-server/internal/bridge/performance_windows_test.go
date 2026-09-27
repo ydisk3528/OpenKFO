@@ -147,3 +147,55 @@ func fmtBool(high bool) string {
 	}
 	return "normal"
 }
+
+// Exercise real process memory without running any game instruction or login.
+func TestUnlimitedFrameSuspendedClient(t *testing.T) {
+	image := os.Getenv("KFO_FRAME_PATCH_IMAGE")
+	if image == "" {
+		t.Skip("requires local gfxz.dat fixture")
+	}
+	before, err := os.ReadFile(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"normal", "mode1", "mode2", "normal_again"} {
+		t.Run(mode, func(t *testing.T) {
+			app, _ := syscall.UTF16PtrFromString(image)
+			dir, _ := syscall.UTF16PtrFromString(filepath.Dir(image))
+			si := syscall.StartupInfo{}
+			si.Cb = uint32(unsafe.Sizeof(si))
+			var pi syscall.ProcessInformation
+			if err := syscall.CreateProcess(app, nil, nil, nil, false, 4, nil, dir, &si, &pi); err != nil {
+				t.Fatal(err)
+			}
+			defer syscall.CloseHandle(pi.Process)
+			defer syscall.CloseHandle(pi.Thread)
+			defer syscall.TerminateProcess(pi.Process, 0)
+			_, err := patchPerformance(pi.Process, PerformanceOptions{HighFrameRate: mode == "mode1", UnlimitedFrameRate: mode == "mode2"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range unlimitedFramePatches {
+				want := p.original
+				if mode == "mode2" {
+					want = p.replacement
+				}
+				got := make([]byte, len(want))
+				var n uintptr
+				ok, _, err := kernel.NewProc("ReadProcessMemory").Call(uintptr(pi.Process), p.address, uintptr(unsafe.Pointer(&got[0])), uintptr(len(got)), uintptr(unsafe.Pointer(&n)))
+				if ok == 0 || n != uintptr(len(got)) || !bytes.Equal(got, want) {
+					t.Fatalf("%x: %x %v", p.address, got, err)
+				}
+			}
+			if mode == "mode2" {
+				if _, err := patchPerformance(pi.Process, PerformanceOptions{UnlimitedFrameRate: true}); err == nil {
+					t.Fatal("unexpected bytes must be rejected")
+				}
+			}
+		})
+	}
+	after, err := os.ReadFile(image)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("disk image changed", err)
+	}
+}

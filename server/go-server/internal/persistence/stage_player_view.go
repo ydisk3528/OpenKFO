@@ -24,7 +24,9 @@ func (s *Store) StagePlayerView(uid uint64, clientHash string) (StagePlayerView,
 	if err := (StagePlayerUnlocks{UID: uid, ClientHash: clientHash}).Validate(); err != nil {
 		return out, err
 	}
-	tx, err := s.DB.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	ctx, cancel := context.WithTimeout(context.Background(), transactionTimeout)
+	defer cancel()
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return out, err
 	}

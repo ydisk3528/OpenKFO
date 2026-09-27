@@ -25,7 +25,7 @@ func validateLevelGifts(gifts []LevelGift) error {
 	total := 0
 	for _, g := range gifts {
 		if g.Level < 2 || g.Level > MaxRoleLevel || seen[g.Level] || (len(g.Items) == 0 && g.Gold == 0 && g.Tickets == 0) || len(g.Items) > MaxItemsPerLevelGift {
-			return fmt.Errorf("升级礼包需不重复的2–150级，每级至少设置一项奖励，最多8件物品")
+			return fmt.Errorf("升级礼包需不重复的2–200级，每级至少设置一项奖励，最多8件物品")
 		}
 		if err := (RewardBundle{Items: g.Items, Gold: g.Gold, Tickets: g.Tickets}).Validate(); err != nil {
 			return err

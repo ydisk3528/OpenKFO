@@ -2,16 +2,19 @@ package persistence
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"kungfu.local/server/internal/protocol"
+	"time"
 )
 
 func (m *ShopManager) Purchase(uid uint64, operationID string, request []byte) (uint32, []byte, []byte, error) {
 	if len(request) != 169 || len(operationID) == 0 || len(operationID) > 128 {
 		return 0, nil, nil, ErrDenied
 	}
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -48,7 +51,7 @@ func (m *ShopManager) Purchase(uid uint64, operationID string, request []byte) (
 		return 0, nil, nil, err
 	}
 	var catalog, item []byte
-	err = transaction.QueryRow(`SELECT record,grant_record FROM offers WHERE catalog_key=? AND enabled=TRUE FOR UPDATE`, protocol.ReadUint32(request, 145)).Scan(&catalog, &item)
+	err = transaction.QueryRow(`SELECT record,grant_record FROM offers WHERE catalog_key=? AND enabled=TRUE LOCK IN SHARE MODE`, protocol.ReadUint32(request, 145)).Scan(&catalog, &item)
 	if err != nil || len(catalog) != 108 || len(item) != 68 {
 		return 0, nil, nil, ErrDenied
 	}
@@ -82,7 +85,7 @@ func (m *ShopManager) Purchase(uid uint64, operationID string, request []byte) (
 		return 0, nil, nil, ErrDenied
 	}
 	var lifetime uint32
-	err = transaction.QueryRow(`SELECT days FROM offer_lifetimes WHERE catalog_key=? FOR UPDATE`, protocol.ReadUint32(request, 145)).Scan(&lifetime)
+	err = transaction.QueryRow(`SELECT days FROM offer_lifetimes WHERE catalog_key=? LOCK IN SHARE MODE`, protocol.ReadUint32(request, 145)).Scan(&lifetime)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, nil, nil, err
 	}
@@ -128,7 +131,9 @@ func (m *ShopManager) Offers(category, variant int) ([]Offer, error) {
 	} else {
 		query += ` ORDER BY catalog_key LIMIT 4000`
 	}
-	rows, err := m.store.DB.Query(query, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := m.store.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

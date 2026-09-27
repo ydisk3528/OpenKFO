@@ -68,7 +68,7 @@ func TestLevelGiftsIndependentDefinitionsLocalDatabase(t *testing.T) {
 	original := bytes.Clone(profile)
 	exec("INSERT INTO accounts(uid,profile) VALUES(1,?)", profile)
 	rules := RewardRules{GrowthEnabled: true, LevelGifts: []LevelGift{{Level: 2, Items: []uint32{7}, Gold: 20, Tickets: 10}, {Level: 3, Items: []uint32{8}, Gold: 30, Tickets: 15}}}.Normalized()
-	for i := 0; i < 149; i++ {
+	for i := 0; i < int(MaxRoleLevel)-1; i++ {
 		rules.Levels[i].NextExperience = 100
 	}
 	grant := func() (items [][]byte, e error) {
@@ -143,7 +143,7 @@ func TestLevelGiftsIndependentDefinitionsLocalDatabase(t *testing.T) {
 	}
 }
 func TestLevelGiftRules(t *testing.T) {
-	for _, gifts := range [][]LevelGift{{{Level: 1, Items: []uint32{7}}}, {{Level: 151, Items: []uint32{7}}}, {{Level: 2, Items: []uint32{0}}}, {{Level: 2, Items: []uint32{7}}, {Level: 2, Items: []uint32{8}}}} {
+	for _, gifts := range [][]LevelGift{{{Level: 1, Items: []uint32{7}}}, {{Level: 201, Items: []uint32{7}}}, {{Level: 2, Items: []uint32{0}}}, {{Level: 2, Items: []uint32{7}}, {Level: 2, Items: []uint32{8}}}} {
 		if validateLevelGifts(gifts) == nil {
 			t.Fatal("invalid gift accepted", gifts)
 		}

@@ -8,7 +8,8 @@ import (
 // ConsumeWeaponSwitchCard locks the account shared by equipment and GM writes.
 // Switching the active hand is battle state; equipment slots stay unchanged.
 func (m *InventoryManager) ConsumeWeaponSwitchCard(uid uint64) (uint32, error) {
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return 0, err
 	}

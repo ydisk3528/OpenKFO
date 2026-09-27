@@ -58,6 +58,11 @@ func startSharedClient(image string, options PerformanceOptions) (*ownedClient, 
 	if err = patchGPKCompatibility(pi.Process); err != nil {
 		return nil, err
 	}
+	if patchErr := patchClientMemory(pi.Process, shopOrnamentsFilterAddress, shopOrnamentsFilterOriginal, shopOrnamentsFilterAll); patchErr != nil {
+		log.Printf("client_shop_ornaments_compatibility skipped: %v", patchErr)
+	} else {
+		log.Printf("client_shop_ornaments_compatibility pid=%d mode=all_subtypes", pi.ProcessId)
+	}
 	counter, err := patchPerformance(pi.Process, options)
 	if err != nil {
 		return nil, err
@@ -76,9 +81,17 @@ func startSharedClient(image string, options PerformanceOptions) (*ownedClient, 
 		return nil, err
 	}
 	child := &ownedClient{process: p, identity: identity, fpsCounter: counter, done: make(chan struct{})}
-	go func() { p.Wait(); close(child.done) }()
+	go func() {
+		state, waitErr := p.Wait()
+		if waitErr != nil {
+			log.Printf("shared_client_exit pid=%d wait_error=%v", identity.PID, waitErr)
+		} else {
+			log.Printf("shared_client_exit pid=%d exit_code=0x%08X", identity.PID, uint32(state.ExitCode()))
+		}
+		close(child.done)
+	}()
 	ok = true
-	log.Printf("client_performance pid=%d high_frame_rate=%t show_fps=%t", identity.PID, options.HighFrameRate, options.ShowFPS)
+	log.Printf("client_performance pid=%d high_frame_rate=%t unlimited_frame_rate=%t show_fps=%t", identity.PID, options.HighFrameRate, options.UnlimitedFrameRate, options.ShowFPS)
 	log.Printf("shared_client_started pid=%d mutex=%q", identity.PID, replacement[:9])
 	log.Printf("client_loading_thread_cleanup pid=%d mode=natural_exit", identity.PID)
 	log.Printf("client_gpk_compatibility pid=%d mode=factory_and_callbacks_disabled", identity.PID)

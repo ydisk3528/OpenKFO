@@ -32,6 +32,48 @@ class ComponentTestLauncher extends LauncherService {
 }
 
 void main() {
+  testWidgets('mandatory update has no skip or dismiss path', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: LauncherPage(preview: true)));
+    final dynamic state = tester.state(find.byType(LauncherPage));
+    final Future<void> dialog = state.requireUpdate('必须更新', '更新说明');
+    await tester.pumpAndSettle();
+    expect(find.text('立即更新'), findsOneWidget);
+    expect(find.textContaining('跳过'), findsNothing);
+    await tester.tapAt(const Offset(1, 1));
+    await tester.pumpAndSettle();
+    expect(find.text('立即更新'), findsOneWidget);
+    await tester.tap(find.text('立即更新'));
+    await tester.pumpAndSettle();
+    await dialog;
+  });
+
+  test('directory selection requires real game files and persists only valid choices', () async {
+    final root = await Directory.systemTemp.createTemp('directory-choice-');
+    addTearDown(() => root.delete(recursive: true));
+    final game = await Directory('${root.path}/arbitrary-name').create();
+    final service = LauncherService(root.path)..game = root.path;
+    expect(await LauncherService.isGameDirectory(game.path), false);
+    await writeAtomic('${game.path}/Data/config.spf2', [1]);
+    expect(await LauncherService.isGameDirectory(game.path), false);
+    await expectLater(service.selectGameDirectory(game.path), throwsA(isA<GameDirectoryError>()));
+    expect(await service.gameDirectoryFile.exists(), false);
+    await Directory('${game.path}/gfxz.dat').create();
+    expect(await LauncherService.isGameDirectory(game.path), false);
+    await File('${game.path}/gfld.dat').writeAsBytes([]);
+    expect(await LauncherService.isGameDirectory(game.path), false);
+    await File('${game.path}/gfld.dat').writeAsBytes([2]);
+    await service.selectGameDirectory(game.path);
+    await service.validate();
+    final selected = service.game;
+    final restored = LauncherService(root.path)..game = root.path;
+    await restored.restoreGameDirectory();
+    expect(restored.game, selected);
+    await expectLater(service.selectGameDirectory(root.path), throwsA(isA<GameDirectoryError>()));
+    expect(service.game, selected);
+    await File('${game.path}/gfld.dat').delete();
+    await expectLater(service.validate(), throwsA(isA<GameDirectoryError>()));
+  });
+
   test('FPS helper versions preserve running binaries across updates', () async {
     final dir = await Directory.systemTemp.createTemp('fps-helper-');
     addTearDown(() => dir.delete(recursive: true));
@@ -108,8 +150,12 @@ void main() {
       const MaterialApp(home: LauncherPage(preview: true)),
     );
     await tester.pump();
+    expect(find.byTooltip('进入游戏'), findsOneWidget);
+    expect(find.text('更新公告'), findsOneWidget);
+    await tester.tap(find.text('设置'));
+    await tester.pumpAndSettle();
     expect(find.textContaining('账号不存在时'), findsOneWidget);
-    expect(find.text('启动游戏'), findsOneWidget);
+    expect(find.text('设置游戏目录'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
   test(
@@ -174,6 +220,7 @@ void main() {
       await payload.create();
       final contents = <String, List<int>>{
         'SDError.dll': [4],
+        'lqbz.dll': [7],
         'libssl-1_1.dll': [5],
         'libcrypto-1_1.dll': [6],
         'runtime-x86/vcruntime140.dll': [11],
@@ -223,6 +270,7 @@ void main() {
       expect(await File(service.bridgeExecutable).readAsBytes(), [70]);
       expect(await legacyBridge.readAsBytes(), [90]);
       expect(await File('${dir.path}/SDError.dll').readAsBytes(), [4]);
+      expect(await File('${dir.path}/lqbz.dll').readAsBytes(), [7]);
       expect(await File('${dir.path}/zz.crt').readAsBytes(), [9]);
       expect(await File('${dir.path}/vcruntime140.dll').readAsBytes(), [11]);
       expect(await File('${dir.path}/ucrtbase.dll').readAsBytes(), [12]);
@@ -237,6 +285,7 @@ void main() {
       await File('${dir.path}/SDError.dll').writeAsBytes([99]);
       await service.prepare();
       expect(await File('${dir.path}/SDError.dll').readAsBytes(), [4]);
+      expect(await File('${dir.path}/lqbz.dll').readAsBytes(), [7]);
       await File('${payload.path}/SDError.dll').writeAsBytes([99]);
       await expectLater(service.prepare(), throwsException);
     },

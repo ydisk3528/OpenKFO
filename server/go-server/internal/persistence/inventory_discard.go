@@ -14,7 +14,8 @@ func (m *InventoryManager) Discard(uid uint64, instance uint32) error {
 	if uid == 0 || instance == 0 {
 		return ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}

@@ -187,8 +187,8 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 	case "rewards_get":
 		return store.RewardManager().BattleRewards(RewardRules{})
 	case "rewards_save":
-		if request.Rewards == nil || len(request.Rewards.Levels) != 150 {
-			return nil, fmt.Errorf("需要完整的 150 级奖励表，请使用新版 GM管理器")
+		if request.Rewards == nil || len(request.Rewards.Levels) != int(MaxRoleLevel) {
+			return nil, fmt.Errorf("需要完整的 200 级奖励表，请使用新版 GM管理器")
 		}
 		return store.RewardManager().SaveBattleRewards(request.RewardRevision, *request.Rewards)
 	case "accounts", "wallet_accounts":
@@ -264,7 +264,8 @@ func (store *Store) Admin(request AdminRequest) (any, error) {
 	if _, err = store.DB.Exec(`INSERT IGNORE INTO counters(name,value) VALUES('desktop_admin',0)`); err != nil {
 		return nil, err
 	}
-	tx, err := store.DB.Begin()
+	tx, txCancel, err := beginTransaction(store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

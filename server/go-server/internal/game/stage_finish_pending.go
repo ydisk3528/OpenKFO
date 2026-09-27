@@ -2,6 +2,7 @@ package game
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"time"
 
@@ -15,6 +16,7 @@ type pendingStageFinish struct {
 	serial   uint32
 	report   []byte
 	deadline time.Time
+	warned   bool
 }
 
 func (h *Hub) deferStageFinish(s *Session, payload []byte) {
@@ -39,14 +41,18 @@ func (h *Hub) deferStageFinish(s *Session, payload []byte) {
 	if old := r.pendingStageFinish; old != nil && old.serial == r.Serial && old.owner == s {
 		return
 	}
-	p := &pendingStageFinish{s, r.Serial, bytes.Clone(payload), time.Now().Add(5 * time.Second)}
+	p := &pendingStageFinish{owner: s, serial: r.Serial, report: bytes.Clone(payload), deadline: time.Now().Add(5 * time.Second)}
 	r.pendingStageFinish = p
 	log.Printf("stage_finish_wait room=%d serial=%d map=%d uid=%d reason=%d marker=%t receipts=%t", r.ID, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), s.UID, reason, r.FosterFinishReported, r.fosterReceiptsComplete())
 	h.scheduleStageFinishCheck(r, p)
 }
 
 func (h *Hub) scheduleStageFinishCheck(r *Room, p *pendingStageFinish) {
-	time.AfterFunc(100*time.Millisecond, func() {
+	interval := 100 * time.Millisecond
+	if p.warned {
+		interval = time.Second
+	}
+	time.AfterFunc(interval, func() {
 		h.lockState()
 		h.scopeRoom(r)
 		defer h.unlockState()
@@ -61,14 +67,51 @@ func (h *Hub) scheduleStageFinishCheck(r *Room, p *pendingStageFinish) {
 			}
 			return
 		}
-		if err != nil || !time.Now().Before(p.deadline) {
+		if err != nil {
 			r.pendingStageFinish = nil
-			log.Printf("stage_finish_unconfirmed room=%d serial=%d map=%d marker=%t receipts=%t error=%v", r.ID, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), r.FosterFinishReported, r.fosterReceiptsComplete(), err)
-			p.owner.sendGame(notice("关卡结束报告已收到，但关卡进度尚未对齐，暂未发放奖励。"))
+			log.Printf("stage_finish_invalid room=%d serial=%d error=%v", r.ID, r.Serial, err)
 			return
 		}
+		if !p.warned && !time.Now().Before(p.deadline) {
+			p.warned = true
+			log.Printf("stage_finish_waiting_progress room=%d serial=%d map=%d marker=%t receipts=%t %s", r.ID, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), r.FosterFinishReported, r.fosterReceiptsComplete(), stageProgressSummary(r))
+			h.broadcast(r, notice("关卡结束报告已收到，正在等待关卡进度同步，尚未发放奖励。请暂勿退出。"), 0)
+		}
+		// Retain the report for this round. Late progress must still resume
+		// settlement; missing evidence must never be treated as a victory.
 		h.scheduleStageFinishCheck(r, p)
 	})
+}
+
+// Compact diagnostics only on the wait transition, never full actor dumps or
+// reward inference. This remains available with packet tracing disabled.
+func stageProgressSummary(r *Room) string {
+	active, unaccounted := 0, 0
+	for _, a := range r.PVEActors {
+		if a.active {
+			active++
+			if a.maximumHP <= 0 || a.reportedHP != 0 {
+				unaccounted++
+			}
+		}
+	}
+	if r.StageWaves != nil && r.Type() == protocol.StageAssault {
+		w := r.StageWaves
+		return fmt.Sprintf("wave=%d wave_total=%d wave_finished=%t active_actors=%d", w.index, len(w.plans), w.finished, active)
+	}
+	expected, spawned, retired := 0, 0, 0
+	if r.FosterPlan != nil {
+		for _, g := range r.FosterPlan.Groups {
+			expected += len(g.Spawns)
+		}
+	}
+	for _, n := range r.FosterSpawned {
+		spawned += n
+	}
+	for _, n := range r.FosterRetired {
+		retired += n
+	}
+	return fmt.Sprintf("expected_spawns=%d received_spawns=%d retired=%d active_actors=%d active_unaccounted=%d", expected, spawned, retired, active, unaccounted)
 }
 
 func (h *Hub) pendingStageFinishCurrent(r *Room, p *pendingStageFinish) bool {

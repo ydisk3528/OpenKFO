@@ -21,12 +21,16 @@ type FosterPlanPreview = protocol.FosterPlan
 var fosterPlansJSON []byte
 
 func fosterPlanPreview(raw []byte, runtime string, catalogue *FosterTemplateCatalogue) (*FosterPlanPreview, error) {
-	if runtime != fosterRuntimeHash || catalogue == nil || catalogue.ConfigHash != fosterConfigHash {
+	if runtime != fosterRuntimeHash || catalogue == nil || (catalogue.ConfigHash != fosterConfigHash && catalogue.ConfigHash != iceChapterConfigHash) {
 		return nil, nil
 	}
 	var plans map[string]json.RawMessage
 	if err := json.Unmarshal(fosterPlansJSON, &plans); err != nil {
 		return nil, err
+	}
+	custom := digest(raw) == iceChapterScriptHash
+	if custom && catalogue.ConfigHash != iceChapterConfigHash {
+		return nil, nil
 	}
 	data, ok := plans[digest(raw)]
 	if !ok {
@@ -38,6 +42,22 @@ func fosterPlanPreview(raw []byte, runtime string, catalogue *FosterTemplateCata
 	}
 	if len(catalogue.InitialHP) != len(catalogue.Names) {
 		return nil, fmt.Errorf("Foster initial HP catalogue is missing")
+	}
+	// Adding the chapter guard shifts native sorted template indices. Preserve
+	// every original plan by mapping its old index around the new catalogue entry.
+	if !custom && catalogue.ConfigHash == iceChapterConfigHash {
+		added := slices.Index(catalogue.Names, "ice_guard")
+		if added < 0 {
+			return nil, fmt.Errorf("chapter guard missing")
+		}
+		for gi := range plan.Groups {
+			for si := range plan.Groups[gi].Spawns {
+				sp := &plan.Groups[gi].Spawns[si]
+				if sp.Template >= uint32(added) {
+					sp.Template++
+				}
+			}
+		}
 	}
 	plan.InitialHP = slices.Clone(catalogue.InitialHP)
 	return &plan, plan.Validate(len(catalogue.Names))

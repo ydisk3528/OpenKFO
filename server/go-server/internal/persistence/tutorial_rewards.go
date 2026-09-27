@@ -19,7 +19,8 @@ func (m *RewardManager) CompleteTutorial(uid uint64, clientHash string) (r Tutor
 	if uid == 0 {
 		return r, ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return r, err
 	}

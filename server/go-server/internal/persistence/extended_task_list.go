@@ -1,9 +1,11 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"kungfu.local/server/internal/protocol"
+	"time"
 )
 
 // A nil list means this server has no extended catalogue configured. An empty
@@ -12,12 +14,14 @@ func (s *TaskManager) ExtendedTasks(uid uint64, hash string) ([]ExtendedTaskStat
 	if uid == 0 {
 		return nil, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	ctx, txCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	tx, err := s.store.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	result, err := extendedTasksTx(tx, uid, hash)
+	result, err := extendedTasksSnapshot(ctx, tx, uid, hash, false)
 	if err != nil {
 		return nil, err
 	}
@@ -34,14 +38,22 @@ func (s *TaskManager) ExtendedTasks(uid uint64, hash string) ([]ExtendedTaskStat
 
 // Reused by settlement so counts and battle rewards commit together.
 func extendedTasksTx(tx *sql.Tx, uid uint64, hash string) ([]ExtendedTaskState, error) {
+	return extendedTasksSnapshot(context.Background(), tx, uid, hash, true)
+}
+
+func extendedTasksSnapshot(ctx context.Context, tx *sql.Tx, uid uint64, hash string, lockRows bool) ([]ExtendedTaskState, error) {
+	suffix := ""
+	if lockRows {
+		suffix = " FOR UPDATE"
+	}
 	var err error
 	var owner uint64
-	if err = tx.QueryRow("SELECT uid FROM accounts WHERE uid=? FOR UPDATE", uid).Scan(&owner); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT uid FROM accounts WHERE uid=?"+suffix, uid).Scan(&owner); err != nil {
 		return nil, err
 	}
 	var settings TaskSettings
 	var data []byte
-	err = tx.QueryRow("SELECT revision,rules FROM task_rules WHERE id=1 FOR UPDATE").Scan(&settings.Revision, &data)
+	err = tx.QueryRowContext(ctx, "SELECT revision,rules FROM task_rules WHERE id=1"+suffix).Scan(&settings.Revision, &data)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -62,10 +74,10 @@ func extendedTasksTx(tx *sql.Tx, uid uint64, hash string) ([]ExtendedTaskState, 
 		return nil, ErrDenied
 	}
 	var today string
-	if err = tx.QueryRow("SELECT DATE_FORMAT(UTC_DATE(),'%Y-%m-%d')").Scan(&today); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT DATE_FORMAT(UTC_DATE(),'%Y-%m-%d')").Scan(&today); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query("SELECT task_key,cycle,state,rule_revision,rule_data,counts FROM extended_task_progress WHERE uid=? AND cycle IN ('',?)", uid, today)
+	rows, err := tx.QueryContext(ctx, "SELECT task_key,cycle,state,rule_revision,rule_data,counts FROM extended_task_progress WHERE uid=? AND cycle IN ('',?)", uid, today)
 	if err != nil {
 		return nil, err
 	}

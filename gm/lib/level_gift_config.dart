@@ -91,7 +91,7 @@ class _LevelGiftDialogState extends State<LevelGiftDialog> {
           Text(error, style: const TextStyle(color: Colors.red)),
           if (!widget.tutorial)
             TextButton(
-              onPressed: rows.length >= 149
+              onPressed: rows.length >= 199
                   ? null
                   : () => setState(
                       () => rows.add({
@@ -122,8 +122,8 @@ class _LevelGiftDialogState extends State<LevelGiftDialog> {
                   tickets = row['tickets'] as int? ?? 0;
               final items = row['items'] as List;
               if (!widget.tutorial &&
-                  (level < 2 || level > 150 || !seen.add(level)))
-                throw const FormatException('等级须为不重复的2–150');
+                  (level < 2 || level > 200 || !seen.add(level)))
+                throw const FormatException('等级须为不重复的2–200');
               if (gold < 0 ||
                   gold > 1000000 ||
                   tickets < 0 ||

@@ -2,6 +2,7 @@ package game
 
 import (
 	"bytes"
+	"context"
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
 	"log"
@@ -53,7 +54,9 @@ func (hub *Hub) RefreshExpiredInventory(s *Session) error {
 			log.Printf("mail_refresh_failed uid=%d", uid)
 		}
 	}
-	rows, err := store.DB.Query(`SELECT instance FROM inventory_expirations WHERE uid=? AND expires_at<=? ORDER BY instance`, uid, time.Now().Unix())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := store.DB.QueryContext(ctx, `SELECT instance FROM inventory_expirations WHERE uid=? AND expires_at<=? ORDER BY instance`, uid, time.Now().Unix())
 	if err != nil {
 		return err
 	}

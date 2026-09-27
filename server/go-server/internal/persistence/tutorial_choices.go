@@ -11,7 +11,8 @@ import (
 // TutorialChoices is separate from automatic title advancement: title 2 is
 // earned by completing the guide, even when ordinary title rules are disabled.
 func (m *RewardManager) TutorialChoices(uid uint64) (choices []uint32, catalog []byte, err error) {
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -50,7 +51,8 @@ func (m *RewardManager) WeaponChoiceCatalog(choices []uint32) ([]byte, error) {
 	if len(choices) == 0 || len(choices) > 7 {
 		return nil, ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

@@ -54,6 +54,15 @@ class UpdateProgress {
 }
 
 class UpdateService {
+ String? verifiedLauncherVersion;
+ String? verifiedClientVersion;
+ String get verifiedRelease {
+   if (verifiedLauncherVersion == null || verifiedLauncherVersion != verifiedClientVersion) {
+     throw Exception('发布版本已变化或校验未完成，请重新检查更新后启动。');
+   }
+   return verifiedLauncherVersion!;
+ }
+
   final LauncherService launcher;
   UpdateService(this.launcher, {this.onProgress});
   final void Function(UpdateProgress)? onProgress;
@@ -241,6 +250,7 @@ class UpdateService {
   }
 
   Future<Map<String, dynamic>?> check() async {
+ verifiedLauncherVersion = null;
     if (launcher.local) return null;
     Map<String, dynamic> m;
     if (usesOss) {
@@ -263,6 +273,7 @@ class UpdateService {
         return m;
       }
     }
+    verifiedLauncherVersion = m['version'] as String;
     return null;
   }
 
@@ -397,6 +408,7 @@ class UpdateService {
   }
 
   Future<Map<String, dynamic>?> clientCheck() async {
+ verifiedClientVersion = null;
     if (launcher.local) return null;
     if (usesOss) {
       final manifest = await ossManifest(client: true);
@@ -413,6 +425,7 @@ class UpdateService {
           manifest['config_hash']) {
         throw Exception('客户端配置不匹配，请发布完整资源清单');
       }
+      verifiedClientVersion = manifest['version'] as String;
       return null;
     }
     var raw = await download(uri('client.json'), 65536, missing: true);

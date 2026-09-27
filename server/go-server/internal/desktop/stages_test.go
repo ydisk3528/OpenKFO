@@ -83,8 +83,8 @@ func TestStageCatalogueClientArchive(t *testing.T) {
 			if counts[251] != 16 || counts[0] != 6 || counts[51] != 1 || len(counts) != 3 || p.Groups[0].Block != 100 || p.Groups[1].Block != 0 || first.Position != [3]float32{-1610, -4, -15} || first.Direction != 2 || last.Position != [3]float32{-2260, -4, -15} || last.Direction != 0 {
 				t.Fatal("Foster native order/template/default direction changed", counts, first, last)
 			}
-		} else if row.FosterPreview != nil {
-			t.Fatal("unverified map got a Foster plan", row.MapID)
+		} else if row.MapType == 10 && row.FosterPreview == nil {
+			t.Fatal("native map missing Foster plan", row.MapID)
 		}
 		if row.MapType == 10 {
 			catalog := row.FosterTemplates

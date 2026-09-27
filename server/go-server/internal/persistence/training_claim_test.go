@@ -59,7 +59,7 @@ func TestTrainingClaimLocalDatabase(t *testing.T) {
 	s := &Store{DB: db}
 	growth := (RewardRules{}).Normalized()
 	growth.GrowthEnabled = true
-	for i := 0; i < 149; i++ {
+	for i := 0; i < int(MaxRoleLevel)-1; i++ {
 		growth.Levels[i].NextExperience = 150
 	}
 	r, err := s.TrainingManager().ClaimTraining(1, "first", growth)

@@ -17,7 +17,17 @@ func (h *Hub) extendedTaskList(s *Session, selected uint32) error {
 	if h.Config.ConfigHash == "" {
 		return nil
 	}
-	states, err := storage2_2(h, h.Store.TaskManager().ExtendedTasks, s.UID, h.Config.ConfigHash)
+	var states []persistence.ExtendedTaskState
+	var err error
+	if selected != 0 {
+		manager, uid, hash := h.Store.TaskManager(), s.UID, h.Config.ConfigHash
+		if !h.readSessionSnapshot(s, func() { states, err = manager.ExtendedTasks(uid, hash) }) || h.Config.ConfigHash != hash {
+			return nil
+		}
+	} else {
+		// Automatic refreshes can be part of a larger state transition.
+		states, err = storage2_2(h, h.Store.TaskManager().ExtendedTasks, s.UID, h.Config.ConfigHash)
+	}
 	if err != nil {
 		return err
 	}

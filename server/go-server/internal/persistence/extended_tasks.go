@@ -39,7 +39,8 @@ func (s *TaskManager) ExtendedTaskTransition(uid uint64, hash string, action uin
 	if uid == 0 || key == 0 || hash == "" {
 		return result, false, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return result, false, err
 	}

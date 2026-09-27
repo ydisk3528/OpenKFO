@@ -24,7 +24,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       if (count > 0) {
         std::wstring plan(count, L'\0');
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), plan.data(), count);
-        auto helper = std::filesystem::path(plan).parent_path() / L"UpdateHelper.exe";
+        // Never reuse the helper left by an earlier failed update. A complete
+        // launcher replacement must also repair recovery of that old plan.
+        auto helper = std::filesystem::path(plan).parent_path() /
+            (L"UpdateHelper-resume-" + std::to_wstring(GetCurrentProcessId()) + L".exe");
+        auto installed_helper = std::filesystem::path(executable).parent_path() / L"LauncherSupport.exe";
+        if (!CopyFileW(installed_helper.c_str(), helper.c_str(), FALSE)) {
+          MessageBoxW(nullptr, L"无法准备更新恢复组件。请关闭启动器，使用更新修复工具重试；原更新文件已保留。", L"更新恢复失败", MB_OK | MB_ICONERROR);
+          return EXIT_FAILURE;
+        }
         std::wstring command = L"\"" + helper.wstring() + L"\" --apply \"" + plan + L"\"";
         STARTUPINFOW start{}; start.cb = sizeof(start); start.dwFlags = STARTF_USESHOWWINDOW; start.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION process{};
@@ -57,7 +65,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1000, 780);
-  if (!window.Create(L"启动器", origin, size)) {
+  if (!window.Create(L"启动器v1.1", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

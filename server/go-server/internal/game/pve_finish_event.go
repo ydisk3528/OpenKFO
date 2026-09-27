@@ -26,8 +26,11 @@ func (h *Hub) applyPVEFinish(s *Session, message protocol.Message, observed bool
 	if event.ContextValue != uint64(r.ID)|(uint64(r.Serial)<<32) {
 		return nil // Delayed notification from an earlier battle.
 	}
+	first := !r.FosterFinishReported
 	r.FosterFinishReported = true
-	log.Printf("关卡结束标记 room=%d serial=%d 接收进度一致=%t（尚非发奖凭据）", r.ID, r.Serial, r.fosterReceiptsComplete())
+	if first {
+		log.Printf("关卡结束标记 room=%d serial=%d 接收进度一致=%t（尚非发奖凭据）", r.ID, r.Serial, r.fosterReceiptsComplete())
+	}
 	// The controller set its flag before sending; peers need the same event.
 	// Replays are safe: the native consumer assigns true, it does not toggle.
 	if !observed {

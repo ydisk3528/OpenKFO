@@ -65,7 +65,22 @@ func validateStageFinish(r *Room, payload []byte) (string, error) {
 // peers: its report producer does not preserve this mode's natural reason.
 // This collects a validated finish for the separate PVE payout/result flow.
 func (h *Hub) stageFinishReport(s *Session, payload []byte) error {
+	r := s.Room
+	if r == nil || r.Stage == "settlement" || r.Stage == "room" {
+		return nil
+	}
+	// An authenticated identical pending report already passed parsing/roster
+	// checks. Its scheduled retry still validates progress and round ownership.
+	if p := r.pendingStageFinish; p != nil && p.owner == s && h.pendingStageFinishCurrent(r, p) && bytes.Equal(p.report, payload) {
+		return nil
+	}
 	accepted, err := recordStageFinish(s, payload)
+	if r.lastStageReportSerial != r.Serial || time.Since(r.lastStageReportLog) >= 5*time.Second || accepted {
+		r.lastStageReportSerial = r.Serial
+		r.lastStageReportLog = time.Now()
+		_, reason, parseErr := protocol.ParsePVEFinishReport(r.Type(), payload)
+		log.Printf("stage_finish_received room=%d serial=%d map=%d mode=%d uid=%d owner=%t bytes=%d reason=%d parsed=%t accepted=%t invalid=%t phase=%s", r.ID, r.Serial, protocol.ReadUint32(r.Request, protocol.RoomMapOffset), r.Type(), s.UID, r.Owner == s.UID, len(payload), reason, parseErr == nil, accepted, err != nil, r.Stage)
+	}
 	if err != nil {
 		return err
 	}

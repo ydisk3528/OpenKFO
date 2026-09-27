@@ -1,8 +1,11 @@
 package game
 
 import (
+	"bytes"
 	"fmt"
 	"kungfu.local/server/internal/protocol"
+	"log"
+	"time"
 )
 
 // Counts must come from the matching map's script/template catalogue. No
@@ -52,6 +55,7 @@ type stageWaves struct {
 	index    int
 	spawned  map[uint32]uint32
 	finished bool
+	pending  bool
 }
 
 func newStageWaves(plans []StageWavePlan) (*stageWaves, error) {
@@ -124,16 +128,19 @@ func (h *Hub) stageWaveReport(s *Session, ch *Channel, payload []byte) error {
 	}
 	for _, actor := range r.PVEActors {
 		if actor.active {
+			h.deferStageWave(s, payload)
 			return nil
 		}
 	}
 	for template, count := range w.plans[w.index].Monsters {
 		if w.spawned[template] != count {
+			h.deferStageWave(s, payload)
 			return nil
 		}
 	}
 	// First wave starts locally (93B6B0). Only the next wave is announced;
 	// repeated old reports must not resend a command that respawns monsters.
+	w.pending = false
 	w.index++
 	next := uint32(w.index + 1)
 	if w.index == len(w.plans) {
@@ -145,4 +152,38 @@ func (h *Hub) stageWaveReport(s *Session, ch *Channel, payload []byte) error {
 	protocol.WriteUint32(p, 8, next)
 	h.broadcast(r, protocol.Message{ID: protocol.MsgStageWaveControl, Payload: p}, 0)
 	return nil
+}
+
+// The reliable wave report may arrive before the final UDP actor removal.
+// Retain one report per wave; never advance without the original validation.
+func (h *Hub) deferStageWave(s *Session, payload []byte) {
+	r, w := s.Room, s.Room.StageWaves
+	if w.pending {
+		return
+	}
+	w.pending = true
+	serial, wave := r.Serial, w.index
+	report := bytes.Clone(payload)
+	log.Printf("stage_wave_wait room=%d serial=%d wave=%d", r.ID, serial, wave+1)
+	var retry func()
+	retry = func() {
+		h.lockState()
+		h.scopeRoom(r)
+		defer h.unlockState()
+		m := r.Members[s.UID]
+		if h.Rooms[r.ID] != r || r.Serial != serial || r.Stage != "battle" || r.StageWaves != w || w.index != wave || w.finished || r.Owner != s.UID || s.Room != r || h.Sessions[s.UID] != s || m == nil || m.Session != s || m.Spectator {
+			return
+		}
+		if err := h.stageWaveReport(s, s.game(), report); err != nil {
+			w.pending = false
+			log.Printf("stage_wave_retry_failed room=%d serial=%d error=%v", r.ID, serial, err)
+			return
+		}
+		if w.index != wave || w.finished {
+			w.pending = false
+			return
+		}
+		time.AfterFunc(time.Second, retry)
+	}
+	time.AfterFunc(100*time.Millisecond, retry)
 }

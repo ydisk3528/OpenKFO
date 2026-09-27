@@ -25,6 +25,33 @@ class OssFixture extends UpdateService {
 }
 void main() {
   const base = 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/';
+  test('skipping release A installs its retained resources together with release B', () async {
+    final root = await Directory.systemTemp.createTemp('oss-skip-release-');
+    addTearDown(() => root.delete(recursive: true));
+    final service = OfflineLauncher(root.path)..game = root.path..config = {
+      'url':'tls://example.invalid:19091', 'update_version_url':'${base}version/version.json',
+    };
+    await writeAtomic('${root.path}/Data/config.spf2', [1]);
+    await writeAtomic('${root.path}/Data/old.dat', [9]);
+    final manifest = {'version':'B','target':'client','config_hash':hashBytes([2]),'files':[
+      {'path':'Data/config.spf2','url':'${base}releases/B/client/Data/config.spf2','size':1,'sha256':hashBytes([2])},
+      {'path':'Data/map-A.dat','url':'${base}releases/A/client/Data/map-A.dat','size':1,'sha256':hashBytes([3])},
+      {'path':'Data/old.dat','url':'${base}releases/A/client/Data/old.dat','size':1,'sha256':hashBytes([9])},
+    ]};
+    final update = OssFixture(service, {
+      '${base}version/version.json':utf8.encode(jsonEncode({'version':'B','client_manifest':'${base}manifest/B/client.json'})),
+      '${base}manifest/B/client.json':utf8.encode(jsonEncode(manifest)),
+      '${base}releases/B/client/Data/config.spf2':[2],
+      '${base}releases/A/client/Data/map-A.dat':[3],
+    });
+    final pending = await update.clientCheck();
+    expect(pending, isNotNull);
+    await update.installClient(pending!, (_) {});
+    expect(await File('${root.path}/Data/map-A.dat').readAsBytes(), [3]);
+    expect(await File('${root.path}/Data/config.spf2').readAsBytes(), [2]);
+    expect(await update.clientCheck(), isNull);
+    expect(update.fetched.where((v) => v.contains('/releases/')).length, 2);
+  });
   test('OSS pointer resolves immutable manifest and downloads only changed file', () async {
     final root = await Directory.systemTemp.createTemp('oss-update-test-');
     addTearDown(() => root.delete(recursive: true));

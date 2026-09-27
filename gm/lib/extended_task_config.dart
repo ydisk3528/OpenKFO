@@ -1,3 +1,5 @@
+import 'reward_picker.dart';
+
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -19,6 +21,7 @@ class ExtendedTaskConfigPage extends StatefulWidget {
 }
 
 class _ExtendedTaskConfigPageState extends State<ExtendedTaskConfigPage> {
+  late final rewardCatalog = RewardCatalog.load(widget.api);
   static const events = {
     '': '未绑定（不自动完成）',
     'tutorial_complete': '首次完成新手引导（需提前接取）',
@@ -190,7 +193,7 @@ class _ExtendedTaskConfigPageState extends State<ExtendedTaskConfigPage> {
                     TextFormField(
                       key: ValueKey('extended_${e.key}'),
                       initialValue: e.value,
-                      onChanged: (v) => fields[e.key] = v,
+                      onChanged: (v) => update(() => fields[e.key] = v),
                       keyboardType: TextInputType.number,
                       decoration: InputDecoration(
                         labelText: {
@@ -200,6 +203,10 @@ class _ExtendedTaskConfigPageState extends State<ExtendedTaskConfigPage> {
                         }[e.key],
                       ),
                     ),
+                  RewardPreviews(
+                    catalog: rewardCatalog,
+                    ids: [int.tryParse(fields['reward_catalog'] ?? '') ?? 0],
+                  ),
                   if (error.isNotEmpty) Text(error),
                 ],
               ),
@@ -285,8 +292,17 @@ class _ExtendedTaskConfigPageState extends State<ExtendedTaskConfigPage> {
                     title: Text(
                       '${row['id']} ${entry['name'] ?? ''} · ${row['enabled'] == true ? '启用' : '关闭'}',
                     ),
-                    subtitle: Text(
-                      '经验 ${row['experience']} · 金币 ${row['gold']} · 商品 ${row['reward_catalog'] ?? 0}',
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '经验 ${row['experience']} · 金币 ${row['gold']} · 商品 ${row['reward_catalog'] ?? 0}',
+                        ),
+                        RewardPreviews(
+                          catalog: rewardCatalog,
+                          ids: [(row['reward_catalog'] as int?) ?? 0],
+                        ),
+                      ],
                     ),
                     onTap: busy ? null : () => edit(row, entry),
                   );

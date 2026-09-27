@@ -76,14 +76,14 @@ func (a TitleSettings) Validate() error {
 			return fmt.Errorf("称号等级必须非零且唯一")
 		}
 		seen[r.Level] = true
-		if r.MinPlayerLevel > 150 || r.Matches > 0x7fffffff || r.Wins > 0x7fffffff {
+		if r.MinPlayerLevel > MaxRoleLevel || r.Matches > 0x7fffffff || r.Wins > 0x7fffffff {
 			return fmt.Errorf("称号条件超过允许范围")
 		}
 		if r.Enabled && r.MinPlayerLevel == 0 && r.CompletedTask == 0 && r.Matches == 0 && r.Wins == 0 {
 			return fmt.Errorf("启用称号必须配置达成条件")
 		}
-		if len(r.Choices) > 7 || (r.Enabled && len(r.Choices) == 0) {
-			return fmt.Errorf("启用称号需要1至7个候选商品")
+		if len(r.Choices) > 7 {
+			return fmt.Errorf("称号最多支持7个候选商品，留空仅晋升称号")
 		}
 		keys := map[uint32]bool{}
 		for _, key := range r.Choices {
@@ -122,7 +122,8 @@ func (s *TitleManager) SaveTitleSettings(a TitleSettings) (TitleSettings, error)
 	if err != nil {
 		return TitleSettings{}, err
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return TitleSettings{}, err
 	}

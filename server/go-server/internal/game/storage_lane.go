@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"kungfu.local/server/internal/protocol"
 	"kungfu.local/server/internal/tunnel"
+	"log"
 	"sync"
 	"time"
 )
@@ -69,9 +70,28 @@ func (h *Hub) yieldStorage() func() {
 	}
 	scope := h.ioScope
 	started := time.Now()
+	var uid uint64
+	var room uint16
+	if scope.session != nil {
+		uid = scope.session.UID
+	}
+	if scope.room != nil {
+		room = scope.room.ID
+	}
+	// Capture identifiers before releasing state protection. Diagnose an
+	// ongoing wait, not only requests that eventually manage to return.
+	watchdog := time.AfterFunc(2*time.Second, func() {
+		if h.Store != nil && h.Store.DB != nil {
+			stats := h.Store.DB.Stats()
+			log.Printf("storage_wait_active uid=%d room=%d elapsed_ms=%d pool_in_use=%d pool_max=%d pool_wait_count=%d", uid, room, time.Since(started).Milliseconds(), stats.InUse, stats.MaxOpenConnections, stats.WaitCount)
+		} else {
+			log.Printf("storage_wait_active uid=%d room=%d elapsed_ms=%d", uid, room, time.Since(started).Milliseconds())
+		}
+	})
 	h.ioPaused = true
 	h.Mutex.Unlock()
 	return func() {
+		watchdog.Stop()
 		h.Mutex.Lock()
 		scope.ioTime += time.Since(started)
 		h.ioPaused = false
@@ -180,4 +200,35 @@ func roomCombatFrame(s *Session, f tunnel.Frame) bool {
 		}
 	}
 	return true
+}
+
+// readSessionSnapshot is only for side-effect-free reads. Capture all database
+// arguments before calling it; the closure must not access live game state.
+// Unlike asset transactions, a stale display reply can simply be discarded.
+func (h *Hub) readSessionSnapshot(s *Session, read func()) bool {
+	scope := h.ioScope
+	if scope == nil {
+		read()
+		return true
+	} // direct handler tests
+	if h.ioPaused {
+		panic("snapshot read reached combat-only lane")
+	}
+	uid, revision, room, channel := s.UID, s.refreshRevision, s.Room, s.game()
+	phase := ""
+	if channel != nil {
+		phase = channel.Phase
+	}
+	started := time.Now()
+	h.ioScope = nil
+	h.Mutex.Unlock()
+	func() {
+		defer func() {
+			h.lockState()
+			h.ioScope = scope
+			scope.ioTime += time.Since(started)
+		}()
+		read()
+	}()
+	return h.Sessions[uid] == s && !s.LoggedOut && s.refreshRevision == revision && s.Room == room && s.game() == channel && (channel == nil || channel.Phase == phase)
 }

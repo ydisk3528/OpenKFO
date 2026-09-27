@@ -20,7 +20,12 @@ func (hub *Hub) playerPage(lobbyID uint32, payload []byte) ([]uint64, []byte, er
 	var ids []uint64
 	for uid, s := range hub.Sessions {
 		ch := s.Channels[s.GameChannel]
-		if s.LobbyID != lobbyID || s.LoggedOut || s.GameChannel == 0 || ch == nil || (ch.Phase != "lobby" && ch.Phase != "room") {
+		if s.LobbyID != lobbyID || s.LoggedOut || s.GameChannel == 0 || ch == nil {
+			continue
+		}
+		switch ch.Phase {
+		case "lobby", "room", "loading", "battle", "settlement", "wait_ready":
+		default:
 			continue
 		}
 		select {

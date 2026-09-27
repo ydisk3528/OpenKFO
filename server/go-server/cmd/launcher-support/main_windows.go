@@ -320,6 +320,17 @@ func run(r request) (any, error) {
 	}
 }
 func main() {
+	if len(os.Args) == 1 && strings.HasPrefix(filepath.Base(os.Args[0]), "启动器更新修复") {
+		exe, err := os.Executable()
+		if err == nil {
+			err = repairPendingUpdate(filepath.Dir(exe))
+		}
+		if err != nil {
+			user.NewProc("MessageBoxW").Call(0, uintptr(unsafe.Pointer(utf(err.Error()))), uintptr(unsafe.Pointer(utf("更新修复"))), 0x10)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--apply" {
 		if len(os.Args) != 3 {
 			os.Exit(2)

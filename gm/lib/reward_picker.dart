@@ -1,3 +1,5 @@
+import 'item_pictures.dart';
+
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -47,74 +49,8 @@ class RewardCatalog {
     return RewardCatalog(api, result);
   }
 
-  final _images = <String, Future<Uint8List?>>{};
-  Widget preview(Map<String, dynamic>? item) {
-    final key = item?['key'];
-    if (key is! String)
-      return const SizedBox(
-        width: 48,
-        height: 48,
-        child: Icon(Icons.image_not_supported_outlined),
-      );
-    if (_images.length >= 256 && !_images.containsKey(key))
-      _images.remove(_images.keys.first);
-    final image = _images.putIfAbsent(key, () async {
-      final result = await api({
-        'operation': 'shop_images',
-        'keys': [key],
-      });
-      return result[key] is String ? base64Decode(result[key]) : null;
-    });
-    return SizedBox(
-      width: 48,
-      height: 48,
-      child: FutureBuilder<Uint8List?>(
-        future: image,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done)
-            return const Center(
-              child: CircularProgressIndicator(strokeWidth: 2),
-            );
-          final bytes = snapshot.data;
-          if (bytes == null)
-            return const Tooltip(
-              message: '暂无可用图片',
-              child: Icon(Icons.image_not_supported_outlined),
-            );
-          return InkWell(
-            onTap: () => showDialog<void>(
-              context: context,
-              builder: (c) => AlertDialog(
-                title: Text('${item?['name'] ?? '奖励预览'}'),
-                content: SizedBox(
-                  width: 280,
-                  height: 280,
-                  child: Image.memory(
-                    bytes,
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, e, s) =>
-                        const Icon(Icons.broken_image_outlined),
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(c),
-                    child: const Text('关闭'),
-                  ),
-                ],
-              ),
-            ),
-            child: Image.memory(
-              bytes,
-              fit: BoxFit.contain,
-              errorBuilder: (_, e, s) =>
-                  const Icon(Icons.broken_image_outlined),
-            ),
-          );
-        },
-      ),
-    );
-  }
+  late final pictures = ItemPictures(api);
+  Widget preview(Map<String, dynamic>? item) => pictures.preview(item);
 
   Widget definitionPreview(int key) {
     for (final item in options) {
@@ -268,4 +204,39 @@ class RewardItemsField extends StatelessWidget {
       );
     },
   );
+}
+
+class RewardPreviews extends StatelessWidget {
+  const RewardPreviews({super.key, required this.catalog, required this.ids});
+  final Future<RewardCatalog> catalog;
+  final List<int> ids;
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<RewardCatalog>(
+      future: catalog,
+      builder: (context, snapshot) {
+        if (ids.where((id) => id > 0).isEmpty) return const SizedBox.shrink();
+        if (snapshot.hasError) return const Text('道具图片读取失败');
+        if (!snapshot.hasData) return const LinearProgressIndicator();
+        final data = snapshot.data!;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            for (final id in ids.where((id) => id > 0))
+              SizedBox(
+                width: 240,
+                child: Row(
+                  children: [
+                    data.definitionPreview(id),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(data.name(id))),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 }

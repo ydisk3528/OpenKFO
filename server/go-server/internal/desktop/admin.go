@@ -18,44 +18,49 @@ import (
 )
 
 type Request struct {
-	Reason           string                           `json:"reason"`
-	BannedWords      *persistence.BannedWordsSettings `json:"banned_words,omitempty"`
-	GMVersion        string                           `json:"gm_version"`
-	Recommended      *bool                            `json:"recommended,omitempty"`
-	Notes            string                           `json:"notes,omitempty"`
-	Definition       *persistence.ItemDefinition      `json:"definition,omitempty"`
-	StageUnlocks     *persistence.StagePlayerUnlocks  `json:"stage_unlocks,omitempty"`
-	WeaponSettings   *persistence.WeaponSettings      `json:"weapon_settings,omitempty"`
-	VIPShopSettings  *persistence.VIPShopSettings     `json:"vip_shop_settings,omitempty"`
-	TalismanSettings *persistence.TalismanSettings    `json:"talisman_settings,omitempty"`
-	Titles           *persistence.TitleSettings       `json:"titles,omitempty"`
-	Tasks            *persistence.TaskSettings        `json:"tasks,omitempty"`
-	Training         *persistence.TrainingSettings    `json:"training,omitempty"`
-	VIPKind          uint32                           `json:"vip_kind,omitempty"`
-	Honour           *persistence.HonourSettings      `json:"honour,omitempty"`
-	StageAccess      *persistence.StageAccess         `json:"stage_access,omitempty"`
-	ServerExpiryDays *uint32                          `json:"server_expiry_days,omitempty"`
-	Instance         uint32                           `json:"instance"`
-	ExpiresAt        *int64                           `json:"expires_at,omitempty"`
-	Environment      string                           `json:"environment"`
-	Rewards          *persistence.RewardRules         `json:"rewards,omitempty"`
-	RewardRevision   uint64                           `json:"reward_revision"`
-	Operation        string                           `json:"operation"`
-	ID               string                           `json:"id"`
-	UID              uint64                           `json:"uid"`
-	Mode             string                           `json:"mode"`
-	Amount           uint32                           `json:"amount"`
-	Keys             []string                         `json:"keys"`
-	Key              string                           `json:"key"`
-	Quantity         int                              `json:"quantity"`
-	Days             int                              `json:"days"`
-	Currency         string                           `json:"currency"`
-	Price            int64                            `json:"price"`
-	Enabled          *bool                            `json:"enabled"`
-	All              bool                             `json:"all"`
-	Weapon           int                              `json:"weapon"`
-	Revision         string                           `json:"revision"`
-	Rules            []Rule                           `json:"rules"`
+	ClientConfig           *clientConfigRequest             `json:"client_config,omitempty"`
+	RecommendationPriority int32                            `json:"recommendation_priority"`
+	PinRecommended         bool                             `json:"pin_recommended"`
+	BatchItems             []persistence.BatchGrantItem     `json:"batch_items,omitempty"`
+	UIDs                   []uint64                         `json:"uids,omitempty"`
+	Reason                 string                           `json:"reason"`
+	BannedWords            *persistence.BannedWordsSettings `json:"banned_words,omitempty"`
+	GMVersion              string                           `json:"gm_version"`
+	Recommended            *bool                            `json:"recommended,omitempty"`
+	Notes                  string                           `json:"notes,omitempty"`
+	Definition             *persistence.ItemDefinition      `json:"definition,omitempty"`
+	StageUnlocks           *persistence.StagePlayerUnlocks  `json:"stage_unlocks,omitempty"`
+	WeaponSettings         *persistence.WeaponSettings      `json:"weapon_settings,omitempty"`
+	VIPShopSettings        *persistence.VIPShopSettings     `json:"vip_shop_settings,omitempty"`
+	TalismanSettings       *persistence.TalismanSettings    `json:"talisman_settings,omitempty"`
+	Titles                 *persistence.TitleSettings       `json:"titles,omitempty"`
+	Tasks                  *persistence.TaskSettings        `json:"tasks,omitempty"`
+	Training               *persistence.TrainingSettings    `json:"training,omitempty"`
+	VIPKind                uint32                           `json:"vip_kind,omitempty"`
+	Honour                 *persistence.HonourSettings      `json:"honour,omitempty"`
+	StageAccess            *persistence.StageAccess         `json:"stage_access,omitempty"`
+	ServerExpiryDays       *uint32                          `json:"server_expiry_days,omitempty"`
+	Instance               uint32                           `json:"instance"`
+	ExpiresAt              *int64                           `json:"expires_at,omitempty"`
+	Environment            string                           `json:"environment"`
+	Rewards                *persistence.RewardRules         `json:"rewards,omitempty"`
+	RewardRevision         uint64                           `json:"reward_revision"`
+	Operation              string                           `json:"operation"`
+	ID                     string                           `json:"id"`
+	UID                    uint64                           `json:"uid"`
+	Mode                   string                           `json:"mode"`
+	Amount                 uint32                           `json:"amount"`
+	Keys                   []string                         `json:"keys"`
+	Key                    string                           `json:"key"`
+	Quantity               int                              `json:"quantity"`
+	Days                   int                              `json:"days"`
+	Currency               string                           `json:"currency"`
+	Price                  int64                            `json:"price"`
+	Enabled                *bool                            `json:"enabled"`
+	All                    bool                             `json:"all"`
+	Weapon                 int                              `json:"weapon"`
+	Revision               string                           `json:"revision"`
+	Rules                  []Rule                           `json:"rules"`
 }
 type Admin struct {
 	Root          string
@@ -185,6 +190,12 @@ func offer(item Item, request Request) (persistence.AdminOffer, error) {
 	return persistence.AdminOffer{Offer: persistence.Offer{Key: key, Category: 10, Variant: item.Kind, Record: record, Grant: grant}, Enabled: *request.Enabled, Recommended: request.Recommended, ServerExpiryDays: request.ServerExpiryDays}, nil
 }
 func (admin *Admin) Call(request Request) (any, error) {
+	if strings.HasPrefix(request.Operation, "client_config_") {
+		if request.ClientConfig == nil {
+			request.ClientConfig = &clientConfigRequest{}
+		}
+		return admin.clientConfig(request.Operation, *request.ClientConfig)
+	}
 	if request.Environment != "" && request.Environment != "local" && request.Environment != "online" {
 		return nil, fmt.Errorf("无效的管理环境")
 	}
@@ -208,6 +219,7 @@ func (admin *Admin) Call(request Request) (any, error) {
 	}
 	remote := persistence.AdminRequest{Operation: request.Operation, ID: request.ID, UID: request.UID, Mode: request.Mode, Amount: request.Amount, Rewards: request.Rewards, RewardRevision: request.RewardRevision}
 	remote.Instance, remote.ExpiresAt = request.Instance, request.ExpiresAt
+	remote.UIDs, remote.All = request.UIDs, request.All
 	remote.Reason = request.Reason
 	remote.BannedWords = request.BannedWords
 	remote.StageAccess = request.StageAccess
@@ -228,6 +240,14 @@ func (admin *Admin) Call(request Request) (any, error) {
 		remote.Enabled = *request.Enabled
 	}
 	switch request.Operation {
+	case "grant_batch_get", "grant_batch_list", "grant_batch_send", "grant_batch_send_many":
+		return call(remote)
+	case "notice_send", "notice_status":
+		result, err := call(remote)
+		if err != nil && err.Error() == "request rejected" {
+			return nil, fmt.Errorf("%s尚未部署普通通知功能，请切换本地测试服测试，或先部署对应服务器版本；本次请求已拒绝", environment)
+		}
+		return result, err
 	case "users_list", "user_ban_save", "user_ban_history", "banned_words_get", "banned_words_save", "stage_unlocks_get", "stage_unlocks_save":
 		return call(remote)
 	case "tasks_get", "tasks_save", "titles_get", "titles_save":
@@ -401,11 +421,34 @@ func (admin *Admin) Call(request Request) (any, error) {
 			if quantity == 0 {
 				quantity = 1
 			}
-			offers[key] = map[string]any{"recommended": row.Recommended, "server_expiry_days": row.ServerExpiryDays, "currency": currency, "price": price, "days": days, "quantity": quantity, "enabled": row.Enabled}
+			offers[key] = map[string]any{"recommendation_priority": row.RecommendationPriority, "recommended": row.Recommended, "server_expiry_days": row.ServerExpiryDays, "currency": currency, "price": price, "days": days, "quantity": quantity, "enabled": row.Enabled}
 		}
 		return map[string]any{"items": items, "offers": offers, "environment": environment}, nil
 	}
-	if request.Operation != "grant" && request.Operation != "shop_save" && request.Operation != "shop_batch" && request.Operation != "shop_prices" {
+	if request.Operation == "grant_batch_create" {
+		if len(request.BatchItems) < 1 || len(request.BatchItems) > 100 {
+			return nil, fmt.Errorf("请选择1–100种道具")
+		}
+		for _, row := range request.BatchItems {
+			if row.Key == "currency:ticket" {
+				if row.Quantity < 1 || row.Quantity > 2147483647 {
+					return nil, fmt.Errorf("点券数量须为1–2147483647")
+				}
+				remote.BatchItems = append(remote.BatchItems, persistence.BatchGrantItem{Key: row.Key, Name: "点券", Quantity: row.Quantity})
+				continue
+			}
+			item, ok := byKey[row.Key]
+			if !ok || row.Quantity < 1 || row.Quantity > 999 || row.Days < 1 || row.Days > 3650 {
+				return nil, fmt.Errorf("道具、数量或期限无效")
+			}
+			row.Name = item.Name
+			row.Stackable = item.Stackable
+			row.Record = template(item, row.Quantity, row.Days)
+			remote.BatchItems = append(remote.BatchItems, row)
+		}
+		return call(remote)
+	}
+	if request.Operation != "grant" && request.Operation != "shop_save" && request.Operation != "shop_batch" && request.Operation != "shop_prices" && request.Operation != "shop_rank" {
 		return nil, fmt.Errorf("不支持的管理操作")
 	}
 	if len(request.ID) < 1 || len(request.ID) > 100 {
@@ -432,6 +475,10 @@ func (admin *Admin) Call(request Request) (any, error) {
 			return nil, fmt.Errorf("道具无效或重复")
 		}
 		seen[key] = true
+	}
+	if request.Operation == "shop_rank" {
+		remote.Keys, remote.RecommendationPriority, remote.PinRecommended = keys, request.RecommendationPriority, request.PinRecommended
+		return call(remote)
 	}
 	if request.Operation == "shop_prices" {
 		if request.Price < 1 || request.Price > 2147483647 || (request.Currency != "gold" && request.Currency != "ticket") {

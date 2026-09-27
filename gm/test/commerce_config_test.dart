@@ -4,6 +4,35 @@ import 'package:kungfu_item_manager/shop_config.dart';
 import 'package:kungfu_item_manager/wallet_config.dart';
 
 void main() {
+  testWidgets('recommendation pin and priority use independent requests', (tester) async {
+    tester.view.physicalSize = const Size(1440, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final requests = <Map<String,dynamic>>[];
+    Future<dynamic> api(Map<String,dynamic> request) async {
+      if(request['operation']=='shop_catalog') { return {
+        'items':[{'key':'25:253300','id':253300,'kind':25,'name':'王八拳拳谱','stackable':false}],
+        'offers':{'25:253300':{'price':1,'days':1,'quantity':1,'enabled':true,'currency':'ticket','server_expiry_days':1,'recommended':true,'recommendation_priority':0}}
+      }; }
+      if(request['operation']=='shop_rank') {
+        requests.add(request);
+        return {'recommendation_priority_saved':true,'recommendation_priority':request['pin_recommended']==true?101:request['recommendation_priority'],'message':'已保存'};
+      }
+      return {};
+    }
+    await tester.pumpWidget(MaterialApp(home:ShopConfigPage(api:api)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('王八拳拳谱'));await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('置顶推荐'));await tester.tap(find.text('置顶推荐'));await tester.pumpAndSettle();
+    expect(requests.single['pin_recommended'],true);
+    expect(requests.single['keys'],['25:253300']);
+    await tester.enterText(find.widgetWithText(TextField,'推荐排序'),'42');
+    await tester.tap(find.text('保存排序'));await tester.pumpAndSettle();
+    expect(requests.last['recommendation_priority'],42);
+    expect(requests.last.containsKey('price'),false);
+  });
+
   testWidgets('shop saves selected price and duration without granting items', (
     tester,
   ) async {
@@ -37,34 +66,44 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('骤足'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(SwitchListTile));
+    await tester.tap(find.widgetWithText(SwitchListTile, '上架销售'));
     await tester.enterText(find.widgetWithText(TextFormField, '售价'), '88');
     await tester.enterText(
-      find.widgetWithText(TextFormField, '装备显示天数'),
+      find.widgetWithText(TextFormField, '有效天数'),
       '365',
     );
+    await tester.ensureVisible(find.text('保存商城配置'));
     await tester.tap(find.text('保存商城配置'));
     await tester.pumpAndSettle();
     expect(saved?['currency'], 'ticket');
     expect(saved?['price'], 88);
     expect(saved?['days'], 365);
-    expect(saved?['server_expiry_days'], 0);
+    expect(saved?['server_expiry_days'], 365);
     expect(saved?['enabled'], true);
     expect(
       catalogReads,
       1,
       reason: 'single save must not reload the entire catalog',
     );
-    expect(find.text('253905 · 已上架'), findsOneWidget);
+    expect(saved?['enabled'], true);
     expect(find.byType(LinearProgressIndicator), findsNothing);
     expect(tester.takeException(), isNull);
-    await tester.tap(find.text('购买后按上述天数到期'));
-    await tester.enterText(find.widgetWithText(TextFormField, '装备显示天数'), '2');
+    await tester.enterText(find.widgetWithText(TextFormField, '有效天数'), '2');
     await tester.ensureVisible(find.text('保存商城配置'));
     await tester.tap(find.text('保存商城配置'));
     await tester.pumpAndSettle();
     expect(saved?['server_expiry_days'], 2);
     expect(saved?['days'], 2);
+    await tester.ensureVisible(find.byType(DropdownButtonFormField<bool>));
+    await tester.tap(find.byType(DropdownButtonFormField<bool>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('永久装备（365+）').last);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('保存商城配置'));
+    await tester.tap(find.text('保存商城配置'));
+    await tester.pumpAndSettle();
+    expect(saved?['server_expiry_days'], 0);
+
     expect(tester.takeException(), isNull);
   });
 

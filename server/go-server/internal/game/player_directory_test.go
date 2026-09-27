@@ -65,3 +65,29 @@ func TestPlayerListRecordNativeFields(t *testing.T) {
 		t.Fatal("pending character listed")
 	}
 }
+
+func TestPlayerDirectoryIncludesEveryRoomPhase(t *testing.T) {
+	hub := NewHub(nil, Config{})
+	phases := []string{"lobby", "room", "loading", "battle", "settlement", "wait_ready", "authenticated", "handoff", "closed", "profile_sent"}
+	for i, phase := range phases {
+		uid := uint64(i + 1)
+		hub.Sessions[uid] = &Session{UID: uid, LobbyID: 2, GameChannel: 3, Channels: map[uint32]*Channel{3: {ID: 3, Phase: phase}}, Done: make(chan struct{})}
+	}
+	hub.Sessions[20] = &Session{UID: 20, LobbyID: 3, GameChannel: 3, Channels: map[uint32]*Channel{3: {ID: 3, Phase: "battle"}}, Done: make(chan struct{})}
+	request := append(protocol.Uint32Bytes(1), protocol.Uint32Bytes(7)...)
+	ids, _, err := hub.playerPage(2, request)
+	if err != nil || len(ids) != 6 {
+		t.Fatalf("ids=%v err=%v", ids, err)
+	}
+	for i, uid := range ids {
+		if uid != uint64(i+1) {
+			t.Fatalf("missing room phase: %v", ids)
+		}
+	}
+	hub.Sessions[3].LoggedOut = true
+	close(hub.Sessions[4].Done)
+	ids, _, err = hub.playerPage(2, request)
+	if err != nil || len(ids) != 4 {
+		t.Fatalf("disconnected players listed: %v %v", ids, err)
+	}
+}

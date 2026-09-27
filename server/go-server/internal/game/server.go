@@ -205,6 +205,10 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		}
 		return
 	}
+	if err := server.Hub.checkLoginRelease(context.Background()); err != nil {
+		deny("server_config_unavailable")
+		return
+	}
 	stageAccess, stageErr := server.Hub.Store.StageAccess()
 	if stageErr != nil {
 		deny("server_config_unavailable")
@@ -236,6 +240,10 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 	defer server.Hub.Detach(session)
 	grant, peer := server.registerDatagramPeer(session)
 	defer server.unregisterDatagramPeer(peer)
+	if peer != nil {
+		session.datagramEnabled.Store(true)
+		go session.writeDatagrams(peer.send)
+	}
 	if err = encoder.Encode(tunnel.Frame{Op: "auth", UID: session.UID, UDP: grant}); err != nil {
 		return
 	}

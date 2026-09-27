@@ -9,6 +9,9 @@ import (
 
 const fosterConfigHash = "142515f07e84aaab3ba8ea4d4c2b2ba76a14b70d35abc40fc09996e04061d914"
 
+const iceChapterConfigHash = "a878fdb58625df9c711bb03ddc6e7b1e7cd0108a6713e63cf03673041876a6ca"
+const iceChapterScriptHash = "8c20680435c5d6eaab04c99cc1bc023c9b16f8db71ccc3490cee9aba246e1742"
+
 type FosterTemplateCatalogue struct {
 	ConfigHash string    `json:"config_hash"`
 	Names      []string  `json:"names"`      // Index is the native 20400 template DWORD.
@@ -19,14 +22,18 @@ type FosterTemplateCatalogue struct {
 // A63407 sorts it before A62AE0 looks up the zero-based index. A changed Lua
 // configuration is not parsed heuristically as an equivalent ruleset.
 func fosterTemplates(raw []byte) (*FosterTemplateCatalogue, error) {
-	if digest(raw) != fosterConfigHash {
+	if digest(raw) != fosterConfigHash && digest(raw) != iceChapterConfigHash {
 		return nil, nil
 	}
 	// A62D60 reads field 12 into definition+74. 943465..94347C copies
 	// that float directly to maximum/current HP (+2C/+34), then 94350A
 	// commits the attributes. Keep each value paired with its raw GBK name.
 	matches := regexp.MustCompile(`(?m)^\["[^"\r\n]+"\]\s*=\s*\{"([^"\r\n]+)"\s*,(?:\s*(?:"[^"\r\n]*"|[^,\r\n{}]+)\s*,){10}\s*([0-9]+(?:\.[0-9]+)?)\s*,`).FindAllStringSubmatch(string(raw), -1)
-	if len(matches) != 262 {
+	expected := 262
+	if digest(raw) == iceChapterConfigHash {
+		expected++
+	}
+	if len(matches) != expected {
 		return nil, fmt.Errorf("unexpected verified Foster template count")
 	}
 	// Preserve leading spaces and sort GBK bytes, not decoded Unicode names.

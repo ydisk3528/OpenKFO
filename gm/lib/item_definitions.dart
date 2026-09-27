@@ -127,6 +127,7 @@ class _ItemDefinitionsPageState extends State<ItemDefinitionsPage> {
                 itemBuilder: (_, i) {
                   final r = visible[i];
                   return ListTile(
+                    leading: catalog?.definitionPreview(r['key'] as int),
                     title: SelectableText(
                       catalog?.name(r['key'] as int) ?? '读取名称中',
                     ),

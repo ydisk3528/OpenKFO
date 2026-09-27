@@ -11,7 +11,8 @@ func (s *MailManager) ClaimMailItem(uid uint64, key uint32) ([]byte, error) {
 	if uid == 0 || key == 0 {
 		return nil, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

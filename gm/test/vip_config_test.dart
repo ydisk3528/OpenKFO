@@ -15,6 +15,8 @@ void main() {
             uid: 123,
             account: 'testvip',
             api: (r) async {
+              if (r['operation'] == 'catalog') return {'items': []};
+              if (r['operation'] == 'shop_images') return <String, dynamic>{};
               if (r['operation'] == 'vip_get')
                 return {'kind': 1, 'expires_at': null};
               grants.add(Map<String, dynamic>.from(r));

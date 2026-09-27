@@ -123,7 +123,8 @@ func (m *RewardManager) SaveBattleRewards(revision uint64, rules RewardRules) (R
 		// Reject an unusable native selector while the GM is saving, rather
 		// than discovering its missing/conflicting catalogue at guide completion.
 		if len(choices) > 0 {
-			tx, err := m.store.DB.Begin()
+			tx, txCancel, err := beginTransaction(m.store.DB)
+			defer txCancel()
 			if err != nil {
 				return RewardSettings{}, err
 			}
@@ -172,8 +173,8 @@ func (m *RewardManager) SaveBattleRewards(revision uint64, rules RewardRules) (R
 // Expand old settings without changing amounts or enabling a made-up curve.
 func (r RewardRules) Normalized() RewardRules {
 	if len(r.Levels) == 0 {
-		for level := 1; level <= 150; level++ {
-			r.Levels = append(r.Levels, LevelReward{uint16(level), 0, r.WinGold, r.LossGold, r.DrawGold, r.WinExperience, r.LossExperience, r.DrawExperience})
+		for level := 1; level <= int(MaxRoleLevel); level++ {
+			r.Levels = append(r.Levels, LevelReward{Level: uint16(level), WinGold: r.WinGold, LossGold: r.LossGold, DrawGold: r.DrawGold, WinExperience: r.WinExperience, LossExperience: r.LossExperience, DrawExperience: r.DrawExperience})
 		}
 	}
 	return r
@@ -193,23 +194,23 @@ func (r RewardRules) Validate() error {
 	if err := validateDrops(r.Drops); err != nil {
 		return err
 	}
-	if len(r.Levels) != 150 {
-		return fmt.Errorf("必须包含 1–150 级，共 150 行")
+	if len(r.Levels) != 150 && len(r.Levels) != int(MaxRoleLevel) {
+		return fmt.Errorf("必须包含完整的150级旧表或200级新表")
 	}
 	for i, row := range r.Levels {
 		if int(row.Level) != i+1 {
-			return fmt.Errorf("等级必须按 1–150 顺序且不能重复")
+			return fmt.Errorf("等级必须从1开始连续且不能重复")
 		}
 		for _, v := range []uint32{row.WinGold, row.LossGold, row.DrawGold, row.WinExperience, row.LossExperience, row.DrawExperience} {
 			if v > 1000000 {
 				return fmt.Errorf("第 %d 级单局奖励须为 0–1000000", row.Level)
 			}
 		}
-		if row.NextExperience > 2147483647 || (row.Level == 150 && row.NextExperience != 0) {
-			return fmt.Errorf("升级经验超出范围或 150 级升级经验不为 0")
+		if row.NextExperience > 2147483647 || (int(row.Level) == len(r.Levels) && row.NextExperience != 0) {
+			return fmt.Errorf("升级经验超出范围或 满级升级经验不为 0")
 		}
-		if r.GrowthEnabled && row.Level < 150 && row.NextExperience == 0 {
-			return fmt.Errorf("启用升级前必须填写 1–149 级升级经验")
+		if r.GrowthEnabled && int(row.Level) < len(r.Levels) && row.NextExperience == 0 {
+			return fmt.Errorf("启用升级前必须填写所有非满级的升级经验")
 		}
 	}
 	return nil
@@ -218,8 +219,9 @@ func (r RewardRules) AtLevel(level uint16) LevelReward {
 	if level < 1 {
 		level = 1
 	}
-	if level > 150 {
-		level = 150
+	r = r.Normalized()
+	if int(level) > len(r.Levels) {
+		level = uint16(len(r.Levels))
 	}
-	return r.Normalized().Levels[int(level)-1]
+	return r.Levels[int(level)-1]
 }

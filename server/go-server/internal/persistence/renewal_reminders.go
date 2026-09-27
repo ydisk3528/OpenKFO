@@ -11,7 +11,8 @@ func (m *ShopManager) RenewalReminders(uid uint64) (records []protocol.RenewalRe
 	if uid == 0 {
 		return nil, ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +91,8 @@ func (m *ShopManager) IgnoreRenewalReminder(uid uint64, instance uint32) error {
 	if uid == 0 || instance == 0 {
 		return ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}

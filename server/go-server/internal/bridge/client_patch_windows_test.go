@@ -14,6 +14,7 @@ func TestClientMemoryPatchRequiresExactOriginal(t *testing.T) {
 	}{
 		{"loading", loadingThreadCleanupOriginal, loadingThreadCleanupSafe},
 		{"duration", itemDurationDisplayOriginal, itemDurationDisplayFixed},
+		{"shop ornaments", shopOrnamentsFilterOriginal, shopOrnamentsFilterAll},
 	}
 	for _, patch := range gpkCompatibilityPatches {
 		cases = append(cases, struct {

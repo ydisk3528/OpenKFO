@@ -1,11 +1,13 @@
 package persistence
 
 import (
+	"context"
 	"kungfu.local/server/internal/protocol"
 	"math"
+	"time"
 )
 
-const MaxRoleLevel uint16 = 150
+const MaxRoleLevel uint16 = 200
 
 // LevelChange lets the enclosing business award crossed levels without recursively
 // invoking RewardManager inside AddExp. The caller owns the locked profile/transaction.
@@ -54,11 +56,13 @@ func (m *RoleManager) Snapshot(uid uint64) (Account, error) {
 	if err := m.store.InventoryManager().ExpireInventory(uid); err != nil {
 		return account, err
 	}
-	err := m.store.DB.QueryRow(`SELECT account,nickname,profile,gold,tickets FROM accounts WHERE uid=?`, uid).Scan(&account.Account, &account.Nickname, &account.Profile, &account.Gold, &account.Tickets)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := m.store.DB.QueryRowContext(ctx, `SELECT account,nickname,profile,gold,tickets FROM accounts WHERE uid=?`, uid).Scan(&account.Account, &account.Nickname, &account.Profile, &account.Gold, &account.Tickets)
 	if err != nil {
 		return account, err
 	}
-	rows, err := m.store.DB.Query(`SELECT record FROM inventory WHERE uid=? ORDER BY instance`, uid)
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT record FROM inventory WHERE uid=? ORDER BY instance`, uid)
 	if err != nil {
 		return account, err
 	}

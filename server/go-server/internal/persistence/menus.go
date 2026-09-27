@@ -2,8 +2,10 @@ package persistence
 
 import (
 	"bytes"
+	"context"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -38,7 +40,8 @@ func (m *RoleManager) Rename(uid uint64, nickname string) (string, error) {
 	if err := m.store.CheckText(nickname); err != nil {
 		return "", err
 	}
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return "", err
 	}
@@ -91,55 +94,23 @@ func (store *Store) Rankings(uid uint64, category byte) ([]byte, []byte, error) 
 	if int(category) >= len(offsets) {
 		return nil, nil, ErrDenied
 	}
-	rows, err := store.DB.Query(`SELECT uid,nickname,profile FROM accounts`)
+	entries, err := store.rankingEntries(category, func() ([]rankingEntry, error) { return store.loadRankings(category, offsets[category]) })
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
-	type entry struct {
-		uid   uint64
-		name  []byte
-		score int32
-	}
-	var entries []entry
-	for rows.Next() {
-		var accountUID uint64
-		var nickname string
-		var profile []byte
-		if err = rows.Scan(&accountUID, &nickname, &profile); err != nil {
-			return nil, nil, err
-		}
-		if len(profile) != 360 {
-			return nil, nil, ErrDenied
-		}
-		var score int32
-		for _, offset := range offsets[category] {
-			score += int32(protocol.ReadUint32(profile, offset))
-		}
-		entries = append(entries, entry{accountUID, GBK(nickname), score})
-	}
-	if err = rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	sort.Slice(entries, func(first, second int) bool {
-		if entries[first].score == entries[second].score {
-			return entries[first].uid < entries[second].uid
-		}
-		return entries[first].score > entries[second].score
-	})
 	var directory []byte
 	var own []byte
 	for rank, account := range entries {
-		if account.uid == uid {
+		if account.UID == uid {
 			own = append([]byte{category}, protocol.Uint32Bytes(uint32(rank))...)
 		}
 		if rank >= 100 {
 			continue
 		}
 		record := make([]byte, 27)
-		copy(record[:21], account.name)
+		copy(record[:21], account.Name)
 		record[21] = byte(rank)
-		protocol.WriteUint32(record, 22, uint32(account.score))
+		protocol.WriteUint32(record, 22, uint32(account.Score))
 		record[26] = category
 		directory = append(directory, record...)
 	}
@@ -147,4 +118,41 @@ func (store *Store) Rankings(uid uint64, category byte) ([]byte, []byte, error) 
 		return nil, nil, ErrDenied
 	}
 	return directory, own, nil
+}
+
+func (store *Store) loadRankings(category byte, offsets []int) ([]rankingEntry, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := store.DB.QueryContext(ctx, `SELECT uid,nickname,profile FROM accounts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []rankingEntry
+	for rows.Next() {
+		var accountUID uint64
+		var nickname string
+		var profile []byte
+		if err = rows.Scan(&accountUID, &nickname, &profile); err != nil {
+			return nil, err
+		}
+		if len(profile) != 360 {
+			return nil, ErrDenied
+		}
+		var score int32
+		for _, offset := range offsets {
+			score += int32(protocol.ReadUint32(profile, offset))
+		}
+		entries = append(entries, rankingEntry{accountUID, GBK(nickname), score})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(first, second int) bool {
+		if entries[first].Score == entries[second].Score {
+			return entries[first].UID < entries[second].UID
+		}
+		return entries[first].Score > entries[second].Score
+	})
+	return entries, nil
 }

@@ -11,6 +11,8 @@ import 'frame_mode.dart';
 import 'update_service.dart';
 import 'update_progress_view.dart';
 import 'log_export.dart';
+import 'connection_error.dart';
+import 'classic_skin.dart';
 import 'package:file_selector/file_selector.dart';
 
 const launcherVersion = String.fromEnvironment('LAUNCHER_VERSION', defaultValue: 'development');
@@ -25,12 +27,16 @@ class LauncherApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
-    title: '启动器 $launcherVersion',
+    title: '启动器v1.1',
     theme: ThemeData(
       useMaterial3: true,
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff23645c)),
+      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xffd44817), brightness: Brightness.light),
       fontFamily: 'Microsoft YaHei',
-      scaffoldBackgroundColor: const Color(0xfff4f6f8),
+      scaffoldBackgroundColor: const Color(0xfffff4e5),
+      inputDecorationTheme: const InputDecorationTheme(
+        filled: true, fillColor: Colors.white,
+        labelStyle: TextStyle(color: Color(0xff5f3823)),
+      ),
     ),
     home: const LauncherPage(),
   );
@@ -70,9 +76,10 @@ class _LauncherPageState extends State<LauncherPage> {
       readingState = false;
     }
   }
-  bool busy = true, ready = false, hide = false, fps = true;
+  bool busy = true, ready = false, gameReady = false, hide = false, fps = true;
   FrameMode frameMode = FrameMode.normal;
   String status = '正在准备启动器…', health = '正在检查服务器…';
+  bool updateBlocked = true;
   Map<String, dynamic>? release;
   String announcement = '暂无公告';
   bool readingAnnouncement = false;
@@ -110,7 +117,7 @@ class _LauncherPageState extends State<LauncherPage> {
   Future<void> initialize() async {
     try {
       await service.init();
-      await service.validate();
+      gameReady = await LauncherService.isGameDirectory(service.game);
       if (await preferences.exists()) {
         final m = jsonDecode(await preferences.readAsString());
         frameMode = FrameMode.values.where((v) => v.name == m['frame_mode']).firstOrNull
@@ -162,7 +169,8 @@ class _LauncherPageState extends State<LauncherPage> {
       final text = await service.health();
       if (mounted) setState(() => health = '服务器连接正常 · $text');
     } catch (e) {
-      if (mounted) setState(() => health = '服务器连接失败，可点击重新检查');
+      report('服务器检查失败：$e');
+      if (mounted) setState(() => health = connectionFailureText(e));
     }
   }
 
@@ -220,47 +228,122 @@ class _LauncherPageState extends State<LauncherPage> {
         ),
       ) ??
       false;
+  Future<void> requireUpdate(String title, String message) async {
+    await showDialog<void>(context: context, barrierDismissible: false,
+      builder: (c) => PopScope(canPop: false, child: AlertDialog(
+        title: Text(title), content: SingleChildScrollView(child: Text('$message\n\n请关闭游戏,更新新版本！')),
+        actions: [FilledButton(onPressed: () => Navigator.pop(c), child: const Text('立即更新'))],
+      )));
+  }
+
   Future<void> checkUpdate({bool manual = false}) async {
-    if (ready && service.config['update_enabled'] == false) {
-      report('本地测试模式：已暂停在线更新。');
-      return;
-    }
+    updateBlocked = true;
     final previousBusy=busy;
     if(mounted)setState(()=>busy=true);
     try {
+      if (ready && service.config['update_enabled'] == false) {
+        updateBlocked = false;
+        report('本地测试模式：已暂停在线更新。');
+        await ensureGameDirectory();
+        return;
+      }
       if (manual && service.local) {
+        updateBlocked = false;
         report('线下版本不检查在线更新。');
+        await ensureGameDirectory();
         return;
       }
       release = await updates.check();
+      updateBlocked = release != null;
       if (release == null && manual && mounted) {
         report('已是最新版！');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('已是最新版！')),
         );
       }
+      if (release == null) await ensureGameDirectory();
       if (release != null && mounted) {
-        if (await confirm('启动器有新版本', release!['notes'], no: '跳过本次更新')) {
-          await save();
-          await updates.install(release!, report);
-        }
+        await requireUpdate('启动器必须更新', release!['notes'] ?? '发现新版本');
+        await save();
+        await updates.install(release!, report);
       }
     } catch (e) {
       await error(e);
     } finally {if(mounted)setState(()=>busy=previousBusy);}
   }
 
+  final Set<String> confirmedLegacyDirectories = {};
+
+  Future<bool> confirmClientDirectory(String directory) async {
+    if ((!directory.contains('老登') && !await File(p.join(directory, 'gfld.dat')).exists()) ||
+        confirmedLegacyDirectories.contains(directory)) return true;
+    final accepted = await confirm('确认客户端版本',
+      '检测到 gfld.dat 或目录名称含“老登”。请确认是否为原版客户端，建议不要使用“功夫老登端”。仅凭文件名无法判断客户端来源。',
+      yes: '确认使用', no: '重新选择');
+    if (accepted) confirmedLegacyDirectories.add(directory);
+    return accepted;
+  }
+
+  Future<bool> ensureGameDirectory({bool choose = false}) async {
+    if (!choose && await LauncherService.isGameDirectory(service.game)) {
+      if (await confirmClientDirectory(service.game)) {
+        await service.selectGameDirectory(service.game);
+        if (mounted) setState(() => gameReady = true);
+        return true;
+      }
+      choose = true;
+    }
+    if (mounted) setState(() => gameReady = false);
+    var retry = choose || await confirm('请选择游戏目录',
+      '当前目录不是完整的游戏目录。请选择包含 Data 文件夹和 gfxz.dat 或 gfld.dat 的目录。',
+      yes: '选择目录', no: '暂不选择');
+    while (retry && mounted) {
+      final directory = await getDirectoryPath(confirmButtonText: '选择游戏目录');
+      if (directory == null || !mounted) break;
+      try {
+        if (!await LauncherService.isGameDirectory(directory)) throw GameDirectoryError();
+        if (!await confirmClientDirectory(directory)) { retry = true; continue; }
+        await service.selectGameDirectory(directory);
+        if (mounted) setState(() { gameReady = true; running.clear(); });
+        await refreshRunning();
+        report('游戏目录已选择：${service.game}');
+        return true;
+      } on GameDirectoryError {
+        retry = await confirm('游戏目录不正确',
+          '所选目录缺少 Data/config.spf2 或游戏程序（gfxz.dat / gfld.dat），无法启动游戏。是否重新选择？',
+          yes: '重新选择', no: '取消');
+      }
+    }
+    report('未选择有效游戏目录，无法启动游戏。请点击“设置游戏目录”。');
+    return false;
+  }
+
+  Future<void> chooseGameDirectory() async {
+    if (busy || !ready) return;
+    setState(() => busy = true);
+    try { await ensureGameDirectory(choose: true); }
+    catch (e) { await error(e); }
+    finally { if (mounted) setState(() => busy = false); }
+  }
+
   Future<void> launch() async {
     setState(() { busy = true; transfer = null; });
     try {
+      await checkUpdate();
+      if (updateBlocked) return;
+      if (!await ensureGameDirectory()) return;
       await save();
       await service.validate();
       final client = service.config['update_enabled'] == false ? null : await updates.clientCheck();
       if (client != null) {
-        if (!await confirm('客户端更新', client['notes'] ?? '发现客户端更新，更新前需要关闭游戏。')) {
-          return;
-        }
+        await requireUpdate('客户端必须更新', client['notes'] ?? '发现客户端更新');
         await updates.installClient(client, report);
+      }
+      if (!service.local && service.config['update_enabled'] != false && updates.usesOss) {
+        if (client != null && await updates.clientCheck() != null) {
+          throw Exception('更新后文件校验未通过，请重新检查更新。');
+        }
+        service.verifiedRelease = updates.verifiedRelease;
       }
       await service.launch(selected, frameMode, fps, report);
     } catch (e) {
@@ -324,225 +407,131 @@ class _LauncherPageState extends State<LauncherPage> {
     super.dispose();
   }
 
+  Future<void> settings() async {
+    await showDialog<void>(context: context, builder: (c) => StatefulBuilder(
+      builder: (c, update) => AlertDialog(
+        title: Text('设置 · 窗口 $selected'),
+        content: SizedBox(width: 480, child: SingleChildScrollView(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('游戏目录'), const SizedBox(height: 8),
+            SelectableText(widget.preview ? '请选择游戏目录' : service.game, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(icon: const Icon(Icons.folder_open), label: const Text('设置游戏目录'),
+              onPressed: ready && !busy ? () async { Navigator.pop(c); await chooseGameDirectory(); } : null),
+
+          ],
+        ))),
+        actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('关闭')),
+          FilledButton(onPressed: () async {
+            try { if (!widget.preview) await save(); if (c.mounted) Navigator.pop(c); report('设置已保存'); }
+            catch (e) { await error(e); }
+          }, child: const Text('保存设置'))],
+      ),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.sports_martial_arts, size: 28),
-                const SizedBox(width: 12),
-                Expanded(child: Text('启动器 $launcherVersion', maxLines: 2, style: Theme.of(context).textTheme.headlineSmall)),
-                TextButton(
-                  onPressed: busy ? null : () => checkUpdate(manual: true),
-                  child: const Text('检查更新'),
-                ),
-                TextButton(
-                  onPressed: () => confirm(
-                    '使用说明',
-                    '将整个 ZIP 解压到完整游戏目录，与 Data 文件夹同级。',
-                    yes: '知道了',
-                  ),
-                  child: const Text('使用说明'),
-                ),
-              ],
-            ),
+    body: ClassicBackdrop(
+      child: SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(20, 10, 20, 16), child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(children: [
+          const Spacer(),
+          TextButton(onPressed: busy ? null : () => checkUpdate(manual: true), child: const Text('检查更新', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
+          TextButton(onPressed: busy ? null : settings, child: const Text('设置', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
+          TextButton(onPressed: () => confirm('使用说明', '选择窗口后点击“进入游戏”。', yes: '知道了'), child: const Text('使用说明', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
+        ]),
+        const SizedBox(height: 8),
+        Expanded(child: Container(
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xffffd8a5)),
+            boxShadow: const [BoxShadow(color: Color(0x18000000), blurRadius: 12, offset: Offset(0, 4))]),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Padding(padding: const EdgeInsets.fromLTRB(26, 14, 16, 8), child: Row(children: [
+              const Text('更新公告', style: TextStyle(color: Color(0xff9b3825), fontWeight: FontWeight.bold, fontSize: 17)),
+              const Spacer(),
+              IconButton(onPressed: ready && !readingAnnouncement ? refreshAnnouncement : null,
+                tooltip: '刷新公告', icon: const Icon(Icons.refresh, color: Color(0xff8e735d))),
+            ])),
+            const Divider(height: 1, color: Color(0xffdfd2c1)),
+            Expanded(child: SingleChildScrollView(padding: const EdgeInsets.all(26), child: SelectableText(
+              widget.preview ? '新增武器 · 王八拳拳谱\n\n感谢 QQ 512222607 制作。\n\n请务必更新后进入游戏。\n\n冰封阁楼双梯与启动器功能更新。' : announcement,
+              style: const TextStyle(color: Color(0xff333333), fontSize: 16, height: 1.7),
+            ))),
+          ]),
+        )),
+        const SizedBox(height: 16),
+        Row(children: [
+          Expanded(child: TextField(controller: account, enabled: ready && !busy,
+            textInputAction: TextInputAction.next,
+            decoration: InputDecoration(labelText: '窗口 $selected · 账号', floatingLabelBehavior: FloatingLabelBehavior.never, border: const OutlineInputBorder(), isDense: true))),
+          const SizedBox(width: 12),
+          Expanded(child: TextField(controller: password, enabled: ready && !busy, obscureText: !hide,
+            decoration: InputDecoration(labelText: '密码', floatingLabelBehavior: FloatingLabelBehavior.never, border: const OutlineInputBorder(), isDense: true,
+              suffixIcon: IconButton(tooltip: hide ? '隐藏密码' : '显示密码',
+                icon: Icon(hide ? Icons.visibility_off : Icons.visibility), onPressed: () => setState(() => hide = !hide))))),
+          IconButton(tooltip: '保存账号密码', icon: const Icon(Icons.save_outlined), onPressed: ready && !busy ? () async {
+            try { await save(); report('账号密码已保存'); } catch (e) { await error(e); }
+          } : null),
+        ]),
+        const SizedBox(height: 6),
+        const Text('账号不存在时，登录即自动注册。账号密码按窗口记忆。', style: TextStyle(fontSize: 11, color: Color(0xffffdd57))),
+        const SizedBox(height: 18),
+        Row(children: [
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('选择窗口', style: TextStyle(fontSize: 12, color: Color(0xffffdd57))),
             const SizedBox(height: 8),
-            Card(
-              child: SizedBox(
-                height: 86,
-                child: Row(children: [
-                  const Padding(padding: EdgeInsets.all(12), child: Icon(Icons.campaign_outlined)),
-                  Expanded(child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    child: SelectableText(announcement),
-                  )),
-                  IconButton(onPressed: ready && !readingAnnouncement ? refreshAnnouncement : null,
-                    tooltip: '刷新公告', icon: const Icon(Icons.refresh)),
-                ]),
-              ),
+            Wrap(spacing: 6, runSpacing: 6, children: List.generate(8, (index) => SizedBox(width: 46, height: 39,
+              child: OutlinedButton(style: OutlinedButton.styleFrom(padding: EdgeInsets.zero,
+                backgroundColor: selected == index + 1 ? const Color(0xffffd438) : const Color(0xfffff9ec),
+                foregroundColor: selected == index + 1 ? const Color(0xff332416) : const Color(0xff68361b),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6))),
+                onPressed: busy ? null : () { if (widget.preview) { setState(() => selected = index + 1); } else { select(index + 1); } },
+                child: Text('${index + 1}')))),
             ),
-            const SizedBox(height: 8),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    const Icon(Icons.public, color: Color(0xff23645c)),
-                    const SizedBox(width: 12),
-                    Expanded(child: Text(health)),
-                    IconButton(
-                      onPressed: ready ? refreshHealth : null,
-                      tooltip: '刷新服务器状态',
-                      icon: const Icon(Icons.refresh),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, bounds) {
-                  final panels = [
-                    SizedBox(
-                      width: 230,
-                      child: Card(
-                        child: ListView.builder(
-                          padding: const EdgeInsets.all(8),
-                          itemCount: 8,
-                          itemBuilder: (context, index) => ListTile(
-                            selected: selected == index + 1,
-                            selectedTileColor: const Color(0xffdeeee9),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            leading: const Icon(Icons.desktop_windows_outlined),
-                            title: Text('窗口 ${index + 1}'),
-                            subtitle: Text(
-                              accounts[index]['Account'] == ''
-                                  ? '未保存账号'
-                                  : accounts[index]['Account'],
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            onTap: () => select(index + 1),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Card(
-                        child: FocusTraversalGroup(
-                          policy: WidgetOrderTraversalPolicy(),
-                          child: SingleChildScrollView(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '窗口 $selected 的账号',
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text('账号不存在时，登录即自动注册。已有账号请输入正确密码。'),
-                              const SizedBox(height: 24),
-                              TextField(
-                                controller: account,
-                                enabled: ready && !busy,
-                                decoration: const InputDecoration(
-                                  labelText: '账号',
-                                  border: OutlineInputBorder(),
-                                ),
-                              ),
-                              const SizedBox(height: 18),
-                              TextField(
-                                controller: password,
-                                enabled: ready && !busy,
-                                obscureText: hide,
-                                decoration: InputDecoration(
-                                  labelText: '密码',
-                                  border: const OutlineInputBorder(),
-                                  suffixIcon: IconButton(
-                                    onPressed: () =>
-                                        setState(() => hide = !hide),
-                                    tooltip: hide ? '显示密码' : '隐藏密码',
-                                    icon: Icon(
-                                      hide
-                                          ? Icons.visibility_off
-                                          : Icons.visibility,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              TextButton.icon(
-                                onPressed: ready && !busy
-                                    ? () async {
-                                        try {
-                                          await save();
-                                          report('账号密码已保存');
-                                          setState(() {});
-                                        } catch (e) {
-                                          await error(e);
-                                        }
-                                      }
-                                    : null,
-                                icon: const Icon(Icons.save_outlined),
-                                label: const Text('保存账号密码'),
-                              ),
-                              const Text('按窗口分别保存，切换窗口和启动游戏时自动保存。'),
-                              const SizedBox(height: 16),
-                            ],
-                          ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ];
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: panels,
-                  );
-                },
-              ),
-            ),
-            Row(children: [
-              Expanded(child: DropdownButtonFormField<FrameMode>(
-                value: frameMode,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: '帧率模式（重启游戏生效）'),
-                items: const [
-                  DropdownMenuItem(value: FrameMode.normal, child: Text('普通模式')),
-                  DropdownMenuItem(value: FrameMode.high125, child: Text('高帧一：约 125 FPS')),
-                  DropdownMenuItem(value: FrameMode.configZero, child: Text('高帧二：配置设为 0（实验）')),
-                ],
-                onChanged: busy ? null : (v) { if (v != null) setState(() => frameMode = v); },
-              )),
-                              Expanded(child: SwitchListTile(
-                                contentPadding: EdgeInsets.zero,
-                                title: const Text('顶部居中显示 FPS'),
-                                subtitle: const Text('窗口模式'),
-                                value: fps,
-                                onChanged: busy
-                                    ? null
-                                    : (v) => setState(() => fps = v),
-                              )),
-            ]),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 12,
-              runSpacing: 10,
-              children: [
-                FilledButton.icon(
-                  onPressed: ready && !busy && running[selected] == false ? launch : null,
-                  icon: const Icon(Icons.play_arrow),
-                  label: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: Text(running[selected] == true ? '已启动' : '启动游戏'),
-                  ),
-                ),
-                OutlinedButton(
-                  onPressed: ready && !busy
-                      ? () => service.show(selected)
-                      : null,
-                  child: const Text('显示游戏窗口'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            if (transfer != null) UpdateProgressView(transfer!),
-            if (busy && transfer == null) const LinearProgressIndicator(),
-            const SizedBox(height: 8),
-            SelectableText(status, maxLines: 3),
-          ],
-        ),
-      ),
-    ),
+          ])),
+          const SizedBox(width: 16),
+          SizedBox(height: 57, width: 216, child: Semantics(button: true,
+            label: running[selected] == true ? '已启动' : '进入游戏', child: Tooltip(message: '进入游戏',
+              child: InkWell(onTap: ready && gameReady && !updateBlocked && !busy && running[selected] == false ? launch : null,
+                child: Stack(fit: StackFit.expand, children: [
+                  Image.asset('assets/classic/start.png', fit: BoxFit.fill),
+                  if (running[selected] == true) const ColoredBox(color: Color(0xfff5ce25),
+                    child: Center(child: Text('已启动', style: TextStyle(color: Colors.black, fontSize: 21)))),
+                ]))))),
+        ]),
+        const SizedBox(height: 18),
+        Row(children: [
+          Expanded(child: DropdownButtonFormField<FrameMode>(value: frameMode, isExpanded: true,
+            decoration: const InputDecoration(labelText: '帧率模式 · 重启游戏生效', floatingLabelBehavior: FloatingLabelBehavior.never, border: OutlineInputBorder(), isDense: true),
+            items: const [
+              DropdownMenuItem(value: FrameMode.normal, child: Text('普通模式')),
+              DropdownMenuItem(value: FrameMode.high125, child: Text('高帧率模式 1 · 约 125 FPS')),
+              DropdownMenuItem(value: FrameMode.configZero, child: Text('高帧率模式 2 · 最高约 500帧（实验）')),
+            ], onChanged: busy ? null : (v) { if(v != null) setState(() => frameMode = v); })),
+          const SizedBox(width: 12),
+          Switch(value: fps, onChanged: busy ? null : (v) => setState(() => fps = v)), const Text('显示 FPS', style: TextStyle(color: Color(0xffffdd57))),
+          const SizedBox(width: 8),
+          IconButton(onPressed: ready && !busy ? () => service.show(selected) : null,
+            tooltip: '显示游戏窗口', icon: const Icon(Icons.open_in_new)),
+        ]),
+        const SizedBox(height: 10),
+        Row(children: [const Icon(Icons.public, size: 15, color: Color(0xffffdd57)), const SizedBox(width: 8),
+          Expanded(child: Text(health, maxLines: 2, style: const TextStyle(fontSize: 12, color: Color(0xffffdd57)))),
+          IconButton(onPressed: ready ? refreshHealth : null, tooltip: '刷新服务器状态', icon: const Icon(Icons.refresh, size: 17)),
+        ]),
+        Row(children: [
+          Expanded(child: ClassicProgress(value: transfer?.overallFraction)),
+          const SizedBox(width: 16),
+          Text(transfer == null ? '准备就绪' : '${((transfer!.overallFraction ?? 0) * 100).round()}%',
+            style: const TextStyle(color: Color(0xffffdd57))),
+        ]),
+        if (transfer != null) UpdateProgressView(transfer!),
+        if (busy && transfer == null) const LinearProgressIndicator(),
+        SelectableText(status, maxLines: 2, style: const TextStyle(fontSize: 12, color: Colors.white)),
+      ],
+    )))),
   );
 }

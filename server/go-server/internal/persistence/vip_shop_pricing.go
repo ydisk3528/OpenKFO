@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"time"
@@ -9,9 +10,17 @@ import (
 // Call with the account already locked, including both accounts for gifts.
 // Membership comes from persisted cards and deadlines, never a client's kind.
 func vipShopPercentTx(tx *sql.Tx, uid uint64) (uint32, error) {
+	return vipShopPercentSnapshot(tx, uid, true)
+}
+
+func vipShopPercentSnapshot(tx *sql.Tx, uid uint64, lockRules bool) (uint32, error) {
 	var settings VIPShopSettings
 	var data []byte
-	err := tx.QueryRow("SELECT revision,rules FROM vip_shop_rules WHERE id=1 FOR UPDATE").Scan(&settings.Revision, &data)
+	query := "SELECT revision,rules FROM vip_shop_rules WHERE id=1"
+	if lockRules {
+		query += " LOCK IN SHARE MODE"
+	}
+	err := tx.QueryRow(query).Scan(&settings.Revision, &data)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -56,16 +65,18 @@ func (s *ShopManager) VIPShopPercent(uid uint64) (uint32, error) {
 	if uid == 0 {
 		return 0, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := s.store.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
 	var owner uint64
-	if err = tx.QueryRow("SELECT uid FROM accounts WHERE uid=? FOR UPDATE", uid).Scan(&owner); err != nil {
+	if err = tx.QueryRow("SELECT uid FROM accounts WHERE uid=?", uid).Scan(&owner); err != nil {
 		return 0, err
 	}
-	rate, err := vipShopPercentTx(tx, uid)
+	rate, err := vipShopPercentSnapshot(tx, uid, false)
 	if err != nil {
 		return 0, err
 	}

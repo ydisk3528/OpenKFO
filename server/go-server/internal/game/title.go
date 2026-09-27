@@ -24,8 +24,22 @@ func (h *Hub) announceTitleReward(s *Session) error {
 		return nil
 	}
 	if s.TitleOffer == 0 {
-		if _, err := storage2_3(h, h.Store.TitleManager().AdvanceTitle, s.UID, supported, h.Config.ConfigHash); err != nil {
+		advanced, err := storage2_3(h, h.Store.TitleManager().AdvanceTitle, s.UID, supported, h.Config.ConfigHash)
+		if err != nil {
 			return err
+		}
+		if advanced {
+			level, choices, err := storage3_1(h, h.Store.TitleManager().PendingTitleReward, s.UID)
+			if err != nil {
+				return err
+			}
+			if level == 0 && len(choices) == 0 {
+				account, err := storage2_1(h, h.Store.RoleManager().Snapshot, s.UID)
+				if err != nil {
+					return err
+				}
+				syncTutorialTitle(s, account.Profile[123])
+			}
 		}
 	}
 	level, choices, err := storage3_1(h, h.Store.TitleManager().PendingTitleReward, s.UID)

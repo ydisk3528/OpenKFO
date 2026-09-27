@@ -64,6 +64,8 @@ type Room struct {
 	combatMutex           sync.Mutex
 	pendingStageFinish    *pendingStageFinish
 	lastFosterHealthLog   time.Time
+	lastStageReportLog    time.Time
+	lastStageReportSerial uint32
 	NeutralNPC            *neutralNPCSession
 	FosterActivated       map[int]time.Time
 	FosterBatchEnded      map[int]time.Time

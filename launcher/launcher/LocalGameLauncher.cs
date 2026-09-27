@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -21,7 +21,7 @@ internal static class LocalGameLauncher
                     ? folder : Path.Combine(folder, "OpenKFO");
                 string script = Path.Combine(root, "tools", "Start-OneClick.ps1");
                 if (!File.Exists(script))
-                    throw new FileNotFoundException("找不到游戏启动文件。请把登录器放在“功夫小子”目录或 OpenKFO 目录中，不要单独移动 EXE。", script);
+                    throw new FileNotFoundException("找不到游戏启动文件。请把登录器放在游戏目录或 OpenKFO 目录中，不要单独移动 EXE。", script);
                 string shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
                 var info = new ProcessStartInfo(shell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script + "\"")
                 {
@@ -45,7 +45,7 @@ internal static class LocalGameLauncher
             }
             catch (Exception error)
             {
-                MessageBox.Show(error.Message, "功夫小子登录器", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(error.Message, "启动器提示", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
         }

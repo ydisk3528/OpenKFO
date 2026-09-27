@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // All touched tables are connection-local temporary tables; no account or
@@ -46,6 +47,8 @@ func TestStagePublishTransaction(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		// Give an incorrectly cancelled BeginTx context time to auto-rollback.
+		time.Sleep(20 * time.Millisecond)
 		if commit {
 			err = tx.Commit()
 		} else {

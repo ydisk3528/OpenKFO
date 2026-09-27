@@ -1,24 +1,46 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
+
+// The publisher owns this transaction across package activation. Cancel only
+// after commit/rollback, not when BeginStageRebind returns to its caller.
+type StageRebindTransaction struct {
+	tx     *sql.Tx
+	cancel context.CancelFunc
+}
+
+func (t *StageRebindTransaction) Commit() error {
+	defer t.cancel()
+	return t.tx.Commit()
+}
+
+func (t *StageRebindTransaction) Rollback() error {
+	defer t.cancel()
+	return t.tx.Rollback()
+}
 
 // BeginStageRebind holds the policy lock until the caller activates or rolls
 // back the release. The caller must first verify both map catalogues/scripts.
 // Raw JSON preserves fields introduced by newer administration tools.
-func (s *Store) BeginStageRebind(oldHash, newHash string) (*sql.Tx, error) {
-	tx, err := s.DB.Begin()
+func (s *Store) BeginStageRebind(oldHash, newHash string) (*StageRebindTransaction, error) {
+	// Maintenance spans a service restart and health checks, unlike gameplay.
+	tx, txCancel, err := beginTransactionWithin(s.DB, 2*time.Minute)
 	if err != nil {
+		txCancel()
 		return nil, err
 	}
 	if err = rebindStage(tx, oldHash, newHash); err != nil {
 		tx.Rollback()
+		txCancel()
 		return nil, err
 	}
-	return tx, nil
+	return &StageRebindTransaction{tx: tx, cancel: txCancel}, nil
 }
 
 func rebindStage(tx *sql.Tx, oldHash, newHash string) error {

@@ -2,7 +2,9 @@ package persistence
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"time"
 )
 
 // FriendManager owns directed native buddy lists, not reciprocal relationships.
@@ -28,7 +30,9 @@ func (m *FriendManager) List(uid uint64) ([]Friend, error) {
 	if uid == 0 {
 		return nil, ErrDenied
 	}
-	rows, err := m.store.DB.Query(`SELECT a.uid,a.nickname,a.profile FROM friends f JOIN accounts a ON a.uid=f.friend_uid WHERE f.uid=? ORDER BY a.uid LIMIT 101`, uid)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT a.uid,a.nickname,a.profile FROM friends f JOIN accounts a ON a.uid=f.friend_uid WHERE f.uid=? ORDER BY a.uid LIMIT 101`, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +81,8 @@ func (m *FriendManager) Change(uid uint64, name string, add bool) (Friend, error
 	if count != 1 || f.UID == uid || !validFriend(f) {
 		return f, ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return f, err
 	}

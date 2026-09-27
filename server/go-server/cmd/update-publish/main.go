@@ -3,7 +3,6 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,7 +64,7 @@ func run() error {
 			return err
 		}
 	}
-	var stageTx *sql.Tx
+	var stageTx *persistence.StageRebindTransaction
 	var stageStore *persistence.Store
 	if m.Kind == "client" {
 		store, tx, e := prepareStages(dir, m, raw)

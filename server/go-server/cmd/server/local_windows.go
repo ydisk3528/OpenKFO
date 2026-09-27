@@ -46,6 +46,9 @@ func prepareLocalConsole() (func(), error) {
 	if err = readJSON(filepath.Join(root, "settings.private.json"), &settings); err != nil {
 		return noop, err
 	}
+	if err = prepareLocalRedis(root); err != nil {
+		return noop, err
+	}
 	db, err := mysql.ParseDSN(settings.DSN)
 	if err != nil {
 		return noop, fmt.Errorf("invalid debug database configuration")

@@ -112,7 +112,7 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
       if (!mounted) return;
       setState(() {
         apply(r);
-        status = '已读取${widget.environment}，共 150 级';
+        status = '已读取${widget.environment}，共 200 级';
       });
     });
   }
@@ -134,7 +134,7 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
   Future<void> edit({int? index}) async {
     final first = TextEditingController(text: '${(index ?? 0) + 1}'),
         last = TextEditingController(
-          text: '${index == null ? 150 : index + 1}',
+          text: '${index == null ? 200 : index + 1}',
         );
     final fields = {
       for (final k in rewardColumns.keys.skip(1))
@@ -177,7 +177,7 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
                       ],
                     ),
                   if (index == null)
-                    const Text('留空表示保持原值；填 0 表示清零。150 级升级经验始终为 0。'),
+                    const Text('留空表示保持原值；填 0 表示清零。200 级升级经验始终为 0。'),
                   for (final e in fields.entries)
                     TextField(
                       key: ValueKey(e.key),
@@ -202,8 +202,8 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
                 try {
                   final start = int.parse(first.text),
                       end = int.parse(last.text);
-                  if (start < 1 || end > 150 || start > end) {
-                    throw const FormatException('等级区间须在 1–150 内');
+                  if (start < 1 || end > 200 || start > end) {
+                    throw const FormatException('等级区间须在 1–200 内');
                   }
                   final next = rows
                       .map((r) => Map<String, int>.from(r))
@@ -214,7 +214,7 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
                         next[i][e.key] = int.parse(e.value.text.trim());
                       }
                     }
-                    if (i == 149) next[i]['next_experience'] = 0;
+                    if (i == 199) next[i]['next_experience'] = 0;
                   }
                   validateRewardRows(next);
                   rows = next;
@@ -327,7 +327,7 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
       if (!mounted) return;
       final changes = rewardDiff({...rules, 'levels': next}, rules);
       if (await confirm(
-        '导入 150 行到当前表格',
+        '导入 200 行到当前表格',
         '${changes.length} 项变化。确认后仍需点击保存。\n${changes.join('\n')}',
       )) {
         setState(() {
@@ -398,11 +398,11 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              '1–150 级成长与战斗奖励表 · 点击行编辑。奖励按开战等级计算；150 级为满级。\n这是自定义规则；客户端经验条分母仍取客户端配置，修改曲线后显示可能不同。升级礼包、武器掉落可单独配置；空配置不发放。CSV仅包含成长数值，保留礼包和掉落。',
+              '1–200 级成长与战斗奖励表 · 点击行编辑。奖励按开战等级计算；200 级为满级。\n这是自定义规则；客户端经验条分母仍取客户端配置，修改曲线后显示可能不同。升级礼包、武器掉落可单独配置；空配置不发放。CSV仅包含成长数值，保留礼包和掉落。',
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('启用自动升级（需填满 1–149 级升级经验）'),
+              title: const Text('启用自动升级（需填满 1–199 级升级经验）'),
               value: growth,
               onChanged: busy || rows.isEmpty
                   ? null
@@ -592,7 +592,9 @@ class _RewardConfigPageState extends State<RewardConfigPage> {
                                           padding: const EdgeInsets.symmetric(
                                             horizontal: 8,
                                           ),
-                                          child: Text('${rows[i][k]}'),
+                                          child: Text(
+                                            '${rows[i][k]}',
+                                          ),
                                         ),
                                       ),
                                   ],

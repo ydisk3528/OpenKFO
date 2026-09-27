@@ -35,7 +35,8 @@ func (m *InventoryManager) Consume(uid uint64, battle, sequence, instance uint32
 	if len(signature) != 40 {
 		return false, ErrDenied
 	}
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return false, err
 	}

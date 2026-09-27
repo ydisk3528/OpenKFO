@@ -915,6 +915,9 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	lock.Close()
 	defer os.Remove(lockPath)
+	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" {
+		return weaponEffects(request, client, items, folder)
+	}
 	statePath := filepath.Join(folder, "settings.json")
 	state := weaponState{Drafts: map[string][]Rule{}, Applied: map[string][]Rule{}}
 	stateBytes, err := os.ReadFile(statePath)
@@ -947,11 +950,51 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if state.SourceHash != "" && digest(source.data) != state.SourceHash {
 		return nil, fmt.Errorf("原始配置备份已变化，已停止写入")
 	}
-	info, err := inspect(source, items)
+	current, err := os.ReadFile(packagePath)
 	if err != nil {
 		return nil, err
 	}
-	current, err := os.ReadFile(packagePath)
+	// A manually replaced client package is a new editing baseline. Never replay
+	// old plans over it: they may reference different actions or discard new maps.
+	if digest(current) != digest(source.data) && digest(current) != state.AppliedHash {
+		live, err := parseArchive(current)
+		if err != nil {
+			return nil, err
+		}
+		if err = live.verify(); err != nil {
+			return nil, err
+		}
+		if _, err = inspect(live, items); err != nil {
+			return nil, err
+		}
+		archived := filepath.Join(folder, "previous-"+time.Now().Format("20060102-150405.000000000"))
+		if err = os.Mkdir(archived, 0700); err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(filepath.Join(archived, "original.spf2"), source.data); err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(filepath.Join(archived, "settings.json"), stateBytes); err != nil {
+			return nil, err
+		}
+		state = weaponState{SourceHash: digest(current), Drafts: map[string][]Rule{}, Applied: map[string][]Rule{}}
+		stateBytes, err = json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(baseline, current); err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(statePath, stateBytes); err != nil {
+			// Keep the previous baseline and settings consistent on a failed save.
+			if rollback := atomicWrite(baseline, source.data); rollback != nil {
+				return nil, fmt.Errorf("保存新基准失败：%v；恢复失败：%v；备份：%s", err, rollback, archived)
+			}
+			return nil, err
+		}
+		source, sourcePath = live, baseline
+	}
+	info, err := inspect(source, items)
 	if err != nil {
 		return nil, err
 	}
@@ -1131,6 +1174,13 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			}
 		}
 		return nil, err
+	}
+	if request.Operation == "weapon_save" {
+		planFolder := filepath.Join(filepath.Dir(folder), "client-config-plans")
+		plan := configPlan{ID: "weapon-" + key, Category: "weapons", Name: weapon.Name, BaseHash: digest(source.data), Weapon: weapon.ID, Rules: rules}
+		if err = saveConfigPlan(planFolder, plan); err != nil {
+			return nil, fmt.Errorf("武器方案已保存，但分类方案同步失败：%w", err)
+		}
 	}
 	var backupValue any
 	if backup != "" {

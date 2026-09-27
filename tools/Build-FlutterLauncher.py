@@ -32,7 +32,7 @@ run([go,'build','-mod=readonly','-modfile=bridge-go120.mod','-trimpath','-ldflag
 # Runner and plugins use the static CRT; inspect engine imports in release QA.
 run(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',root/'tools/Build-BridgeGo120.ps1'],root)
 payload=out/'launcher-files';payload.mkdir()
-for name in ['LoginSkin.dll','LoginSkinHost.exe','SDError.dll','libssl-1_1.dll','libcrypto-1_1.dll','OnlineBridge.exe']:
+for name in ['LoginSkin.dll','LoginSkinHost.exe','SDError.dll','lqbz.dll','libssl-1_1.dll','libcrypto-1_1.dll','OnlineBridge.exe']:
     shutil.copy2(root/'dist/launcher-components'/name,payload/name)
 runtime=payload/'runtime-x86';runtime.mkdir()
 vc=root/'runtime-local/vc2019-minimum/vcruntime140.dll'

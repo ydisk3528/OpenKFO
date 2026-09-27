@@ -59,7 +59,7 @@ func TestStageSettlementLocalDatabase(t *testing.T) {
 	m := (&Store{DB: db}).BattleManager()
 	rules := RewardRules{}.Normalized()
 	rules.GrowthEnabled = true
-	for i := 0; i < 149; i++ {
+	for i := 0; i < int(MaxRoleLevel)-1; i++ {
 		rules.Levels[i].NextExperience = 100
 	}
 	rules.StageRewards = []StageMapRewards{{MapID: 20051, Clear: StageReward{RewardBundle: RewardBundle{Gold: 7, Tickets: 2, Items: []uint32{12}}, Experience: 20}, Failed: StageReward{RewardBundle: RewardBundle{Gold: 1}}}}

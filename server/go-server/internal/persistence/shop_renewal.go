@@ -63,7 +63,8 @@ func (m *ShopManager) RenewItem(uid uint64, operation string, payload []byte, qu
 	if err != nil || uid == 0 || len(operation) == 0 || len(operation) > 128 || r.Operation() != 105 || r.SenderUID() != uid || r.RecipientUID() != uid || r.InventoryInstance() == 0 {
 		return out, ErrDenied
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return out, err
 	}
@@ -96,7 +97,7 @@ func (m *ShopManager) RenewItem(uid uint64, operation string, payload []byte, qu
 	}
 	var catalog, grant []byte
 	var days uint32
-	err = tx.QueryRow(`SELECT o.record,o.grant_record,l.days FROM offers o JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key WHERE o.catalog_key=? AND o.enabled=TRUE FOR UPDATE`, r.CatalogKey()).Scan(&catalog, &grant, &days)
+	err = tx.QueryRow(`SELECT o.record,o.grant_record,l.days FROM offers o JOIN offer_lifetimes l ON l.catalog_key=o.catalog_key WHERE o.catalog_key=? AND o.enabled=TRUE LOCK IN SHARE MODE`, r.CatalogKey()).Scan(&catalog, &grant, &days)
 	if err != nil {
 		return out, err
 	}

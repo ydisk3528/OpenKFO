@@ -73,7 +73,8 @@ func (s *Store) normalizeEquippedInventory(a *Account) error {
 	if !needed {
 		return nil
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}

@@ -23,8 +23,8 @@ func validateDrops(rules []DropRule) error {
 		return fmt.Errorf("掉落规则最多32条")
 	}
 	for _, r := range rules {
-		if r.CatalogKey == 0 || (r.Outcome != "win" && r.Outcome != "loss" && r.Outcome != "draw") || r.MinLevel < 1 || r.MaxLevel > 150 || r.MinLevel > r.MaxLevel || r.Chance > 10000 {
-			return fmt.Errorf("掉落规则需有效商品编号、win/loss/draw、1–150级范围及0–10000概率")
+		if r.CatalogKey == 0 || (r.Outcome != "win" && r.Outcome != "loss" && r.Outcome != "draw") || r.MinLevel < 1 || r.MaxLevel > MaxRoleLevel || r.MinLevel > r.MaxLevel || r.Chance > 10000 {
+			return fmt.Errorf("掉落规则需有效商品编号、win/loss/draw、1–200级范围及0–10000概率")
 		}
 	}
 	return nil

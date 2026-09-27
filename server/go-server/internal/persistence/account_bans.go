@@ -51,7 +51,8 @@ func (store *Store) SaveAccountBan(r AdminRequest) (any, error) {
 	if err := validateAccountBan(r, time.Now().Unix()); err != nil {
 		return nil, err
 	}
-	tx, err := store.DB.Begin()
+	tx, txCancel, err := beginTransaction(store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

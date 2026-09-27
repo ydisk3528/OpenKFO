@@ -22,7 +22,7 @@ func fosterSpawnPacket(owner, actor uint64, sequence uint32, spawn protocol.Fost
 }
 
 func TestFosterSpawnPlanGate(t *testing.T) {
-	for _, scenario := range []string{"valid", "no-plan", "template", "position", "direction", "peer", "capacity", "ambiguous"} {
+	for _, scenario := range []string{"valid", "missing-movement", "missing-movement-timed", "no-plan", "template", "position", "direction", "peer", "capacity", "ambiguous"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, owner, peer, outsider := combatFixture()
 			r := owner.Room
@@ -33,6 +33,12 @@ func TestFosterSpawnPlanGate(t *testing.T) {
 			r.FosterTriggered = []bool{true}
 			sender := owner
 			switch scenario {
+			case "missing-movement", "missing-movement-timed":
+				r.FosterTriggered[0] = false
+				if scenario == "missing-movement-timed" {
+					delay := float32(2)
+					r.FosterPlan.Groups[0].EndAfter = &delay
+				}
 			case "no-plan":
 				r.FosterPlan = nil
 			case "template":
@@ -54,8 +60,8 @@ func TestFosterSpawnPlanGate(t *testing.T) {
 			if err := h.battleMessage(sender, sender.game(), m); err != nil {
 				t.Fatal(err)
 			}
-			if scenario == "valid" {
-				if !r.hasPVEActor(42) || !r.controlsBattleActor(owner, 42) || r.controlsBattleActor(peer, 42) || r.FosterSpawned[0] != 1 {
+			if scenario == "valid" || scenario == "missing-movement" {
+				if !r.FosterTriggered[0] || !r.hasPVEActor(42) || !r.controlsBattleActor(owner, 42) || r.controlsBattleActor(peer, 42) || r.FosterSpawned[0] != 1 {
 					t.Fatal("spawn permission not registered")
 				}
 				if out := roomOutputs(t, peer, 8071); !bytes.Equal(out[0].Payload, m.Payload) {
@@ -202,5 +208,45 @@ func TestFosterConcurrentSpawnLimits(t *testing.T) {
 				t.Fatal("validation consumed spawn plan")
 			}
 		})
+	}
+}
+
+// Regression: map 8113's second area can spawn before a movement receipt.
+// Losing the spawn also loses the peer's 20406, leaving the host waiting.
+func TestFosterSecondAreaSpawnAndPeerAckWithoutMovement(t *testing.T) {
+	h, owner, peer, _ := combatFixture()
+	r := owner.Room
+	r.Request[46] = byte(protocol.FosterMode)
+	box := [6]float32{-600, -5, -60, -400, 10, 40}
+	spawns := make([]protocol.FosterSpawn, 10)
+	for i := range spawns {
+		template := uint32(107)
+		if i%5 >= 3 {
+			template = 108
+		}
+		spawns[i] = protocol.FosterSpawn{Template: template, BornBox: &box, Position: [3]float32{-450, 0, 0}, Direction: 2}
+	}
+	r.FosterPlan = &protocol.FosterPlan{GlobalLimit: 100, Groups: []protocol.FosterGroup{
+		{SubLimit: 10, GroupLimit: 20, Spawns: make([]protocol.FosterSpawn, 25)},
+		{SubLimit: 10, GroupLimit: 20, Spawns: spawns},
+	}}
+	r.FosterSpawned, r.FosterRetired = []int{25, 0}, []int{25, 0}
+	r.FosterTriggered = []bool{true, false}
+	for i, spawn := range spawns {
+		actor := uint64(18750 + i)
+		create := fosterSpawnPacket(owner.UID, actor, uint32(i+1), spawn)
+		if err := h.battleMessage(owner, owner.game(), create); err != nil {
+			t.Fatal(err)
+		}
+		roomOutputs(t, peer, 8071)
+		ack := combatPacket(20406, 47, peer.UID, actor, 0)
+		ack.Payload[12], ack.Payload[13] = 1, 1
+		if err := h.battleMessage(peer, peer.game(), ack); err != nil {
+			t.Fatal(err)
+		}
+		roomOutputs(t, owner, 8071)
+	}
+	if r.FosterSpawned[1] != 10 {
+		t.Fatal("second area stalled", r.FosterSpawned)
 	}
 }

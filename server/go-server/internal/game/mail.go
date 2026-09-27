@@ -12,13 +12,7 @@ func (h *Hub) mail(s *Session, m protocol.Message) error {
 		if len(m.Payload) != 0 {
 			return protocol.ErrFrame
 		}
-		p, err := storage2_1(h, h.Store.MailManager().Mailbox, s.UID)
-		if err != nil {
-			return err
-		}
-		s.sendGame(protocol.Message{ID: 1310, Payload: p})
-		s.MailDirty = false
-		return nil
+		return h.mailboxSnapshot(s)
 	}
 	key, err := protocol.ParseMailAction(m.Payload, s.UID)
 	if m.ID == 2171 {
@@ -95,7 +89,16 @@ func (h *Hub) refreshMail(s *Session) error {
 	if ch == nil || (ch.Phase != "lobby" && ch.Phase != "room") || (s.Room != nil && s.Room.Stage != "room") {
 		return nil
 	}
-	p, err := storage2_1(h, h.Store.MailManager().Mailbox, s.UID)
+	return h.mailboxSnapshot(s)
+}
+
+func (h *Hub) mailboxSnapshot(s *Session) error {
+	manager, uid, revision := h.Store.MailManager(), s.UID, s.mailRevision
+	var p []byte
+	var err error
+	if !h.readSessionSnapshot(s, func() { p, err = manager.Mailbox(uid) }) || s.mailRevision != revision {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

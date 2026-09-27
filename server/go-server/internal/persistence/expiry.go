@@ -59,7 +59,8 @@ func (m *InventoryManager) ExpireInventory(uid uint64) error {
 	if !due {
 		return nil
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}

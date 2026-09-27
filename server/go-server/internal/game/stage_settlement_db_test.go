@@ -158,6 +158,22 @@ func TestStageSettlementRouteLocalDatabase(t *testing.T) {
 	if err = db.QueryRow("SELECT COUNT(*) FROM battle_settlements").Scan(&receipts); err != nil || receipts != 1 {
 		t.Fatal("duplicate receipt", receipts, err)
 	}
+	// Follow the persisted multiplayer result through both native acknowledgements.
+	if err = h.route(owner, owner.game(), protocol.Message{ID: 4115, Payload: make([]byte, 4)}); err != nil {
+		t.Fatal(err)
+	}
+	if r.Stage != "settlement" {
+		t.Fatal("one acknowledgement prematurely completed result screen")
+	}
+	if err = h.route(peer, peer.game(), protocol.Message{ID: 4115, Payload: make([]byte, 4)}); err != nil {
+		t.Fatal(err)
+	}
+	if r.Stage != "room" || owner.game().Phase != "room" || peer.game().Phase != "room" {
+		t.Fatal("both acknowledgements failed to return room")
+	}
+	for _, s := range []*Session{owner, peer} {
+		roomOutputs(t, s, protocol.MsgPlayerNotReady, protocol.MsgPlayerNotReady)
+	}
 	// A verified all-zero-health reason 2 uses failure configuration, not PvP.
 	r.Serial = 2
 	r.Stage = "battle"
@@ -254,6 +270,29 @@ func TestStageSettlementRouteLocalDatabase(t *testing.T) {
 		}
 		h.lockState()
 		pending := r.pendingStageFinish != nil && r.Stage == "battle"
+		if pending {
+			r.pendingStageFinish.deadline = time.Now().Add(-time.Second)
+		}
+		h.unlockState()
+		// Simulate the former five-second cutoff before progress catches up.
+		warningDeadline := time.Now().Add(2 * time.Second)
+		for pending {
+			h.Mutex.RLock()
+			warned := r.pendingStageFinish != nil && r.pendingStageFinish.warned
+			h.Mutex.RUnlock()
+			if warned {
+				break
+			}
+			if time.Now().After(warningDeadline) {
+				t.Fatal("finish warning not emitted")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if pending {
+			roomOutputs(t, owner, 20150)
+			roomOutputs(t, peer, 20150)
+		}
+		h.lockState()
 		r.FosterFinishReported = true
 		r.StageWaves.finished, r.StageWaves.index = true, 1
 		h.unlockState()

@@ -51,7 +51,8 @@ func (s *Store) SaveHonourSettings(r HonourSettings) (HonourSettings, error) {
 	if err != nil {
 		return HonourSettings{}, err
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return HonourSettings{}, err
 	}

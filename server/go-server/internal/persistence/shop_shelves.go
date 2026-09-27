@@ -1,6 +1,10 @@
 package persistence
 
-import "strings"
+import (
+	"context"
+	"strings"
+	"time"
+)
 
 // These are read aliases, never new sale records. In particular 255 remains
 // governed exclusively by offer_recommendations in Offers.
@@ -33,7 +37,9 @@ func (m *ShopManager) compatibleOffers(category, variant int, kinds []byte) ([]O
 	// Include disabled rows so a deliberately disabled configured shelf is not
 	// replaced by a fallback. The final result contains enabled offers only.
 	query := `SELECT catalog_key,category,variant,record,grant_record,enabled FROM offers WHERE (category=? AND variant=?) OR (category=10 AND variant IN (` + strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",") + `)) ORDER BY catalog_key`
-	rows, err := m.store.DB.Query(query, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := m.store.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

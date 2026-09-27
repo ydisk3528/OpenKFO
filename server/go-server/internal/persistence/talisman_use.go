@@ -26,7 +26,8 @@ func (s *ItemManager) UseTalisman(uid uint64, operation string, use TalismanUse)
 	protocol.WriteUint32(request, 8, use.Kind)
 	protocol.WriteUint16(request, 12, use.Slot)
 	protocol.WriteUint16(request, 14, use.Cost)
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, false, err
 	}

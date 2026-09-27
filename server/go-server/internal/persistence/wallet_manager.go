@@ -6,7 +6,8 @@ func (m *WalletManager) AdjustTickets(uid uint64, mode string, amount uint32, op
 	if (mode != "gift" && mode != "set") || amount > 2147483647 || len(operationID) < 1 || len(operationID) > 128 {
 		return 0, 0, ErrDenied
 	}
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return 0, 0, err
 	}

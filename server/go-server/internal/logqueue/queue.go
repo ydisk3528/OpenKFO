@@ -10,12 +10,13 @@ import (
 )
 
 type Queue struct {
-	mu      sync.Mutex
-	closed  bool
-	jobs    chan func()
-	done    chan struct{}
-	dropped atomic.Uint64
-	out     io.Writer
+	mu          sync.Mutex
+	closed      bool
+	jobs        chan func()
+	done        chan struct{}
+	dropped     atomic.Uint64
+	writeErrors atomic.Uint64
+	out         io.Writer
 }
 
 func New(out io.Writer, capacity int) *Queue {
@@ -45,13 +46,24 @@ func (q *Queue) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	copy := append([]byte(nil), p...)
-	q.Submit(func() { _, _ = q.out.Write(copy) })
+	q.Submit(func() {
+		n, err := q.out.Write(copy)
+		if err != nil || n != len(copy) {
+			q.writeErrors.Add(1)
+		}
+	})
 	return len(p), nil
 }
 
 func (q *Queue) report() {
-	if n := q.dropped.Swap(0); n > 0 {
-		fmt.Fprintf(q.out, "diagnostic_queue_dropped count=%d gameplay_not_blocked=true\n", n)
+	n, failures := q.dropped.Load(), q.writeErrors.Load()
+	if n > 0 || failures > 0 {
+		line := fmt.Sprintf("diagnostic_queue_dropped count=%d write_errors=%d gameplay_not_blocked=true\n", n, failures)
+		written, err := io.WriteString(q.out, line)
+		if err == nil && written == len(line) {
+			q.dropped.Add(-n)
+			q.writeErrors.Add(-failures)
+		}
 	}
 }
 

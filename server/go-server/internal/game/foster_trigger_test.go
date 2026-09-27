@@ -16,8 +16,8 @@ func TestFosterTriggerMovement(t *testing.T) {
 			spawn := protocol.FosterSpawn{Template: 0}
 			r.FosterPlan = &protocol.FosterPlan{GlobalLimit: 10, Groups: []protocol.FosterGroup{{SubLimit: 2, GroupLimit: 2, Spawns: []protocol.FosterSpawn{spawn}, TriggerBox: [6]float32{-1, -2, -3, 1, 2, 3}}}}
 			r.FosterSpawned, r.FosterTriggered = []int{0}, []bool{false}
-			if r.fosterSpawnGroup(protocol.PVEActorCreate{}) != -1 {
-				t.Fatal("untriggered group admitted spawn")
+			if r.fosterSpawnGroup(protocol.PVEActorCreate{}) != 0 {
+				t.Fatal("valid untimed spawn requires a movement receipt")
 			}
 			position := [3]float32{}
 			sender, actor := peer, peer.UID

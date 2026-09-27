@@ -1,3 +1,5 @@
+import 'item_pictures.dart';
+
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -18,6 +20,7 @@ class VipConfigPage extends StatefulWidget {
 }
 
 class _VipConfigPageState extends State<VipConfigPage> {
+  late final pictures = ItemPictures(widget.api);
   final days = TextEditingController(text: '30');
   int kind = 2;
   bool permanent = false, busy = false, loaded = false;
@@ -80,7 +83,7 @@ class _VipConfigPageState extends State<VipConfigPage> {
         builder: (c) => AlertDialog(
           title: Text('发放到 ${widget.environment}'),
           content: Text(
-              '玩家：${widget.account}\nUID：${widget.uid}\n${label(kind)} · ${permanent ? '永久' : '$n 天'}\n\n新增一张会员卡，不延长旧卡。商城折扣由当前环境的「VIP商城折扣」配置决定，发卡本身不开启折扣或发放奖励。发放后请重新登录刷新。',
+            '玩家：${widget.account}\nUID：${widget.uid}\n${label(kind)} · ${permanent ? '永久' : '$n 天'}\n\n新增一张会员卡，不延长旧卡。商城折扣由当前环境的「VIP商城折扣」配置决定，发卡本身不开启折扣或发放奖励。发放后请重新登录刷新。',
           ),
           actions: [
             TextButton(
@@ -152,6 +155,7 @@ class _VipConfigPageState extends State<VipConfigPage> {
               ],
               onChanged: editable ? (v) => setState(() => kind = v!) : null,
             ),
+            if (kind >= 2 && kind <= 4) pictures.byId(730000 + kind - 1),
             SwitchListTile(
               title: const Text('永久资格'),
               value: permanent,
@@ -164,7 +168,9 @@ class _VipConfigPageState extends State<VipConfigPage> {
               decoration: const InputDecoration(labelText: '有效天数（1–3650）'),
             ),
             const SizedBox(height: 16),
-              const Text('需要配套新版服务器。不同档位取最高有效档；同档永久优先，否则取最晚期限。商城折扣请在当前环境的「VIP商城折扣」中单独配置；其他会员奖励尚未开放。'),
+            const Text(
+              '需要配套新版服务器。不同档位取最高有效档；同档永久优先，否则取最晚期限。商城折扣请在当前环境的「VIP商城折扣」中单独配置；其他会员奖励尚未开放。',
+            ),
             if (pending != null)
               SelectableText('待确认请求：${pending!['id']}\n重试不会重复发卡；请保留当前页面完成确认。'),
             const SizedBox(height: 16),

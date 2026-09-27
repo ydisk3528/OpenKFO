@@ -8,7 +8,8 @@ import (
 
 // Each event group advances independently. Match the complete native spawn
 // literal; template counts alone would permit skipping ahead to the boss.
-// Trigger state is latched from validated player position receipts.
+// Movement receipts can omit a trigger crossing. For untimed groups, a valid
+// controller spawn is also evidence that the native script activated the group.
 func (r *Room) fosterSpawnGroup(event protocol.PVEActorCreate) int {
 	plan := r.FosterPlan
 	if plan == nil || len(r.FosterSpawned) != len(plan.Groups) || len(r.FosterTriggered) != len(plan.Groups) {
@@ -34,7 +35,7 @@ func (r *Room) fosterSpawnGroup(event protocol.PVEActorCreate) int {
 	}
 	matched := -1
 	for i, group := range plan.Groups {
-		if !r.FosterTriggered[i] {
+		if !r.FosterTriggered[i] && group.EndAfter != nil {
 			continue
 		}
 		familyLiving := living[i]

@@ -7,7 +7,8 @@ func (s *TitleManager) CompleteTutorial(uid uint64) (byte, error) {
 	if uid == 0 {
 		return 0, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return 0, err
 	}

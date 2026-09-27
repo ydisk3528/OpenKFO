@@ -108,7 +108,8 @@ func (m *BattleManager) settleBattle(serial uint32, reports []byte, rewards []Ba
 		}
 	}
 	sort.Slice(rewards, func(i, j int) bool { return rewards[i].UID < rewards[j].UID })
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +188,7 @@ func (m *BattleManager) settleBattle(serial uint32, reports []byte, rewards []Ba
 		if r.StartLevel != 0 {
 			startLevel = r.StartLevel
 		}
-		if startLevel > 150 {
+		if startLevel > MaxRoleLevel {
 			return nil, ErrDenied
 		}
 		r.Items = nil
@@ -249,7 +250,8 @@ func (m *BattleManager) settleBattle(serial uint32, reports []byte, rewards []Ba
 }
 
 func (m *BattleManager) NextBattle() (uint32, error) {
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return 0, err
 	}

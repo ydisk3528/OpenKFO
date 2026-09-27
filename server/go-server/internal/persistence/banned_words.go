@@ -60,7 +60,8 @@ func (s *Store) SaveBannedWords(r BannedWordsSettings) (BannedWordsSettings, err
 	if err != nil {
 		return r, err
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return r, err
 	}

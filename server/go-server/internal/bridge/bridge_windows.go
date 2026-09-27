@@ -29,6 +29,7 @@ import (
 )
 
 type Config struct {
+	ClientRelease     string `json:"client_release"`
 	SharedClient      bool   `json:"shared_client"`
 	ControlDirectory  string `json:"control_directory"`
 	TraceProtocol     bool   `json:"trace_protocol"`
@@ -326,7 +327,7 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 	}
 	session := &remoteSession{account: account, traces: map[uint32]*packetTrace{}, identity: identity, connection: connection, reader: bufio.NewReaderSize(connection, 65536), encoder: json.NewEncoder(connection), channels: map[uint32]net.Conn{}, udpPorts: map[int]bool{}, done: make(chan struct{})}
 	receipt := bridge.peerReceiptFor(identity)
-	if err = session.send(tunnel.Frame{PeerReceipt: receipt, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
+	if err = session.send(tunnel.Frame{PeerReceipt: receipt, ClientRelease: bridge.Config.ClientRelease, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
 		session.close()
 		return nil, err
 	}
@@ -338,6 +339,9 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 	var response tunnel.Frame
 	if err = json.Unmarshal(encoded, &response); err != nil || response.Op != "auth" || response.Error != "" || response.UID == 0 {
 		session.close()
+		if response.Error == "" {
+			return nil, loginRejected("invalid_server_response")
+		}
 		return nil, loginRejected(response.Error)
 	}
 	session.uid = response.UID
@@ -383,13 +387,13 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 			current, identityErr := processIdentity(bridge.active.identity.PID, bridge.Image)
 			if identityErr == nil && current == bridge.active.identity {
 				if identity != bridge.active.identity {
-					json.NewEncoder(connection).Encode(map[string]any{"code": 403, "msg": "Client already connected"})
+					bridge.reportLoginFailure(connection, identity, loginRejected("client_already_connected"))
 					return
 				}
 				old := bridge.active
 				if err := old.send(tunnel.Frame{Op: "logout"}); err != nil {
 					old.close()
-					json.NewEncoder(connection).Encode(map[string]any{"code": 403, "msg": "Logout failed; retry login"})
+					bridge.reportLoginFailure(connection, identity, loginRejected("logout_failed"))
 					return
 				}
 				select {
@@ -397,7 +401,7 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 					log.Printf("relogin_previous_session_released account=%q uid=%d", old.account, old.uid)
 				case <-time.After(5 * time.Second):
 					old.close()
-					json.NewEncoder(connection).Encode(map[string]any{"code": 403, "msg": "Logout timed out; retry login"})
+					bridge.reportLoginFailure(connection, identity, loginRejected("logout_timeout"))
 					return
 				}
 			}
@@ -406,20 +410,18 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 		}
 	}
 	if err = tablesReady(identity); err != nil {
-		log.Print("client tables not ready")
+		log.Printf("client tables not ready: %v", err)
+		bridge.reportLoginFailure(connection, identity, loginRejected("client_tables_not_ready"))
 		return
 	}
 	session, err := bridge.connect(request.Username, request.Password, identity)
 	request.Password = ""
 	if err != nil {
-		log.Printf("online login failed: %v", err)
-		message := loginFailureMessage(err)
-		json.NewEncoder(connection).Encode(map[string]any{"code": 403, "msg": message})
-		// Legacy SDK hides server error text; show the reason for this process.
-		go showLoginFailure(identity, bridge.Image, message)
+		bridge.reportLoginFailure(connection, identity, err)
 		return
 	}
 	if err = session.send(tunnel.Frame{Op: "ready"}); err != nil {
+		bridge.reportLoginFailure(connection, identity, loginRejected("ready_send_failed"))
 		session.close()
 		return
 	}
@@ -429,15 +431,18 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 	}
 	token := make([]byte, 16)
 	if _, err = rand.Read(token); err != nil {
+		bridge.reportLoginFailure(connection, identity, loginRejected("local_token_failed"))
 		session.close()
 		return
 	}
 	response, err := protocol.LegacyLoginSuccess(hex.EncodeToString(token))
 	if err != nil {
+		bridge.reportLoginFailure(connection, identity, loginRejected("local_reply_failed"))
 		session.close()
 		return
 	}
 	if _, err = connection.Write(response); err != nil {
+		bridge.reportLoginFailure(connection, identity, loginRejected("local_connection_closed"))
 		session.close()
 		return
 	}
@@ -637,4 +642,11 @@ func (bridge *Bridge) datagrams() {
 			session.close()
 		}
 	}
+}
+
+func (bridge *Bridge) reportLoginFailure(connection net.Conn, identity Identity, err error) {
+	log.Printf("login_failure pid=%d: %v", identity.PID, err)
+	message := loginFailureMessage(err)
+	json.NewEncoder(connection).Encode(map[string]any{"code": 403, "msg": message})
+	go showLoginFailure(identity, bridge.Image, message)
 }

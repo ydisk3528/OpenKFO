@@ -23,8 +23,10 @@ var accountPattern = regexp.MustCompile(`^[a-zA-Z0-9]{3,20}$`)
 var legacyPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
 type Store struct {
-	DB         *sql.DB
-	wordFilter *wordCache
+	DB           *sql.DB
+	wordFilter   *wordCache
+	rankings     [13]rankingSlot
+	rankingRedis *rankingRedis
 }
 type Account struct {
 	BanGeneration uint64   `json:"-"`
@@ -184,6 +186,10 @@ func Open(dsn string) (*Store, error) { return open(dsn, true) }
 func OpenExisting(dsn string) (*Store, error) { return open(dsn, false) }
 
 func open(dsn string, initialize bool) (*Store, error) {
+	dsn, err := boundedDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
 	database, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
@@ -304,7 +310,8 @@ func insertAccount(transaction *sql.Tx, account Account) error {
 	return nil
 }
 func (store *Store) Create(account Account) error {
-	transaction, err := store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return err
 	}
@@ -335,7 +342,8 @@ func (store *Store) ResetPassword(uid uint64, name, password string) error {
 	return nil
 }
 func (store *Store) Import(export Export) error {
-	transaction, err := store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,9 @@
 package game
 
-import "kungfu.local/server/internal/protocol"
+import (
+	"kungfu.local/server/internal/protocol"
+	"time"
+)
 
 // Native 93B0C8 (mode 21) / 942E8E (mode 10) seed 100 identities and return removed identities
 // to the pool. Keep tombstones for this battle so old events cannot resurrect
@@ -99,6 +102,14 @@ func (h *Hub) applyPVEActor(s *Session, message protocol.Message, observed bool)
 	}
 	r.PVEActors[actor] = pveActor{sequence: sequence, active: create, fosterGroup: fosterGroup}
 	if fosterGroup >= 0 {
+		// Latch only after the owner packet passed the complete spawn check.
+		if !r.FosterTriggered[fosterGroup] {
+			r.FosterTriggered[fosterGroup] = true
+			if r.FosterActivated == nil {
+				r.FosterActivated = map[int]time.Time{}
+			}
+			r.FosterActivated[fosterGroup] = time.Now()
+		}
 		r.FosterSpawned[fosterGroup]++
 		if int(template) < len(r.FosterPlan.InitialHP) {
 			state := r.PVEActors[actor]

@@ -7,6 +7,10 @@ import (
 
 func TestStageWaveProgression(t *testing.T) {
 	h, owner, peer, outsider := combatFixture()
+	// Direct route calls need the same state guard as Hub.Handle now that
+	// early reports schedule a background recheck.
+	h.lockState()
+	defer h.unlockState()
 	r := owner.Room
 	r.Request[46] = byte(protocol.StageAssault)
 	plans := []StageWavePlan{{Monsters: map[uint32]uint32{7: 1}}, {Monsters: map[uint32]uint32{8: 1}}}

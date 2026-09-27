@@ -121,6 +121,11 @@ func main() {
 			}
 		}
 	case "serve":
+		closeCache, cacheErr := store.ConfigureRankingRedis(os.Getenv("OPENKFO_REDIS_ADDR"), os.Getenv("OPENKFO_REDIS_PASSWORD_FILE"), os.Getenv("OPENKFO_REDIS_NAMESPACE"))
+		if cacheErr != nil {
+			fatal("Redis configuration invalid: ", cacheErr)
+		}
+		defer closeCache()
 		words := moderation.DefaultWords()
 		if *bannedWordsPath != "" {
 			raw, e := os.ReadFile(*bannedWordsPath)
@@ -218,11 +223,6 @@ func main() {
 		defer audit.Close(2 * time.Second)
 		hub.SubmitSecurityAudit = audit.Submit
 		hub.SecurityLogDirectory = os.Getenv("OPENKFO_SECURITY_LOG_DIR")
-		if config.ReleaseVersionURL != "" {
-			if err = hub.RefreshRelease(context.Background()); err != nil {
-				fatal("无法确认OSS发布版本：", err)
-			}
-		}
 		if *traceProtocol {
 			hub.Trace = log.New(log.Writer(), "", 0)
 		}
@@ -232,7 +232,6 @@ func main() {
 		defer stop()
 		watchLocalMonitor(stop)
 		go hub.RunNotices(ctx)
-		go hub.WatchRelease(ctx)
 		if *udpAddress != "" {
 			closeUDP, udpErr := gameServer.ListenDatagrams(*udpAddress)
 			if udpErr != nil {

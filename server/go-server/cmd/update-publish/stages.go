@@ -3,7 +3,6 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -63,7 +62,7 @@ func serviceDSN() (string, error) {
 	return "", fmt.Errorf("服务未设置数据库环境，发布已取消")
 }
 
-func prepareStages(dir string, m releases.Manifest, raw []byte) (*persistence.Store, *sql.Tx, error) {
+func prepareStages(dir string, m releases.Manifest, raw []byte) (*persistence.Store, *persistence.StageRebindTransaction, error) {
 	previous, err := releases.Load(dir, "client")
 	if os.IsNotExist(err) {
 		previous, err = releases.Load(dir, "weapons")

@@ -23,6 +23,14 @@ var loadingThreadCleanupSafe = []byte{0x8b, 0x15, 0x30, 0x87, 0x7c, 0x01, 0x52, 
 // Inventory bytes and combat durability consumers are never changed.
 const itemDurationDisplayAddress = uintptr(0xa1ec5f)
 
+// Shop::magicWeapon (850B90) sets a subtype=1 filter before querying 10/30.
+// Filter 846BD0 rejects subtype=0 head/back ornaments already in that response.
+// Zero means all subtypes. Keep the separate subtype=2 pet tab unchanged.
+const shopOrnamentsFilterAddress = uintptr(0x850bc9)
+
+var shopOrnamentsFilterOriginal = []byte{0xc7, 0x80, 0x38, 0x07, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00}
+var shopOrnamentsFilterAll = []byte{0xc7, 0x80, 0x38, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
 var itemDurationDisplayOriginal = []byte{0x0f, 0x85, 0x20, 0x01, 0x00, 0x00}
 var itemDurationDisplayFixed = []byte{0x90, 0x90, 0x90, 0x90, 0x90, 0x90}
 

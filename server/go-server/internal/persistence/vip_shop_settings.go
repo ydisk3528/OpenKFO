@@ -81,7 +81,8 @@ func (s *ShopManager) SaveVIPShopSettings(a VIPShopSettings) (VIPShopSettings, e
 	if err != nil {
 		return VIPShopSettings{}, err
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return VIPShopSettings{}, err
 	}

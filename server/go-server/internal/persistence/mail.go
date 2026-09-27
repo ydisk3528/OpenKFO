@@ -1,14 +1,18 @@
 package persistence
 
 import (
+	"context"
 	"database/sql"
 	"kungfu.local/server/internal/protocol"
+	"time"
 )
 
 // Mailbox holds server-generated wire snapshots, never client-submitted blobs.
 // Delivery and attachment claims are deliberately separate transactions from viewing.
 func (s *MailManager) Mailbox(uid uint64) ([]byte, error) {
-	rows, err := s.store.DB.Query(`SELECT id,list_record,is_read FROM mailbox WHERE uid=? AND deleted=FALSE ORDER BY id DESC LIMIT 2049`, uid)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT id,list_record,is_read FROM mailbox WHERE uid=? AND deleted=FALSE ORDER BY id DESC LIMIT 2049`, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +43,8 @@ func (s *MailManager) ReadMail(uid uint64, id uint32) ([]byte, error) {
 	if uid == 0 || id == 0 {
 		return nil, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +71,8 @@ func (s *MailManager) DeleteMail(uid uint64, id uint32) error {
 	if uid == 0 || id == 0 {
 		return ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}

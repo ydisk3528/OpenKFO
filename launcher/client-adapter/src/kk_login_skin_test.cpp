@@ -45,6 +45,16 @@ int wmain(int count, wchar_t** args) {
     HMODULE module = LoadLibraryW(args[1]);
     auto install = module ? (BOOL(__stdcall*)(HWND))GetProcAddress(module, "_SkinLoginWindow@4") : nullptr;
     if (!install) return 2;
+    auto clean = (BOOL(__stdcall*)(HWND))GetProcAddress(module, "_CleanLoginDialog@4");
+    HWND errorDialog = CreateWindowW(L"#32770", L"功夫小子 · 登录失败", WS_POPUP, 0, 0, 300, 120, parent, nullptr, instance, nullptr);
+    HWND errorText = CreateWindowW(L"STATIC", L"功夫小子：账号或密码错误", WS_CHILD, 0, 0, 280, 80, errorDialog, nullptr, instance, nullptr);
+    if (!clean || !errorDialog || !errorText || !clean(errorDialog)) return 20;
+    wchar_t label[256] = {}; GetWindowTextW(errorDialog,label,256);
+    if (wcscmp(label,L"登录提示")) return 21;
+    GetWindowTextW(errorText,label,256);
+    if (wcsstr(label,L"功夫小子") || !wcsstr(label,L"账号或密码错误")) return 22;
+    DestroyWindow(errorDialog);
+
     PROCESS_INFORMATION host = {};
     if (count == 4) {
         wchar_t image[32768], command[32768]; GetModuleFileNameW(nullptr, image, 32768);

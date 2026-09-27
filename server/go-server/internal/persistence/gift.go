@@ -45,7 +45,8 @@ func (s *MailManager) Gift(uid uint64, operation string, p []byte) (GiftResult, 
 		return out, ErrDenied
 	}
 	target := ids[0]
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return out, err
 	}
@@ -92,7 +93,7 @@ func (s *MailManager) Gift(uid uint64, operation string, p []byte) (GiftResult, 
 		return out, ErrDenied
 	}
 	var catalog, item []byte
-	err = tx.QueryRow(`SELECT record,grant_record FROM offers WHERE catalog_key=? AND enabled=TRUE FOR UPDATE`, r.CatalogKey).Scan(&catalog, &item)
+	err = tx.QueryRow(`SELECT record,grant_record FROM offers WHERE catalog_key=? AND enabled=TRUE LOCK IN SHARE MODE`, r.CatalogKey).Scan(&catalog, &item)
 	if err != nil || len(catalog) != 108 || len(item) != 68 {
 		return out, ErrDenied
 	}
@@ -112,7 +113,7 @@ func (s *MailManager) Gift(uid uint64, operation string, p []byte) (GiftResult, 
 		return out, ErrDenied
 	}
 	var days uint32
-	err = tx.QueryRow(`SELECT days FROM offer_lifetimes WHERE catalog_key=? FOR UPDATE`, r.CatalogKey).Scan(&days)
+	err = tx.QueryRow(`SELECT days FROM offer_lifetimes WHERE catalog_key=? LOCK IN SHARE MODE`, r.CatalogKey).Scan(&days)
 	if err != nil && err != sql.ErrNoRows {
 		return out, err
 	}

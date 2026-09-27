@@ -10,7 +10,8 @@ import (
 // OpenSuit consumes an owned package and equips its server-configured parts
 // atomically. A retired instance remains reserved, so replay cannot grant again.
 func (m *EquipmentManager) OpenSuit(uid uint64, instance uint32, bundles map[uint32][]uint32) ([][]byte, error) {
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

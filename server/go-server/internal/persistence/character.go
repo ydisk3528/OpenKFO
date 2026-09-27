@@ -109,7 +109,8 @@ func (m *RoleManager) CreateCharacter(uid uint64, payload []byte, choices []Char
 	if err := m.store.CheckText(role.Nickname); err != nil {
 		return Account{}, err
 	}
-	tx, err := m.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(m.store.DB)
+	defer txCancel()
 	if err != nil {
 		return Account{}, err
 	}

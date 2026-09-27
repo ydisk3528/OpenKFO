@@ -71,6 +71,8 @@ type Session struct {
 	Namespace            string
 	Channels             map[uint32]*Channel
 	Output               chan tunnel.Frame
+	datagramOutput       chan tunnel.Frame
+	datagramEnabled      atomic.Bool
 	Done                 chan struct{}
 	closeOnce            sync.Once
 	queuedBytes          atomic.Int64
@@ -143,7 +145,7 @@ func (hub *Hub) Attach(account persistence.Account, port uint16, peerReceipt ...
 		return nil, err
 	}
 	session := &Session{Trace: hub.Trace, UID: account.UID, Account: account.Account, Nickname: account.Nickname,
-		Namespace: hex.EncodeToString(nonce), Channels: map[uint32]*Channel{}, Output: make(chan tunnel.Frame, 128),
+		Namespace: hex.EncodeToString(nonce), Channels: map[uint32]*Channel{}, Output: make(chan tunnel.Frame, 128), datagramOutput: make(chan tunnel.Frame, 128),
 		Done: make(chan struct{}), Port: port, GrantUntil: time.Now().Add(2 * time.Minute)}
 	if err := hub.initPeerKey(); err != nil {
 		return nil, err
@@ -159,6 +161,13 @@ func (hub *Hub) Attach(account persistence.Account, port uint16, peerReceipt ...
 
 func (session *Session) Close() { session.closeOnce.Do(func() { close(session.Done) }) }
 func (session *Session) emit(frame tunnel.Frame) bool {
+	if session.datagramEnabled.Load() && frame.Op == "udp" && frame.PeerReceipt == "" {
+		return session.enqueue(frame, session.datagramOutput)
+	}
+	return session.enqueue(frame, session.Output)
+}
+
+func (session *Session) enqueue(frame tunnel.Frame, queue chan tunnel.Frame) bool {
 	frame.QueuedAt = time.Now()
 	select {
 	case <-session.Done:
@@ -166,14 +175,16 @@ func (session *Session) emit(frame tunnel.Frame) bool {
 	default:
 	}
 	if session.queuedBytes.Add(int64(len(frame.Data)+128)) > 2*1024*1024 {
+		log.Printf("session_queue_overflow uid=%d reason=bytes_limit", session.UID)
 		session.Close()
 		return false
 	}
 	select {
-	case session.Output <- frame:
+	case queue <- frame:
 		session.traceFrame("S->C queued", frame)
 		return true
 	default:
+		log.Printf("session_queue_overflow uid=%d op=%s reason=frame_limit", session.UID, frame.Op)
 		session.Close()
 	}
 	return false
@@ -658,7 +669,12 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if (message.ID == 2540 && len(payload) != 1) || (message.ID == 2560 && len(payload) != 9) {
 			return protocol.ErrFrame
 		}
-		directory, own, err := storage3_2(hub, hub.Store.Rankings, session.UID, payload[0])
+		uid, category, store := session.UID, payload[0], hub.Store
+		var directory, own []byte
+		var err error
+		if !hub.readSessionSnapshot(session, func() { directory, own, err = store.Rankings(uid, category) }) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -719,10 +735,6 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if message.ID == 1500 && len(payload) == 9 && protocol.ReadUint32(payload, 5) == 1 {
 			return hub.renewalPrices(session, payload)
 		}
-		if err := hub.refreshVIPShop(session); err != nil {
-			session.sendGame(notice("VIP价格读取失败，请稍后重试。"))
-			return nil
-		}
 		category, variant := -1, 0
 		if message.ID == 9070 {
 			if len(payload) != 2 {
@@ -736,9 +748,35 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		if message.ID == 1500 && len(payload) != 9 {
 			return protocol.ErrFrame
 		}
-		offers, err := storage2_2(hub, hub.Store.ShopManager().Offers, category, variant)
+		manager, uid, vipKind := hub.Store.ShopManager(), session.UID, session.VIPKind
+		var offers []persistence.Offer
+		var err error
+		var rate uint32
+		vipFailed := false
+		if !hub.readSessionSnapshot(session, func() {
+			if vipKind >= 2 {
+				rate, err = manager.VIPShopPercent(uid)
+				vipFailed = err != nil
+			}
+			if err == nil {
+				offers, err = manager.Offers(category, variant)
+			}
+		}) {
+			return nil
+		}
+		if vipKind != session.VIPKind {
+			return nil
+		}
+		if vipFailed {
+			session.sendGame(notice("VIP价格读取失败，请稍后重试。"))
+			return nil
+		}
 		if err != nil {
 			return err
+		}
+		if rate != session.VIPShopPercent {
+			session.VIPShopPercent = rate
+			session.sendGame(vipIdentityPacket(session.VIPKind, rate))
 		}
 		var records []byte
 		for _, offer := range offers {

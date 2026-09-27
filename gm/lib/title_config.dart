@@ -1,3 +1,5 @@
+import 'reward_picker.dart';
+
 import 'package:flutter/material.dart';
 
 class TitleConfigPage extends StatefulWidget {
@@ -15,6 +17,7 @@ class TitleConfigPage extends StatefulWidget {
 }
 
 class _TitleConfigPageState extends State<TitleConfigPage> {
+  late final rewardCatalog = RewardCatalog.load(widget.api);
   List<Map<String, dynamic>> rows = [];
   Map<int, String> names = {};
   String clientHash = '';
@@ -146,6 +149,7 @@ class _TitleConfigPageState extends State<TitleConfigPage> {
     final value = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _TitleEditor(
+        catalog: rewardCatalog,
         initial: index == null ? null : rows[index],
         existing: {
           for (var i = 0; i < rows.length; i++)
@@ -173,7 +177,7 @@ class _TitleConfigPageState extends State<TitleConfigPage> {
       child: Column(
         children: [
           const Text(
-            '所有非零条件须同时满足，按称号等级顺序判定。候选奖励填写商城商品编号，玩家选择一件。导入目录随规则保存，仅在客户端配置包版本匹配时生效。关闭保留已有资格；奖励为自定义规则。',
+            '所有非零条件须同时满足，按称号等级顺序判定。候选奖励填写商城商品编号，玩家选择一件；留空只晋升称号。导入目录随规则保存，仅在客户端配置包版本匹配时生效。关闭保留已有资格；奖励为自定义规则。',
           ),
           SwitchListTile(
             title: const Text('称号总开关'),
@@ -194,8 +198,17 @@ class _TitleConfigPageState extends State<TitleConfigPage> {
                   title: Text(
                     '称号 ${r['level']} · ${r['enabled'] == true ? '启用' : '关闭'}',
                   ),
-                  subtitle: Text(
-                    '${names[r['level']] ?? ''}\n角色等级 ${r['min_player_level'] ?? 0} · 任务 ${r['completed_task'] ?? 0} · 参赛 ${r['matches'] ?? 0} · 胜场 ${r['wins'] ?? 0}\n候选商品 ${(r['choices'] as List? ?? []).join(', ')}',
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${names[r['level']] ?? ''}\n角色等级 ${r['min_player_level'] ?? 0} · 任务 ${r['completed_task'] ?? 0} · 参赛 ${r['matches'] ?? 0} · 胜场 ${r['wins'] ?? 0}\n候选商品 ${(r['choices'] as List? ?? []).join(', ')}',
+                      ),
+                      RewardPreviews(
+                        catalog: rewardCatalog,
+                        ids: List<int>.from(r['choices'] as List? ?? []),
+                      ),
+                    ],
                   ),
                   onTap: busy || revision == null ? null : () => edit(i),
                   trailing: IconButton(
@@ -246,8 +259,13 @@ class _TitleConfigPageState extends State<TitleConfigPage> {
 }
 
 class _TitleEditor extends StatefulWidget {
-  const _TitleEditor({required this.initial, required this.existing});
+  const _TitleEditor({
+    required this.catalog,
+    required this.initial,
+    required this.existing,
+  });
   final Map<String, dynamic>? initial;
+  final Future<RewardCatalog> catalog;
   final Set<int> existing;
   @override
   State<_TitleEditor> createState() => _TitleEditorState();
@@ -295,7 +313,7 @@ class _TitleEditorState extends State<_TitleEditor> {
         final max = k == 'level'
             ? 255
             : k == 'min_player_level'
-            ? 150
+            ? 200
             : k == 'completed_task'
             ? 65535
             : 2147483647;
@@ -313,9 +331,8 @@ class _TitleEditorState extends State<_TitleEditor> {
           : raw.split(RegExp(r'[,，\s]+')).map((s) => int.parse(s)).toList();
       if (choices.length > 7 ||
           choices.toSet().length != choices.length ||
-          choices.any((v) => v <= 0 || v > 4294967295) ||
-          (enabled && choices.isEmpty)) {
-        throw const FormatException('启用时须有1–7个非零、不重复的商品编号');
+          choices.any((v) => v <= 0 || v > 4294967295)) {
+        throw const FormatException('最多7个非零、不重复的商品编号；留空只晋升称号');
       }
       if (enabled &&
           [
@@ -353,9 +370,17 @@ class _TitleEditorState extends State<_TitleEditor> {
                 child: TextField(
                   key: ValueKey('title-${entry.key}'),
                   controller: fields[entry.key],
+                  onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(labelText: entry.value),
                 ),
               ),
+            RewardPreviews(
+              catalog: widget.catalog,
+              ids: fields['choices']!.text
+                  .split(RegExp(r'[,，\s]+'))
+                  .map((s) => int.tryParse(s) ?? 0)
+                  .toList(),
+            ),
             if (error.isNotEmpty) Text(error),
           ],
         ),

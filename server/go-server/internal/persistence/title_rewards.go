@@ -47,7 +47,8 @@ func (s *TitleManager) PendingTitleReward(uid uint64) (byte, []uint32, error) {
 // Called only by a trusted award policy/admin, never by the 4126 request.
 // One outstanding choice avoids ambiguities in the native claim (no title ID).
 func (s *TitleManager) GrantTitleChoices(uid uint64, level byte, choices []uint32) error {
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return err
 	}
@@ -122,7 +123,8 @@ func (s *TitleManager) ClaimTitleReward(uid uint64, announcedLevel byte, key uin
 	if uid == 0 || announcedLevel == 0 || key == 0 {
 		return nil, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

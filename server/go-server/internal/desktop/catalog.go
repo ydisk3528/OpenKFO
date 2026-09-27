@@ -31,6 +31,12 @@ var kinds = map[byte][2]string{
 
 func stackable(kind byte) bool { return kind == 64 || kind == 71 || kind == 74 }
 
+// The weapon exchange card is a quantity-based material, not an equippable
+// weapon or a stage admission token. Listing it does not implement redemption.
+func quantityItem(kind byte, id uint32) bool {
+	return stackable(kind) || stageTicket(kind, id) || (kind == 60 && id == 603302)
+}
+
 // Verified item.txt admission tokens, not their crafting fragments. Keep the
 // native material type (60); this classifies sale/inventory records only.
 func stageTicket(kind byte, id uint32) bool {
@@ -137,7 +143,7 @@ func catalog(client string, icons bool) ([]Item, error) {
 		if description == "#" {
 			description = ""
 		}
-		quantityItem := stackable(byte(kind)) || stageTicket(byte(kind), uint32(id))
+		quantityItem := quantityItem(byte(kind), uint32(id))
 		if stageTicket(byte(kind), uint32(id)) {
 			labels = [2]string{"闯关道具", "闯关门票"}
 		}

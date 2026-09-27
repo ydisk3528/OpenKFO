@@ -41,7 +41,8 @@ func (s *Store) SelectRandomWeapon(uid uint64, mode uint32, types map[uint32]uin
 	if mode > protocol.RandomWeaponAll {
 		return nil, ErrDenied
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, err
 	}

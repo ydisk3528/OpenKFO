@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -49,6 +50,11 @@ func noLinks(path string) error {
 
 // Check the full image path: other installations and game processes are unrelated.
 func ensureLauncherClosed(image string) error {
+	return ensureLauncherClosedWithin(image, 15*time.Second)
+}
+
+func ensureLauncherClosedWithin(image string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return fmt.Errorf("检查启动器占用失败：%w", err)
@@ -59,7 +65,7 @@ func ensureLauncherClosed(image string) error {
 		if !strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), filepath.Base(image)) {
 			continue
 		}
-		handle, e := syscall.OpenProcess(processQuery, false, entry.ProcessID)
+		handle, e := syscall.OpenProcess(processQuery|syscall.SYNCHRONIZE, false, entry.ProcessID)
 		if e != nil {
 			if e == syscall.ERROR_ACCESS_DENIED {
 				return fmt.Errorf("无法确认启动器是否已退出（PID %d），请关闭所有启动器窗口后重试", entry.ProcessID)
@@ -69,12 +75,29 @@ func ensureLauncherClosed(image string) error {
 		var buffer [32768]uint16
 		length := uint32(len(buffer))
 		ok, _, queryErr := kernel.NewProc("QueryFullProcessImageNameW").Call(uintptr(handle), 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&length)))
-		syscall.CloseHandle(handle)
 		if ok == 0 {
+			syscall.CloseHandle(handle)
 			return fmt.Errorf("读取启动器路径失败（PID %d）：%w", entry.ProcessID, queryErr)
 		}
 		if strings.EqualFold(filepath.Clean(syscall.UTF16ToString(buffer[:length])), filepath.Clean(image)) {
-			return fmt.Errorf("同一目录的启动器仍在运行（PID %d）。请关闭所有启动器窗口后重试更新；游戏无需关闭。文件：%s", entry.ProcessID, image)
+			// A pending update may have been created before a reboot. The new
+			// launcher starts this helper before exiting, so the plan's old PID
+			// cannot be used to wait for the current launcher. Wait on the actual
+			// matching process handle; never terminate it or trust a stale PID.
+			remaining := time.Until(deadline).Milliseconds()
+			if remaining < 0 {
+				remaining = 0
+			}
+			result, waitErr := syscall.WaitForSingleObject(handle, uint32(remaining))
+			syscall.CloseHandle(handle)
+			if waitErr != nil {
+				return fmt.Errorf("等待启动器退出失败（PID %d）：%w", entry.ProcessID, waitErr)
+			}
+			if result != syscall.WAIT_OBJECT_0 {
+				return fmt.Errorf("更新已等待启动器退出，但该进程仍在运行（PID %d）。请关闭此目录的启动器后重试；游戏无需关闭。文件：%s", entry.ProcessID, image)
+			}
+		} else {
+			syscall.CloseHandle(handle)
 		}
 	}
 	if err != syscall.ERROR_NO_MORE_FILES {

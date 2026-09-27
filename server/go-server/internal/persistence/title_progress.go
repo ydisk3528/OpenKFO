@@ -14,7 +14,7 @@ func titleCountersMet(profile []byte, rule TitleRule) bool {
 		return false
 	}
 	level := protocol.ReadUint16(profile, LevelOffset)
-	if level > 150 {
+	if level > MaxRoleLevel {
 		return false
 	}
 	// NewAccount's legacy zero field represents level 1 throughout growth.
@@ -43,7 +43,8 @@ func (s *TitleManager) AdvanceTitle(uid uint64, supported []byte, clientHash str
 	if len(supported) == 0 {
 		return false, nil
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return false, err
 	}
@@ -82,32 +83,43 @@ func (s *TitleManager) AdvanceTitle(uid uint64, supported []byte, clientHash str
 	if pending {
 		return false, tx.Commit()
 	}
-	var next *TitleRule
-	for i := range settings.Rules.Titles {
-		r := &settings.Rules.Titles[i]
-		if r.Enabled && r.Level > profile[TitleLevelOffset] && (next == nil || r.Level < next.Level) {
-			next = r
+	advanced := false
+	for {
+		var next *TitleRule
+		for i := range settings.Rules.Titles {
+			r := &settings.Rules.Titles[i]
+			if r.Enabled && r.Level > profile[TitleLevelOffset] && (next == nil || r.Level < next.Level) {
+				next = r
+			}
 		}
-	}
-	if next == nil || !slices.Contains(supported, next.Level) || !titleCountersMet(profile, *next) {
-		return false, tx.Commit()
-	}
-	if next.CompletedTask != 0 {
-		var completed bool
-		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM task_progress WHERE uid=? AND task_key=? AND state=3)", uid, next.CompletedTask).Scan(&completed); err != nil {
+		if next == nil || !slices.Contains(supported, next.Level) || !titleCountersMet(profile, *next) {
+			return advanced, tx.Commit()
+		}
+		if next.CompletedTask != 0 {
+			var completed bool
+			if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM task_progress WHERE uid=? AND task_key=? AND state=3)", uid, next.CompletedTask).Scan(&completed); err != nil {
+				return false, err
+			}
+			if !completed {
+				return advanced, tx.Commit()
+			}
+		}
+		if len(next.Choices) == 0 {
+			profile[TitleLevelOffset] = next.Level
+			if _, err = tx.Exec("UPDATE accounts SET profile=? WHERE uid=?", profile, uid); err != nil {
+				return false, err
+			}
+			advanced = true
+			continue
+		}
+		// Do not consume title advancement for an offer the native selector cannot
+		// display. Unlisted weapons use the same display-only catalogue as tutorial.
+		if _, err = weaponRewardCatalog(tx, next.Choices); err != nil {
 			return false, err
 		}
-		if !completed {
-			return false, tx.Commit()
+		if err = grantTitleChoices(tx, uid, next.Level, next.Choices); err != nil {
+			return false, err
 		}
+		return true, tx.Commit()
 	}
-	// Do not consume title advancement for an offer the native selector cannot
-	// display. Unlisted weapons use the same display-only catalogue as tutorial.
-	if _, err = weaponRewardCatalog(tx, next.Choices); err != nil {
-		return false, err
-	}
-	if err = grantTitleChoices(tx, uid, next.Level, next.Choices); err != nil {
-		return false, err
-	}
-	return true, tx.Commit()
 }

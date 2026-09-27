@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param([Parameter(Mandatory = $true)][string]$ClientDirectory)
 $ErrorActionPreference = 'Stop'
 $client = (Resolve-Path -LiteralPath $ClientDirectory).Path
@@ -10,7 +10,7 @@ if ((Get-FileHash -LiteralPath $nativeLogin -Algorithm SHA256).Hash -ne '8B50DB6
 $components = Join-Path (Split-Path -Parent $PSScriptRoot) 'dist/launcher-components'
 New-Item -ItemType Directory -Force -Path $components | Out-Null
 if ((Get-FileHash -LiteralPath (Join-Path $client 'gfld.dat')).Hash -ne '98C43BE72AC7600B368D4E185D75205376F79E938EA42E4B16CE8F8C4BAE827B') { throw 'Unsupported gfld.dat.' }
-foreach ($name in 'gfld.dat','SDError.dll','libssl-1_1.dll','libcrypto-1_1.dll') {
+foreach ($name in 'gfld.dat','SDError.dll','lqbz.dll','libssl-1_1.dll','libcrypto-1_1.dll') {
     Copy-Item -LiteralPath (Join-Path $client $name) -Destination (Join-Path $components $name) -Force
 }
 $bundle = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime-local/launcher-package'

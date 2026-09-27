@@ -54,7 +54,8 @@ func (m *EquipmentManager) EquipDefault(uid uint64, instance uint32, slot uint16
 }
 
 func (m *EquipmentManager) equip(uid uint64, instance uint32, slot uint16, automatic bool) ([]byte, error) {
-	transaction, err := m.store.DB.Begin()
+	transaction, transactionCancel, err := beginTransaction(m.store.DB)
+	defer transactionCancel()
 	if err != nil {
 		return nil, err
 	}

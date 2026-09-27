@@ -1,3 +1,5 @@
+import 'reward_picker.dart';
+
 import 'package:flutter/material.dart';
 
 import 'extended_task_config.dart';
@@ -17,6 +19,7 @@ class TaskConfigPage extends StatefulWidget {
 }
 
 class _TaskConfigPageState extends State<TaskConfigPage> {
+  late final rewardCatalog = RewardCatalog.load(widget.api);
   List<Map<String, dynamic>> rows = [];
   Map<int, Map<String, dynamic>> templates = {};
   int? revision;
@@ -198,6 +201,7 @@ class _TaskConfigPageState extends State<TaskConfigPage> {
     final row = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _TaskEditor(
+        catalog: rewardCatalog,
         initial: index == null ? null : rows[index],
         template: index == null ? null : templates[rows[index]['id']],
         existing: {
@@ -246,8 +250,17 @@ class _TaskConfigPageState extends State<TaskConfigPage> {
                   title: Text(
                     '任务 ${r['id']} · ${r['enabled'] == true ? '启用' : '关闭'}',
                   ),
-                  subtitle: Text(
-                    '${templates[r['id']]?['name'] ?? ''}\n参赛 ${r['matches']} · 连击 ${r['max_combo']} · 经验 ${r['experience']} · 金币 ${r['gold']} · 奖励商品 ${r['reward_catalog'] ?? 0} · 后续 ${r['next']}',
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${templates[r['id']]?['name'] ?? ''}\n参赛 ${r['matches']} · 连击 ${r['max_combo']} · 经验 ${r['experience']} · 金币 ${r['gold']} · 奖励商品 ${r['reward_catalog'] ?? 0} · 后续 ${r['next']}',
+                      ),
+                      RewardPreviews(
+                        catalog: rewardCatalog,
+                        ids: [(r['reward_catalog'] as int?) ?? 0],
+                      ),
+                    ],
                   ),
                   onTap: busy || revision == null ? null : () => edit(i),
                   trailing: IconButton(
@@ -322,12 +335,14 @@ class _TaskConfigPageState extends State<TaskConfigPage> {
 
 class _TaskEditor extends StatefulWidget {
   const _TaskEditor({
+    required this.catalog,
     required this.initial,
     required this.existing,
     this.template,
   });
   final Map<String, dynamic>? initial;
   final Map<String, dynamic>? template;
+  final Future<RewardCatalog> catalog;
   final Set<int> existing;
   @override
   State<_TaskEditor> createState() => _TaskEditorState();
@@ -442,9 +457,14 @@ class _TaskEditorState extends State<_TaskEditor> {
               TextField(
                 key: ValueKey('task_${e.key}'),
                 controller: fields[e.key],
+                onChanged: (_) => setState(() {}),
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(labelText: e.value),
               ),
+            RewardPreviews(
+              catalog: widget.catalog,
+              ids: [int.tryParse(fields['reward_catalog']!.text) ?? 0],
+            ),
             ExpansionTile(
               title: const Text('29项统计条件（0表示不要求）'),
               maintainState: true,

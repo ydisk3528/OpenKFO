@@ -49,7 +49,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(writes.single['environment'], 'online');
       expect(writes.single['reward_revision'], 9);
-      expect(writes.single['rewards']['levels'].length, 150);
+      expect(writes.single['rewards']['levels'].length, 200);
       expect(tester.takeException(), isNull);
     },
   );

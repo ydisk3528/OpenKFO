@@ -141,7 +141,12 @@ func buildFriendList(list []persistence.Friend, online func(uint64) bool) (proto
 }
 
 func (h *Hub) friendSnapshot(s *Session) error {
-	list, err := storage2_1(h, h.Store.FriendManager().List, s.UID)
+	manager, uid := h.Store.FriendManager(), s.UID
+	var list []persistence.Friend
+	var err error
+	if !h.readSessionSnapshot(s, func() { list, err = manager.List(uid) }) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

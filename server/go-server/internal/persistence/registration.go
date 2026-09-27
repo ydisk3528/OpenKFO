@@ -40,7 +40,8 @@ func (store *Store) AuthenticateOrRegister(name, legacy string) (Account, error)
 	if err != nil {
 		return Account{}, err
 	}
-	tx, err := store.DB.Begin()
+	tx, txCancel, err := beginTransaction(store.DB)
+	defer txCancel()
 	if err != nil {
 		return Account{}, err
 	}

@@ -1,11 +1,44 @@
 package game
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"kungfu.local/server/internal/protocol"
 )
+
+func TestPendingStageFinishCoalescesOnlyIdenticalCurrentReport(t *testing.T) {
+	h, s, _, _ := combatFixture()
+	r := s.Room
+	r.Request[46] = byte(protocol.StageAssault)
+	r.StageWaves, _ = newStageWaves([]StageWavePlan{{Monsters: map[uint32]uint32{7: 1}}})
+	report := settlementReport(r)
+	for _, m := range r.Members {
+		protocol.WriteUint16(report, int(m.Slot)*87+65, 1)
+	}
+	p := &pendingStageFinish{owner: s, serial: r.Serial, report: report}
+	r.pendingStageFinish = p
+	for i := 0; i < 100; i++ {
+		if err := h.stageFinishReport(s, report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !r.lastStageReportLog.IsZero() || r.pendingStageFinish != p || r.Stage != "battle" {
+		t.Fatal("duplicate report repeated work or changed phase")
+	}
+	changed := append([]byte(nil), report...)
+	protocol.WriteUint64(changed, 29, 999999)
+	if err := h.stageFinishReport(s, changed); err == nil {
+		t.Fatal("changed report bypassed validation")
+	}
+	if r.pendingStageFinish != p {
+		t.Fatal("invalid report replaced retained evidence")
+	}
+	if !strings.Contains(stageProgressSummary(r), "wave_total=1") {
+		t.Fatal(stageProgressSummary(r))
+	}
+}
 
 func TestPendingStageFinishRejectsChangedRoundOrController(t *testing.T) {
 	for _, change := range []struct {
@@ -36,7 +69,7 @@ func TestPendingStageFinishRejectsChangedRoundOrController(t *testing.T) {
 	}
 }
 
-func TestPendingStageFinishExpiresWithoutGrantingIncompleteStage(t *testing.T) {
+func TestPendingStageFinishWarnsButRetainsIncompleteStage(t *testing.T) {
 	h, s, peer, _ := combatFixture()
 	r := s.Room
 	r.Request[46] = byte(protocol.StageAssault)
@@ -47,30 +80,32 @@ func TestPendingStageFinishExpiresWithoutGrantingIncompleteStage(t *testing.T) {
 	}
 	p := &pendingStageFinish{owner: s, serial: r.Serial, report: report, deadline: time.Now()}
 	r.pendingStageFinish = p
+	defer func() { h.lockState(); r.pendingStageFinish = nil; h.unlockState() }()
 	h.scheduleStageFinishCheck(r, p)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		h.Mutex.RLock()
-		finished := r.pendingStageFinish == nil
+		finished := p.warned
+		retained := r.pendingStageFinish == p
 		stage := r.Stage
 		h.Mutex.RUnlock()
 		if finished {
-			if stage != "battle" {
+			if stage != "battle" || !retained {
 				t.Fatal("incomplete stage was settled")
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("report did not expire")
+			t.Fatal("waiting report did not notify")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	// There is no Store in this fixture: a payout would panic. Only the owner
-	// gets a diagnostic notice; neither player receives a result or reward.
+	// and peer get a diagnostic notice; neither receives a result or reward.
 	for _, m := range roomOutputs(t, s, 20150) {
 		if m.ID == 4120 || m.ID == 1240 || m.ID == 4300 {
 			t.Fatal("unverified reward", m.ID)
 		}
 	}
-	roomOutputs(t, peer)
+	roomOutputs(t, peer, 20150)
 }

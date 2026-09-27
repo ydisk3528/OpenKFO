@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"kungfu.local/server/internal/protocol"
 	"time"
@@ -64,7 +65,9 @@ func (s *Store) projectVIPInventory(a *Account) error {
 	if !hasVIP {
 		return nil
 	}
-	rows, err := s.DB.Query(`SELECT instance,expires_at FROM inventory_expirations WHERE uid=?`, a.UID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.DB.QueryContext(ctx, `SELECT instance,expires_at FROM inventory_expirations WHERE uid=?`, a.UID)
 	if err != nil {
 		return err
 	}

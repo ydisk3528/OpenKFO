@@ -1,3 +1,5 @@
+import 'item_pictures.dart';
+
 import 'package:flutter/material.dart';
 
 class TalismanConfigPage extends StatefulWidget {
@@ -13,6 +15,7 @@ class TalismanConfigPage extends StatefulWidget {
 }
 
 class _TalismanConfigPageState extends State<TalismanConfigPage> {
+  late final pictures = ItemPictures(widget.api);
   List<Map<String, dynamic>> uses = [], repairs = [];
   bool repairing = false;
   List<Map<String, dynamic>> get levels => repairing ? repairs : uses;
@@ -122,8 +125,11 @@ class _TalismanConfigPageState extends State<TalismanConfigPage> {
                       initialValue: values[field.key],
                       keyboardType: TextInputType.number,
                       decoration: InputDecoration(labelText: field.value),
-                      onChanged: (v) => values[field.key] = v,
+                      onChanged: (v) => update(() => values[field.key] = v),
                     ),
+                  pictures.byId(int.tryParse(values['item'] ?? '') ?? 0),
+                  if (repairing)
+                    pictures.byId(int.tryParse(values['material'] ?? '') ?? 0),
                   Text(error),
                 ],
               ),
@@ -215,7 +221,7 @@ class _TalismanConfigPageState extends State<TalismanConfigPage> {
               itemBuilder: (context, i) {
                 final r = levels[i];
                 return ListTile(
-                  title: Text('物品 ${r['item']}'),
+                  title: pictures.byId(r['item'] as int),
                   trailing: IconButton(
                     tooltip: '删除规则',
                     icon: const Icon(Icons.delete_outline),
@@ -226,10 +232,16 @@ class _TalismanConfigPageState extends State<TalismanConfigPage> {
                             status = '有未保存的修改';
                           }),
                   ),
-                  subtitle: Text(
-                    repairing
-                        ? '材料 ${r['material']} × ${r['quantity']} · 容量 ${r['capacity']}'
-                        : '主动 ${r['active_cost']} · 被动 ${r['passive_cost']}',
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (repairing) pictures.byId(r['material'] as int),
+                      Text(
+                        repairing
+                            ? '材料 ${r['material']} × ${r['quantity']} · 容量 ${r['capacity']}'
+                            : '主动 ${r['active_cost']} · 被动 ${r['passive_cost']}',
+                      ),
+                    ],
                   ),
                   onTap: busy || revision == null ? null : () => edit(i),
                 );

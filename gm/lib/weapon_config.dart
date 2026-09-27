@@ -1,4 +1,5 @@
-import 'dart:io';
+import 'item_pictures.dart';
+
 
 import 'package:flutter/material.dart';
 
@@ -94,6 +95,50 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             ),
           ) ==
           true;
+
+  Future<void> repairEffects() async {
+    final selected = weapon;
+    if (selected == null || busy) return;
+    setState(() { busy = true; message = ''; });
+    try {
+      final preview = Map<String, dynamic>.from(await widget.api({
+        'operation': 'weapon_effects_preview', 'weapon': selected['id'],
+      }));
+      if (!mounted) return;
+      final additions = preview['additions'] as List;
+      final issues = preview['issues'] as List;
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('${selected['name']} · 攻击特效'),
+          content: SizedBox(width: 560, child: SingleChildScrollView(child: Text([
+            '读取：${preview['path']}',
+            additions.isEmpty ? '没有可自动补齐的特效。' : '可补齐 ${additions.length} 条：',
+            ...additions.map((e) => '${e['id']} → ${e['file']}'),
+            if (issues.isNotEmpty) '\n以下项目需要手动处理：',
+            ...issues.map((e) => '$e'),
+            '\n仅补充特效加载登记，不修改招式、伤害和 BUFF。写入前自动备份，重启游戏后生效；不会自动发布到线上。',
+          ].join('\n')))),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('关闭')),
+            if (additions.isNotEmpty)
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('备份并补齐')),
+          ],
+        ),
+      );
+      if (confirm != true || !mounted) return;
+      final result = await widget.api({
+        'operation': 'weapon_effects_apply', 'weapon': selected['id'],
+        'revision': preview['revision'],
+      });
+      await load();
+      if (mounted) setState(() => message = '${result['message']}');
+    } catch (e) {
+      if (mounted) setState(() => message = '$e');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
 
   Future<void> execute(String operation) async {
     if (!(form.currentState?.validate() ?? false)) return;
@@ -241,7 +286,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final fields = (data?['fields'] as List? ?? []).where(
       (f) => f['key'] != 'SkillDamage' && f['key'] != 'SkillEnhanceDamage',
     );
-    if (fields.every((f) => '${current[f['key']]}' == '${original[f['key']]}')) {
+    if (fields.every(
+      (f) => '${current[f['key']]}' == '${original[f['key']]}',
+    )) {
       return 'original';
     }
     for (final e in (data?['effects'] as List? ?? [])) {
@@ -540,21 +587,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     );
   }
 
-  Widget weaponIcon(Map<dynamic, dynamic> value, double size) {
-    final path = '${value['icon'] ?? ''}';
-    final fallback = Icon(Icons.sports_martial_arts, size: size * .6);
-    return SizedBox(
-      width: size,
-      height: size,
-      child: path.isEmpty
-          ? fallback
-          : Image.file(
-              File(path),
-              fit: BoxFit.contain,
-              errorBuilder: (_, error, stack) => fallback,
-            ),
-    );
-  }
+  late final itemPictures = ItemPictures(widget.api);
+  Widget weaponIcon(Map<dynamic, dynamic> value, double size) => itemPictures
+      .preview({'key': '25:${value['id']}', 'name': value['name']}, size: size);
 
   @override
   Widget build(BuildContext context) {
@@ -863,6 +898,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                   runSpacing: 8,
                                   crossAxisAlignment: WrapCrossAlignment.center,
                                   children: [
+                                    OutlinedButton.icon(
+                                      onPressed: busy || dirty ? null : repairEffects,
+                                      icon: const Icon(Icons.auto_fix_high),
+                                      label: const Text('自动补齐攻击特效'),
+                                    ),
                                     OutlinedButton.icon(
                                       onPressed: busy
                                           ? null

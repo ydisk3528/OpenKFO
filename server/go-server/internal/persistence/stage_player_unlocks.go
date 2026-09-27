@@ -65,7 +65,8 @@ func (s *Store) SaveStagePlayerUnlocks(p StagePlayerUnlocks) (StagePlayerUnlocks
 	if err != nil {
 		return p, err
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return p, err
 	}

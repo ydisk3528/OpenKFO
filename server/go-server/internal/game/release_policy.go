@@ -92,20 +92,18 @@ func (h *Hub) RefreshRelease(ctx context.Context) error {
 	h.releaseVersion.Store(m.Version)
 	return nil
 }
-func (h *Hub) WatchRelease(ctx context.Context) {
+
+// checkLoginRelease runs outside room/state locks, after credentials are verified.
+// No periodic polling: retain the last known requirement on a temporary OSS failure.
+func (h *Hub) checkLoginRelease(ctx context.Context) error {
 	if h.Config.ReleaseVersionURL == "" {
-		return
+		return nil
 	}
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := h.RefreshRelease(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("release_refresh_failed retaining_last_verified_version: %v", err)
-			}
+	if err := h.RefreshRelease(ctx); err != nil {
+		log.Printf("login_release_refresh_failed retaining_last_known_version: %v", err)
+		if h.requiredRelease() == "" {
+			return err
 		}
 	}
+	return nil
 }

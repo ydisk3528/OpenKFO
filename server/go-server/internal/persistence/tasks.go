@@ -19,7 +19,8 @@ func (s *TaskManager) TaskTransition(uid uint64, action uint32, key uint16) ([]p
 	if uid == 0 || (action != 0 && action != 6050 && action != 6080) || (action != 0 && key == 0) {
 		return nil, false, ErrDenied
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return nil, false, err
 	}

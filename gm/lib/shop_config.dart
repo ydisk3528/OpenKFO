@@ -26,6 +26,7 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
       serverExpiry = false,
       recommended = false;
   final price = TextEditingController(text: '100');
+  final recommendationPriority = TextEditingController(text: '0');
   final days = TextEditingController(text: '365');
   final quantity = TextEditingController(text: '1');
   final form = GlobalKey<FormState>();
@@ -43,13 +44,23 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
   final imageStatus = <String, bool>{};
   bool scanningImages = false;
   List<dynamic> get filteredItems => (data?['items'] as List? ?? []).where((i) {
-    if (!'${i['id']} ${i['name']}'.contains(query)) return false;
     final kind = i['kind'];
+    final aliases = kind == 20
+        ? '头饰 头部饰品'
+        : kind == 21
+        ? '背饰 背部饰品 翅膀'
+        : '';
+    if (!'${i['id']} ${i['name']} ${i['category']} $aliases'.contains(
+      query.trim(),
+    ))
+      return false;
     final text = '${i['category']} ${i['group']}';
     return switch (category) {
       '缺少图片' => imageStatus[i['key']] == false,
       '推荐/优惠' => data?['offers']?[i['key']]?['recommended'] == true,
       '武器' => kind == 25 || kind == 26,
+      '头饰' => kind == 20,
+      '背饰/翅膀' => kind == 21,
       '闯关门票' => i['category'] == '闯关门票',
       '宠物/法宝' =>
         text.contains('宠物') || text.contains('法宝') || text.contains('护符'),
@@ -184,6 +195,7 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
     imageTimer?.cancel();
     scroll.dispose();
     price.dispose();
+    recommendationPriority.dispose();
     days.dispose();
     quantity.dispose();
     super.dispose();
@@ -195,10 +207,11 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
     currency = config?['currency'] ?? 'ticket';
     enabled = config?['enabled'] ?? false;
     recommended = config?['recommended'] ?? false;
+    recommendationPriority.text = '${config?['recommendation_priority'] ?? 0}';
     price.text = '${config?['price'] ?? 100}';
-    serverExpiry = (config?['server_expiry_days'] ?? 0) > 0;
+    serverExpiry = config == null || (config['server_expiry_days'] ?? 0) > 0;
     days.text =
-        '${serverExpiry ? config!['server_expiry_days'] : config?['days'] ?? 365}';
+        '${serverExpiry ? (config?['server_expiry_days'] ?? 30) : config?['days'] ?? 365}';
     quantity.text = '${config?['quantity'] ?? 1}';
     dirty = false;
   }
@@ -249,6 +262,38 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
         true;
   }
 
+  Future<void> saveRecommendationOrder({bool pin = false}) async {
+    if (busy || dirty || item == null) return;
+    final priority = int.tryParse(recommendationPriority.text);
+    if (!pin && (priority == null || priority < 0 || priority > 1000000)) {
+      setState(() => message = '推荐排序请填写 0–1000000 的整数');
+      return;
+    }
+    setState(() { busy = true; message = '正在保存推荐排序…'; });
+    try {
+      final request = <String, dynamic>{
+        'operation': 'shop_rank', 'keys': [item!['key']],
+        'recommendation_priority': pin ? 0 : priority,
+        'pin_recommended': pin,
+      };
+      final result = await widget.api({...request, 'id': operationId(request)});
+      if (result['recommendation_priority_saved'] != true) {
+        throw StateError('管理接口未确认推荐排序，请刷新核对并更新管理接口。');
+      }
+      if (!mounted) return;
+      setState(() {
+        final offer = data!['offers'][item!['key']] as Map;
+        offer['recommendation_priority'] = result['recommendation_priority'];
+        recommendationPriority.text = '${result['recommendation_priority']}';
+        if (pin) { offer['recommended'] = true; recommended = true; }
+        busy = false; pendingId = pendingSignature = null;
+        message = '${widget.environment} · ${result['message']}';
+      });
+    } catch (e) {
+      if (mounted) setState(() { busy = false; message = '排序保存未确认：$e'; });
+    }
+  }
+
   Future<void> save() async {
     if (busy || !form.currentState!.validate()) return;
     setState(() {
@@ -280,6 +325,7 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
       setState(() {
         final offers = data!['offers'] as Map;
         offers[request['key']] = {
+          'recommendation_priority': offers[request['key']]?['recommendation_priority'],
           for (final key in [
             'currency',
             'price',
@@ -519,6 +565,8 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
                       '缺少图片',
                       '推荐/优惠',
                       '武器',
+                      '头饰',
+                      '背饰/翅膀',
                       '闯关门票',
                       '宠物/法宝',
                       '造型换装',
@@ -783,16 +831,33 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
                                           }),
                                   ),
                                   SwitchListTile(
-                                    title: const Text('加入推荐（武器）'),
+                                    title: const Text('加入推荐（武器、背饰）'),
                                     subtitle: const Text('推荐页复用同一商品、价格和购买校验'),
                                     value: recommended,
-                                    onChanged: busy || item!['kind'] != 25
+                                    onChanged: busy || ![25, 21].contains(item!['kind'])
                                         ? null
                                         : (v) => setState(() {
                                             recommended = v;
                                             dirty = true;
                                           }),
                                   ),
+                                  if ([25, 21].contains(item!['kind'])) ...[
+                                    TextField(
+                                      controller: recommendationPriority,
+                                      keyboardType: TextInputType.number,
+                                      enabled: !busy && data!['offers'][item!['key']]?['recommendation_priority'] != null,
+                                      decoration: const InputDecoration(labelText: '推荐排序', helperText: '数字越大越靠前；0 为默认顺序'),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Wrap(spacing: 8, runSpacing: 8, children: [
+                                      OutlinedButton(onPressed: busy || dirty || data!['offers'][item!['key']]?['recommendation_priority'] == null ? null : () => saveRecommendationOrder(), child: const Text('保存排序')),
+                                      OutlinedButton.icon(onPressed: busy || dirty || data!['offers'][item!['key']]?['recommendation_priority'] == null ? null : () => saveRecommendationOrder(pin: true), icon: const Icon(Icons.vertical_align_top), label: const Text('置顶推荐')),
+                                    ]),
+                                    if (data!['offers'][item!['key']]?['recommendation_priority'] == null)
+                                      const Text('当前管理接口尚未支持推荐排序，待更新后可设置。'),
+                                    if (dirty) const Text('请先保存当前商品修改，再调整排序。'),
+                                    const SizedBox(height: 12),
+                                  ],
                                   SegmentedButton<String>(
                                     segments: const [
                                       ButtonSegment(
@@ -823,23 +888,53 @@ class _ShopConfigPageState extends State<ShopConfigPage> {
                                   const SizedBox(height: 20),
                                   if (item!['stackable'] == true)
                                     number(quantity, '每次购买数量', 999)
-                                  else
-                                    number(days, '装备显示天数', 3650),
-                                  if (item!['stackable'] != true)
-                                    CheckboxListTile(
-                                      contentPadding: EdgeInsets.zero,
-                                      title: const Text('购买后按上述天数到期'),
-                                      subtitle: const Text(
-                                        '仅影响之后购买的物品；不勾选则服务器永久有效。已有物品期限不变。',
-                                      ),
+                                  else ...[
+                                    DropdownButtonFormField<bool>(
                                       value: serverExpiry,
+                                      decoration: const InputDecoration(
+                                        labelText: '购买后有效期',
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: true,
+                                          child: Text('限时装备'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: false,
+                                          child: Text('永久装备（365+）'),
+                                        ),
+                                      ],
                                       onChanged: busy
                                           ? null
-                                          : (value) => setState(() {
-                                              serverExpiry = value ?? false;
+                                          : (v) => setState(() {
+                                              serverExpiry = v ?? true;
                                               dirty = true;
                                             }),
                                     ),
+                                    if (serverExpiry) ...[
+                                      const SizedBox(height: 12),
+                                      number(days, '有效天数', 3650),
+                                      Wrap(
+                                        spacing: 8,
+                                        children: [
+                                          for (final n in [1, 7, 30, 365])
+                                            ActionChip(
+                                              label: Text('$n天'),
+                                              onPressed: busy
+                                                  ? null
+                                                  : () => setState(() {
+                                                      days.text = '$n';
+                                                      dirty = true;
+                                                    }),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                    const Text('从购买时开始计时；只影响之后购买的物品，已有背包不变。'),
+                                    if (item!['kind'] == 20 ||
+                                        item!['kind'] == 21)
+                                      const Text('头饰、背饰通过“装备／卸下”操作，不作为消耗品使用。'),
+                                  ],
                                   const SizedBox(height: 24),
                                   FilledButton(
                                     onPressed:

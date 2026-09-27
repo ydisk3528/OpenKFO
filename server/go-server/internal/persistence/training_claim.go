@@ -24,7 +24,8 @@ func (s *TrainingManager) ClaimTraining(uid uint64, operation string, growth Rew
 	if err = growth.Validate(); err != nil {
 		return r, err
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return r, err
 	}

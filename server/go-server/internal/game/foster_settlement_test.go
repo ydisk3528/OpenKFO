@@ -8,7 +8,7 @@ import (
 )
 
 func TestFosterFinishPolicy(t *testing.T) {
-	for _, scenario := range []string{"clear", "early", "live-monster", "missing-marker", "peer", "old-context", "failed", "live-player-failure", "unknown-reason"} {
+	for _, scenario := range []string{"clear", "partial-plan", "no-spawns", "early", "live-monster", "missing-marker", "peer", "old-context", "failed", "live-player-failure", "unknown-reason"} {
 		t.Run(scenario, func(t *testing.T) {
 			_, owner, peer, _ := combatFixture()
 			r := owner.Room
@@ -22,6 +22,12 @@ func TestFosterFinishPolicy(t *testing.T) {
 			want := persistence.StageOutcomeClear
 			wantError := false
 			switch scenario {
+			case "partial-plan":
+				r.FosterPlan.Groups = []protocol.FosterGroup{{Spawns: make([]protocol.FosterSpawn, 100)}, {Spawns: make([]protocol.FosterSpawn, 44)}}
+				r.FosterSpawned, r.FosterRetired = []int{25, 0}, []int{25, 0}
+			case "no-spawns":
+				r.FosterSpawned, r.FosterRetired = []int{0}, []int{0}
+				want = ""
 			case "early":
 				r.FosterSpawned[0] = 0
 				want = ""

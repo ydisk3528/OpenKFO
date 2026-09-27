@@ -164,3 +164,78 @@ func TestStorageLaneRejectsMixedAndOwningRoomPackets(t *testing.T) {
 		t.Fatal("partial TCP packet bypassed gate")
 	}
 }
+
+func TestSlowShopDoesNotBlockLobbyOrLogout(t *testing.T) {
+	h, other, _, shopper := combatFixture()
+	other.Room = nil
+	other.game().Phase = "lobby"
+	shopper.game().Phase = "lobby"
+	gate := delayedShopConnector{make(chan struct{}), make(chan struct{})}
+	db := sql.OpenDB(gate)
+	defer db.Close()
+	h.Store = &persistence.Store{DB: db}
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate.release) }) }
+	defer release()
+	raw, _ := protocol.Encode(protocol.Message{ID: 1540})
+	done := make(chan error, 1)
+	go func() { done <- h.Handle(shopper, tunnel.Frame{Op: "data", Channel: 1, Data: raw}) }()
+	select {
+	case <-gate.entered:
+	case <-time.After(time.Second):
+		t.Fatal("shop did not start")
+	}
+	lobby := make(chan error, 1)
+	go func() { lobby <- h.Handle(other, tunnel.Frame{Op: "ping"}) }()
+	select {
+	case err := <-lobby:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shop blocked lobby")
+	}
+	// Simulate disconnect/replacement while the old connection's read is pending.
+	h.lockState()
+	shopper.LoggedOut = true
+	delete(h.Sessions, shopper.UID)
+	h.unlockState()
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("stale read leaked its error: %v", err)
+	}
+}
+
+func TestSnapshotReadRejectsChangedSessionState(t *testing.T) {
+	for _, kind := range []string{"unchanged", "revision", "room", "phase", "replacement"} {
+		t.Run(kind, func(t *testing.T) {
+			h, s, _, _ := combatFixture()
+			h.lockState()
+			h.scopeSession(s)
+			original := h.ioScope
+			valid := h.readSessionSnapshot(s, func() {
+				// Another state operation can acquire the lock during this read.
+				h.lockState()
+				defer h.unlockState()
+				switch kind {
+				case "revision":
+					s.refreshRevision++
+				case "room":
+					s.Room = nil
+				case "phase":
+					s.game().Phase = "lobby"
+				case "replacement":
+					h.Sessions[s.UID] = &Session{UID: s.UID}
+				}
+			})
+			restored := h.ioScope == original && !h.ioPaused
+			h.unlockState()
+			if !restored {
+				t.Fatal("dispatcher scope not restored")
+			}
+			if valid != (kind == "unchanged") {
+				t.Fatalf("stale result accepted: %s", kind)
+			}
+		})
+	}
+}

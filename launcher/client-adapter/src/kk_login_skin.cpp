@@ -5,6 +5,7 @@
 #include <commctrl.h>
 #include <cwchar>
 #include <cstring>
+#include <string>
 
 // Verified unpacked SDError build. Its title-based discovery waits forever for
 // gfxz's native title. Supply the selected, verified GAMECLIENT parent through
@@ -43,6 +44,26 @@ static LoginCompatibility attachNativeParent(HWND window) {
     return previous == 0 || previous == selected ? LoginCompatibility::Applied : LoginCompatibility::InvalidParent;
 }
 
+static BOOL CALLBACK cleanDialogText(HWND child, LPARAM) {
+    wchar_t kind[32] = {}, value[2048] = {};
+    GetClassNameW(child, kind, 32);
+    if (wcscmp(kind, L"Static")) return TRUE;
+    GetWindowTextW(child, value, 2048);
+    std::wstring text(value); size_t at;
+    while ((at = text.find(L"功夫小子")) != std::wstring::npos) text.erase(at, 4);
+    if (text != value) SetWindowTextW(child, text.c_str());
+    return TRUE;
+}
+extern "C" __declspec(dllexport) BOOL __stdcall CleanLoginDialog(HWND window) {
+    DWORD pid=0; GetWindowThreadProcessId(window,&pid);
+    wchar_t kind[32]={},title[256]={}; GetClassNameW(window,kind,32);
+    if(pid!=GetCurrentProcessId() || wcscmp(kind,L"#32770")) return FALSE;
+    GetWindowTextW(window,title,256);
+    if(wcsstr(title,L"功夫小子")) SetWindowTextW(window,L"登录提示");
+    EnumChildWindows(window,cleanDialogText,0);
+    return TRUE;
+}
+static const UINT CleanDialogMessage = WM_APP + 0x3b8;
 static const UINT SkinMessage = WM_APP + 0x3b7;
 static const UINT_PTR SkinId = 0x4b4b534b;
 static HBRUSH panelBrush, fieldBrush;
@@ -230,6 +251,9 @@ static BOOL CALLBACK findLogin(HWND window, LPARAM) {
 extern "C" __declspec(dllexport) LRESULT CALLBACK LoginSkinHook(int code, WPARAM wparam, LPARAM lparam) {
     if (code >= 0) {
         auto message = (CWPSTRUCT*)lparam;
+        if (message->message == WM_INITDIALOG || message->message == WM_SHOWWINDOW)
+            PostMessageW(message->hwnd, CleanDialogMessage, 0, 0);
+        if (message->message == CleanDialogMessage) CleanLoginDialog(message->hwnd);
         if (message->message == SkinMessage && message->wParam == SkinId) {
             SetPropW(message->hwnd, L"OpenKFO.LoginCompatibility", reinterpret_cast<HANDLE>(attachNativeParent(message->hwnd)));
             findLogin(message->hwnd, 0);

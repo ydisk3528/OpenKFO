@@ -217,7 +217,8 @@ func (s *Store) SaveStageAccess(a StageAccess) (StageAccess, error) {
 	if a.Disabled == nil {
 		a.Disabled = []uint32{}
 	}
-	tx, err := s.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.DB)
+	defer txCancel()
 	if err != nil {
 		return StageAccess{}, err
 	}

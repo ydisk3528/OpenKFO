@@ -133,7 +133,8 @@ func (s *Store) createGrantBatch(r AdminRequest) error {
 		UIDs  []uint64
 	}{r.BatchItems, r.All, r.UIDs})
 	hash := sha256.Sum256(request)
-	tx, e := s.DB.Begin()
+	tx, txCancel, e := beginTransaction(s.DB)
+	defer txCancel()
 	if e != nil {
 		return e
 	}
@@ -227,7 +228,8 @@ func (s *Store) grantBatchStatus(id string) (any, error) {
 }
 
 func (s *Store) sendGrantBatch(id string, uid uint64) error {
-	tx, e := s.DB.Begin()
+	tx, txCancel, e := beginTransaction(s.DB)
+	defer txCancel()
 	if e != nil {
 		return e
 	}

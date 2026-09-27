@@ -131,6 +131,27 @@ func TestTitleProgressLocalDatabase(t *testing.T) {
 	if e != nil || level != 2 || len(choices) != 1 || choices[0] != 8 {
 		t.Fatal("next title missing", e)
 	}
+	rules = TitleRules{Enabled: true, Titles: []TitleRule{
+		{Level: 1, Enabled: true, MinPlayerLevel: 1},
+		{Level: 2, Enabled: true, MinPlayerLevel: 1},
+		{Level: 3, Enabled: true, MinPlayerLevel: 10},
+	}}
+	save()
+	for i, want := range []bool{true, false} {
+		changed, err := s.TitleManager().AdvanceTitle(2, []byte{1, 2, 3}, "")
+		if err != nil || changed != want {
+			t.Fatalf("no reward advance %d: %v %v", i, changed, err)
+		}
+	}
+	var updatedProfile []byte
+	if err := db.QueryRow("SELECT profile FROM accounts WHERE uid=2").Scan(&updatedProfile); err != nil || updatedProfile[TitleLevelOffset] != 2 {
+		t.Fatal("no reward title missing", err)
+	}
+	var offers int
+	if err := db.QueryRow("SELECT COUNT(*) FROM title_rewards WHERE uid=2").Scan(&offers); err != nil || offers != 0 {
+		t.Fatal("empty reward offer created", err)
+	}
+
 }
 
 func TestTitleCountersMet(t *testing.T) {
@@ -138,7 +159,7 @@ func TestTitleCountersMet(t *testing.T) {
 	if !titleCountersMet(p, TitleRule{MinPlayerLevel: 1}) {
 		t.Fatal("new account level zero must mean level one")
 	}
-	protocol.WriteUint16(p, LevelOffset, 151)
+	protocol.WriteUint16(p, LevelOffset, 201)
 	if titleCountersMet(p, TitleRule{MinPlayerLevel: 1}) {
 		t.Fatal("corrupt level accepted")
 	}

@@ -73,7 +73,8 @@ func (s *ItemManager) SaveWeaponSettings(a WeaponSettings) (WeaponSettings, erro
 	if err != nil {
 		return WeaponSettings{}, err
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return WeaponSettings{}, err
 	}

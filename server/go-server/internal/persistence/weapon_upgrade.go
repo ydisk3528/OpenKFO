@@ -41,7 +41,8 @@ func (s *ItemManager) upgradeWeapon(uid uint64, operation string, instance uint3
 			return result, ErrDenied
 		}
 	}
-	tx, err := s.store.DB.Begin()
+	tx, txCancel, err := beginTransaction(s.store.DB)
+	defer txCancel()
 	if err != nil {
 		return result, err
 	}
