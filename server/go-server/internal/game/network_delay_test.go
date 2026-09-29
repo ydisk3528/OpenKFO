@@ -87,12 +87,32 @@ func TestNetworkProbeReadyGateAndCancellation(t *testing.T) {
 	if err := h.networkDelayReply(impostor, nil); err != nil || len(r.NetworkProbe.pending) != 2 {
 		t.Fatal("wrong session consumed reply")
 	}
-	peer.P2PUntil = time.Now().Add(time.Minute)
+	probe := r.NetworkProbe
+	roomOutputs(t, owner, protocol.MsgNetworkDelayProbe)
+	roomOutputs(t, peer, protocol.MsgNetworkDelayProbe)
+	for _, session := range []*Session{owner, peer} {
+		session.P2PUntil = time.Now().Add(time.Minute)
+		for _, id := range []uint32{protocol.MsgReady, protocol.MsgCancelReady} {
+			roomRequest(t, h, session, id, nil)
+			if r.NetworkProbe != probe || !r.Members[session.UID].Ready || len(probe.pending) != 2 {
+				t.Fatal("ready/cancel changed pending start")
+			}
+			roomOutputs(t, owner)
+			roomOutputs(t, peer)
+		}
+	}
+	// Timeout still unlocks the room; normal waiting-room cancellation works.
+	h.expireNetworkProbe(r, probe)
+	roomOutputs(t, owner, protocol.MsgPlayerNotReady, protocol.MsgPlayerNotReady, 20150)
+	roomOutputs(t, peer, protocol.MsgPlayerNotReady, protocol.MsgPlayerNotReady, 20150)
+	if r.NetworkProbe != nil {
+		t.Fatal("timeout retained start lock")
+	}
+	r.Members[peer.UID].Ready = true
 	roomRequest(t, h, peer, protocol.MsgCancelReady, nil)
-	if r.NetworkProbe != nil || r.Members[peer.UID].Ready {
-		t.Fatal("cancel-ready retained probe")
+	if r.Members[peer.UID].Ready {
+		t.Fatal("normal cancellation blocked")
 	}
-	if err := h.networkDelayReply(owner, nil); err != nil || r.Stage != "room" {
-		t.Fatal("cancelled probe started battle")
-	}
+	roomOutputs(t, owner, protocol.MsgPlayerNotReady)
+	roomOutputs(t, peer, protocol.MsgPlayerNotReady)
 }

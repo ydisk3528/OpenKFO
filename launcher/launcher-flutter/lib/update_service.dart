@@ -57,17 +57,33 @@ class UpdateService {
  String? verifiedLauncherVersion;
  String? verifiedClientVersion;
  String get verifiedRelease {
-   if (verifiedLauncherVersion == null || verifiedLauncherVersion != verifiedClientVersion) {
+   if (verifiedLauncherVersion == null || verifiedClientVersion == null ||
+       ((launcher.config['launcher_update_version_url'] as String? ?? '').isEmpty && verifiedLauncherVersion != verifiedClientVersion)) {
      throw Exception('发布版本已变化或校验未完成，请重新检查更新后启动。');
    }
-   return verifiedLauncherVersion!;
+   return verifiedClientVersion!;
  }
 
   final LauncherService launcher;
   UpdateService(this.launcher, {this.onProgress});
   final void Function(UpdateProgress)? onProgress;
-  bool get usesOss =>
-      (launcher.config['update_version_url'] as String? ?? '').isNotEmpty;
+  bool get usesOss => versionUrls.isNotEmpty;
+
+  /// Release entries in priority order. `update_version_urls` adds sources
+  /// with the same layout as OSS (e.g. the game server); without it only the
+  /// original `update_version_url` is used.
+  List<String> get versionUrls {
+    final list = launcher.config['update_version_urls'];
+    final urls = <String>[
+      if (list is List) ...list.whereType<String>(),
+      launcher.config['update_version_url'] as String? ?? '',
+    ].where((url) => url.isNotEmpty).toList();
+    return urls.toSet().toList();
+  }
+
+  // Keep using the source that answered last, so launcher and client
+  // manifests come from the same release when a source is unreachable.
+  String? _activeVersionUrl;
 
   static Uri httpsUrl(String value) {
     final url = Uri.parse(value);
@@ -84,7 +100,7 @@ class UpdateService {
     final configured = launcher.config['announcement_url'] as String?;
     final url = configured != null && configured.isNotEmpty
         ? httpsUrl(configured)
-        : httpsUrl(launcher.config['update_version_url'] as String).resolve('../announcement.json');
+        : httpsUrl(_activeVersionUrl ?? versionUrls.first).resolve('../announcement.json');
     final bytes = await download(url, 65536, missing: true);
     if (bytes == null) return '暂无公告';
     final value = jsonDecode(utf8.decode(bytes));
@@ -98,7 +114,29 @@ class UpdateService {
   }
 
   Future<Map<String, dynamic>?> ossManifest({bool client = false}) async {
-    final endpoint = httpsUrl(launcher.config['update_version_url'] as String);
+    final dedicated = client ? null : launcher.config['launcher_update_version_url'] as String?;
+    if (dedicated != null && dedicated.isNotEmpty) {
+      return _manifestFrom(httpsUrl(dedicated), client);
+    }
+    final urls = versionUrls;
+    if (urls.isEmpty) throw const FormatException('未配置更新地址');
+    if (_activeVersionUrl != null && urls.remove(_activeVersionUrl)) {
+      urls.insert(0, _activeVersionUrl!);
+    }
+    Object? failure;
+    for (final url in urls) {
+      try {
+        final manifest = await _manifestFrom(httpsUrl(url), client);
+        _activeVersionUrl = url;
+        return manifest;
+      } catch (e) {
+        failure = e; // Try the next source; report the last error if all fail.
+      }
+    }
+    throw failure!;
+  }
+
+  Future<Map<String, dynamic>?> _manifestFrom(Uri endpoint, bool client) async {
     final version = jsonDecode(
       utf8.decode((await download(endpoint, 262144))!),
     );

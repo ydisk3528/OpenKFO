@@ -146,6 +146,22 @@ class _LauncherPageState extends State<LauncherPage> {
     }
   }
 
+  Future<void> selectRealm(String id) async {
+    if (busy || id == service.realmId) return;
+    setState(() => busy = true);
+    try {
+      await save();
+      await service.selectRealm(id);
+      account.clear(); password.clear();
+      for (var n = 1; n <= 8; n++) { accounts[n-1] = {'Account':'', 'Password':''}; }
+      await refreshHealth();
+      for (var n = 1; n <= 8; n++) { accounts[n-1] = await service.loadAccount(n); }
+      loadFields();
+      report('已切换区服，账号、角色和商城数据相互独立');
+    } catch (e) { await error(e); }
+    finally { if (mounted) setState(() => busy = false); }
+  }
+
   void loadFields() {
     account.text = accounts[selected - 1]['Account'] ?? '';
     password.text = accounts[selected - 1]['Password'] ?? '';
@@ -463,6 +479,13 @@ class _LauncherPageState extends State<LauncherPage> {
           ]),
         )),
         const SizedBox(height: 16),
+        if (ready && service.realms.isNotEmpty) ...[
+          DropdownButtonFormField<String>(value: service.realmId, isExpanded: true,
+            decoration: const InputDecoration(labelText: '选择区服', floatingLabelBehavior: FloatingLabelBehavior.never, border: OutlineInputBorder(), isDense: true),
+            items: service.realms.map((r) => DropdownMenuItem<String>(value: r['id'] as String, child: Text(r['name'] as String))).toList(),
+            onChanged: busy ? null : (id) { if (id != null) selectRealm(id); }),
+          const SizedBox(height: 12),
+        ],
         Row(children: [
           Expanded(child: TextField(controller: account, enabled: ready && !busy,
             textInputAction: TextInputAction.next,
@@ -477,7 +500,7 @@ class _LauncherPageState extends State<LauncherPage> {
           } : null),
         ]),
         const SizedBox(height: 6),
-        const Text('账号不存在时，登录即自动注册。账号密码按窗口记忆。', style: TextStyle(fontSize: 11, color: Color(0xffffdd57))),
+        const Text('账号不存在时，登录即自动注册。账号密码按区服和窗口记忆。', style: TextStyle(fontSize: 11, color: Color(0xffffdd57))),
         const SizedBox(height: 18),
         Row(children: [
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

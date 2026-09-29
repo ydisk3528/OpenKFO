@@ -86,6 +86,12 @@ func (h *Hub) toggleSpectator(s *Session) error {
 		return nil
 	}
 	old := r.Members[s.UID]
+	// Readiness commits the fighter roster; a pending start must not be cancelled
+	// by a late spectator toggle, in either direction.
+	if old.Ready || r.NetworkProbe != nil {
+		replyError(-3)
+		return nil
+	}
 	next := *old
 	next.Spectator = !old.Spectator
 	next.Ready = false
@@ -136,9 +142,6 @@ func (h *Hub) toggleSpectator(s *Session) error {
 	// Membership changes invalidate a pending start, not other fighters' readiness.
 	h.cancelNetworkProbe(r)
 	h.cancelSeatExchange(r)
-	if old.Ready {
-		h.broadcast(r, protocol.Message{ID: protocol.MsgPlayerNotReady, Payload: protocol.Uint64Bytes(s.UID)}, 0)
-	}
 	r.Members[s.UID] = &next
 	h.broadcast(r, protocol.Message{ID: protocol.MsgSpectatorChanged, Payload: p}, 0)
 	if r.Owner == s.UID && next.Spectator {

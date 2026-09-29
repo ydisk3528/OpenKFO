@@ -2,6 +2,7 @@ package game
 
 import (
 	"bytes"
+	"fmt"
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
 	"testing"
@@ -273,17 +274,23 @@ func TestObserverTogglePreservesOtherPlayersReady(t *testing.T) {
 			t.Fatal("unrelated fighter lost readiness")
 		}
 	}
-	// A ready fighter becoming an observer only clears their own readiness.
+	// Ready fighters must explicitly cancel readiness before changing roles.
+	roomRequest(t, h, b, protocol.MsgToggleSpectator, nil)
+	out := roomOutputs(t, b, protocol.MsgSpectatorChanged)[0]
+	if int32(protocol.ReadUint32(out.Payload, 8)) != -3 || !r.Members[b.UID].Ready || r.Members[b.UID].Spectator {
+		t.Fatal("ready fighter changed roles")
+	}
+	roomOutputs(t, a)
+	roomOutputs(t, o)
+	r.Members[b.UID].Ready = false
 	roomRequest(t, h, b, protocol.MsgToggleSpectator, nil)
 	for _, s := range []*Session{a, b, o} {
-		out := roomOutputs(t, s, protocol.MsgPlayerNotReady, protocol.MsgSpectatorChanged)
-		if protocol.ReadUint64(out[0].Payload, 0) != b.UID {
-			t.Fatal("wrong player cancelled")
-		}
+		roomOutputs(t, s, protocol.MsgSpectatorChanged)
 	}
-	if r.Members[b.UID].Ready {
-		t.Fatal("observer remains ready")
+	if !r.Members[b.UID].Spectator {
+		t.Fatal("unready fighter could not spectate")
 	}
+
 }
 
 func TestObserverOwnerTransferOnlyClearsNewOwner(t *testing.T) {
@@ -304,5 +311,37 @@ func TestObserverOwnerTransferOnlyClearsNewOwner(t *testing.T) {
 	}
 	if r.Members[b.UID].Ready || !r.Members[o.UID].Ready {
 		t.Fatal("owner readiness scope")
+	}
+}
+
+func TestObserverToggleRejectsReadyAndStartingRoom(t *testing.T) {
+	for _, stage := range []string{"room", "loading", "wait_ready", "battle", "settlement"} {
+		for _, spectator := range []bool{false, true} {
+			t.Run(stage+fmt.Sprint(spectator), func(t *testing.T) {
+				h, host, peer, _ := waitingRoomFixture()
+				r := host.Room
+				r.Stage, r.Request[34], r.SpectatorCapacity = stage, 1, 2
+				m := r.Members[peer.UID]
+				m.Spectator, m.Ready = spectator, !spectator
+				probe := &roomNetworkProbe{pending: map[uint64]*Session{peer.UID: peer}}
+				r.NetworkProbe = probe
+				before := *m
+				roomRequest(t, h, peer, protocol.MsgToggleSpectator, nil)
+				p := roomOutputs(t, peer, protocol.MsgSpectatorChanged)[0].Payload
+				if len(p) != 12 || int32(protocol.ReadUint32(p, 8)) != -3 {
+					t.Fatal("late toggle accepted")
+				}
+				if r.Members[peer.UID] != m || m.Spectator != before.Spectator || m.Ready != before.Ready || m.Slot != before.Slot || m.Spawn != before.Spawn || r.NetworkProbe != probe || r.Owner != host.UID {
+					t.Fatal("rejected toggle changed room")
+				}
+				roomOutputs(t, host)
+			})
+		}
+	}
+	h, _, peer, _ := waitingRoomFixture()
+	peer.Room.Members[peer.UID].Ready = true
+	roomRequest(t, h, peer, protocol.MsgToggleSpectator, nil)
+	if int32(protocol.ReadUint32(roomOutputs(t, peer, protocol.MsgSpectatorChanged)[0].Payload, 8)) != -3 {
+		t.Fatal("ready player toggled before probe")
 	}
 }

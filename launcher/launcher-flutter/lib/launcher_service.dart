@@ -34,6 +34,9 @@ class GameDirectoryError implements Exception {
   String toString() => '请选择完整的游戏目录。该目录需要包含 Data/config.spf2，以及 gfxz.dat 或 gfld.dat。';
 }
 
+// Off by default: empty keeps the original OSS-only behaviour. Enable at build
+// time with --dart-define=SERVER_VERSION_URL=https://<host>/dl/version/version.json
+const serverVersionUrl = String.fromEnvironment('SERVER_VERSION_URL');
 const legacyClientHash = '98c43be72ac7600b368d4e185d75205376f79e938ea42e4b16ce8f8c4bae827b';
 
 class LauncherService {
@@ -41,6 +44,62 @@ class LauncherService {
   final String root;
   late Map<String, dynamic> config;
   late Map<String, dynamic> components;
+  List<Map<String, dynamic>> realms = [];
+  Map<String, dynamic> _baseConfig = {};
+  String realmId = '';
+  File get realmSelection => File(p.join(root, 'realm-selection.json'));
+
+  Future<void> loadRealms() async {
+    _baseConfig = Map<String, dynamic>.from(config);
+    if (p.basename(configPath) == 'bridge.local.json' || !components.containsKey('realms.json')) return;
+    final data = jsonDecode(utf8.decode(await component('realms.json')));
+    final ids = <String>{};
+    for (final raw in data as List) {
+      final r = Map<String, dynamic>.from(raw as Map);
+      final uri = Uri.tryParse(r['url'] as String? ?? '');
+      if (r['id'] is! String || !RegExp(r'^[a-z0-9-]+$').hasMatch(r['id']) || !ids.add(r['id']) ||
+          r['name'] is! String || (r['name'] as String).isEmpty || uri == null || uri.scheme != 'tls' ||
+          uri.host.isEmpty || !uri.hasPort || uri.port < 1 || uri.port > 65535 || uri.hasQuery || uri.hasFragment || uri.userInfo.isNotEmpty ||
+          r['server_certificate'] is! String || !components.containsKey(r['server_certificate'])) {
+        throw Exception('区服配置无效，请重新下载完整启动器。');
+      }
+      realms.add(r);
+    }
+    if (realms.isEmpty) throw Exception('区服列表为空');
+    String? saved;
+    try { saved = (jsonDecode(await realmSelection.readAsString()) as Map)['id'] as String?; }
+    on FileSystemException { /* First start. */ }
+    on FormatException { /* Invalid preference uses the first realm. */ }
+    final chosen = realms.firstWhere((r) => r['id'] == saved, orElse: () => realms.first);
+    await _applyRealm(chosen);
+  }
+
+  Future<void> _applyRealm(Map<String, dynamic> r) async {
+    final certificate = r['server_certificate'] as String;
+    await component(certificate); // Verify the pin before changing endpoints.
+    config = Map<String, dynamic>.from(_baseConfig)
+      ..['url'] = r['url']
+      ..['server_certificate'] = p.join('launcher-files', certificate);
+    if (r['id'] != realms.first['id']) config['credentials_scope'] = 'realm:${r['id']}:${r['url']}';
+    realmId = r['id'];
+    verifiedRelease = null;
+  }
+
+  Future<void> selectRealm(String id) async {
+    if (id == realmId) return;
+    final r = realms.firstWhere((r) => r['id'] == id);
+    for (var n = 1; n <= 8; n++) {
+      if (await state(n) != null) throw Exception('切换区服前，请先关闭所有游戏窗口。');
+    }
+    // The shared bridge owns fixed local ports and exits 30 seconds after the last game.
+    for (final port in [18084, 18000, 18001]) {
+      try { final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, port); await socket.close(); }
+      on SocketException { throw Exception('登录组件仍在退出，请关闭游戏后等待约30秒，再切换区服。'); }
+    }
+    await _applyRealm(r);
+    await writeAtomic(realmSelection.path, utf8.encode(jsonEncode({'id': realmId})));
+  }
+
   late String game;
   String credentialsKey = 'LS1KuGmfVgqfuRT2';
   LauncherService(this.root);
@@ -103,6 +162,11 @@ class LauncherService {
     }
     config = jsonDecode(await File(configPath).readAsString());
     config.putIfAbsent('update_version_url', () => 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/version/version.json');
+    // When enabled, the game-server mirror is tried first and OSS is the fallback.
+    if (serverVersionUrl.isNotEmpty) {
+      config.putIfAbsent('update_version_urls', () => [serverVersionUrl]);
+    }
+    await loadRealms();
     game = p.normalize(
       p.absolute(root, config['client_directory'] as String? ?? '.'),
     );
@@ -182,7 +246,7 @@ class LauncherService {
         'window-$n',
         'credentials.bin',
       );
-      if (await File(old).exists()) {
+      if ((realms.isEmpty || realmId == realms.first['id']) && await File(old).exists()) {
         final value = Map<String, dynamic>.from(
           await native({'Op': 'load', 'Path': old}),
         );

@@ -2,7 +2,7 @@
 import argparse, hashlib, json, os, shutil, subprocess, tempfile, zipfile
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-p=argparse.ArgumentParser();p.add_argument('--version',default='2026.09.21-flutter.1');p.add_argument('--flutter',default='E:/OpenKFO-Flutter3169/flutter/bin/flutter.bat');p.add_argument('--config-hash',required=True);args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--version',default='2026.09.21-flutter.1');p.add_argument('--flutter',default='E:/OpenKFO-Flutter3169/flutter/bin/flutter.bat');p.add_argument('--config-hash',required=True);p.add_argument('--realms-config');p.add_argument('--launcher-version-url');p.add_argument('--server-version-url',help='game-server update entry tried before OSS');args=p.parse_args()
 assert len(args.config_hash)==64 and all(c in '0123456789abcdef' for c in args.config_hash),'Expected client config SHA256'
 def run(argv,cwd):
     subprocess.run([str(x) for x in argv],cwd=cwd,check=True)
@@ -17,7 +17,7 @@ assert version['frameworkVersion']=='3.16.9','Use Flutter 3.16.9 for Windows 7 c
 run([flutter,'pub','get'],stage)
 run([flutter,'analyze','--no-pub'],stage)
 run([flutter,'test','--no-pub'],stage)
-run([flutter,'build','windows','--release','--no-pub',f'--dart-define=LAUNCHER_VERSION={args.version}'],stage)
+run([flutter,'build','windows','--release','--no-pub',f'--dart-define=LAUNCHER_VERSION={args.version}']+([f'--dart-define=SERVER_VERSION_URL={args.server_version_url}'] if args.server_version_url else []),stage)
 out=root/'dist'/('launcher-flutter-'+args.version)
 if out.exists():raise SystemExit('Use a new version: output already exists')
 release_dir=stage/'build/windows/x64/runner/Release'
@@ -49,6 +49,20 @@ with zipfile.ZipFile(root/'runtime-local/launcher-package/bootstrap.zip') as z:
         target=payload/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(z.read(name))
 bridge=json.loads((payload/'bridge.json').read_text(encoding='utf-8-sig'))
 bridge['config_hash']=args.config_hash
+if args.realms_config:
+    profiles_path=Path(args.realms_config).resolve()
+    profiles=json.loads(profiles_path.read_text(encoding='utf-8-sig'))
+    assert isinstance(profiles,list) and profiles
+    for profile in profiles:
+        certificate=profile['server_certificate']
+        assert not Path(certificate).is_absolute() and '..' not in Path(certificate).parts
+        if not (payload/certificate).exists():
+            target=payload/certificate;target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(profiles_path.parent/certificate,target)
+    (payload/'realms.json').write_text(json.dumps(profiles,ensure_ascii=False,indent=2),encoding='utf-8')
+if args.launcher_version_url:
+    assert args.launcher_version_url.startswith('https://')
+    bridge['launcher_update_version_url']=args.launcher_version_url
 (payload/'bridge.json').write_text(json.dumps(bridge,ensure_ascii=False,indent=2),encoding='utf-8')
 (payload/'files.json').write_text(json.dumps({f.relative_to(payload).as_posix():digest(f) for f in payload.rglob('*') if f.is_file()},ensure_ascii=False),encoding='utf-8')
 feed=root/'dist'/('launcher-flutter-feed-'+args.version);(feed/'files').mkdir(parents=True)

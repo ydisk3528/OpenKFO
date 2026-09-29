@@ -883,7 +883,8 @@ func (hub *Hub) roomMessage(session *Session, channel *Channel, message protocol
 		if len(payload) != 0 || room == nil {
 			return true, protocol.ErrFrame
 		}
-		if !room.canConfigure(session) {
+		// Once start detection begins, ready/cancel packets cannot change its roster.
+		if !room.canConfigure(session) || room.NetworkProbe != nil {
 			return true, nil
 		}
 		member := room.Members[uid]

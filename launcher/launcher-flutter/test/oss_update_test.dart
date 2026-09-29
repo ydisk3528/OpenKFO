@@ -79,6 +79,57 @@ void main() {
     await expectLater(fixture.stageChanges(manifest, stage, (_) {}), throwsException);
     expect(await File('${root.path}/data/app.so').readAsBytes(), [1]);
   });
+  test('server source is used first and OSS is the fallback', () async {
+    const server = 'https://game.example/dl/';
+    final root = await Directory.systemTemp.createTemp('server-source-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final service = OfflineLauncher(root.path)..game = root.path..config = {
+      'url': 'tls://example.invalid:19091',
+      'update_version_url': '${base}version/version.json',
+      'update_version_urls': ['${server}version/version.json'],
+    };
+    await writeAtomic('${root.path}/Data/config.spf2', [1]);
+    List<int> pointer(String b) => utf8.encode(jsonEncode({'version': 'v1', 'client_manifest': '${b}manifest/v1/client.json'}));
+    List<int> manifest(String b) => utf8.encode(jsonEncode({'version': 'v1', 'target': 'client', 'config_hash': hashBytes([1]),
+      'files': [{'path': 'Data/config.spf2', 'url': '${b}releases/v1/client/Data/config.spf2', 'size': 1, 'sha256': hashBytes([1])}]}));
+    final both = OssFixture(service, {
+      '${server}version/version.json': pointer(server), '${server}manifest/v1/client.json': manifest(server),
+      '${base}version/version.json': pointer(base), '${base}manifest/v1/client.json': manifest(base),
+    });
+    expect(both.versionUrls, ['${server}version/version.json', '${base}version/version.json']);
+    expect(await both.clientCheck(), isNull);
+    expect(both.fetched.every((url) => url.startsWith(server)), true);
+    // Server unreachable: the same release is read from OSS and stays there.
+    final ossOnly = OssFixture(service, {'${base}version/version.json': pointer(base), '${base}manifest/v1/client.json': manifest(base)});
+    expect(await ossOnly.clientCheck(), isNull);
+    expect(ossOnly.verifiedClientVersion, 'v1');
+    ossOnly.fetched.clear();
+    await ossOnly.clientCheck();
+    expect(ossOnly.fetched.first, '${base}version/version.json');
+    await expectLater(OssFixture(service, {}).clientCheck(), throwsStateError);
+  });
+  test('server source is off by default: init adds no extra update entry', () async {
+    final root = await Directory.systemTemp.createTemp('default-source-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final payload = Directory('${root.path}/launcher-files')..createSync();
+    final files = <String, String>{};
+    for (final name in ['bridge.json', 'launcher-certificates/online/origin.crt',
+        'launcher-certificates/online/login.crt', 'launcher-certificates/online/login.key']) {
+      final bytes = utf8.encode(name == 'bridge.json' ? jsonEncode({'url': 'tls://example.invalid:19091', 'shared_client': true}) : name);
+      await writeAtomic('${payload.path}/$name', bytes);
+      files[name] = hashBytes(bytes);
+    }
+    await File('${payload.path}/files.json').writeAsString(jsonEncode(files));
+    final service = OfflineLauncher(root.path);
+    await service.init();
+    expect(service.config.containsKey('update_version_urls'), false);
+    expect(UpdateService(service).versionUrls, ['${base}version/version.json']);
+  });
+  test('without update_version_urls only the original OSS entry is used', () {
+    final service = LauncherService('.')..config = {'update_version_url': '${base}version/version.json'};
+    expect(UpdateService(service).versionUrls, ['${base}version/version.json']);
+    expect(UpdateService(LauncherService('.')..config = {}).usesOss, false);
+  });
   test('OSS validates version, transport, duplicate names and client paths', () {
     final row = {'path':'Data/config.spf2','url':'${base}releases/v2/config','sha256':hashBytes([1]),'size':1};
     Map<String,dynamic> make(List<dynamic> rows) => {'target':'client','version':'v2','config_hash':hashBytes([1]),'files':rows};

@@ -6,12 +6,13 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"kungfu.local/server/internal/desktop"
-	"kungfu.local/server/internal/releases"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"kungfu.local/server/internal/desktop"
+	"kungfu.local/server/internal/releases"
 )
 
 func main() {
