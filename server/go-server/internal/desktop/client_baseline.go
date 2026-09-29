@@ -210,6 +210,15 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if base, err = applyFrameSwitches(base, state, items); err != nil {
 		return nil, fmt.Errorf("帧级连招：%w", err)
 	}
+	if base, err = applyCounters(base, state, items); err != nil {
+		return nil, fmt.Errorf("招架：%w", err)
+	}
+	if base, err = applyBlockElements(base, state, items); err != nil {
+		return nil, fmt.Errorf("防护/自身状态：%w", err)
+	}
+	if base, err = applyScopes(base, state, items); err != nil {
+		return nil, fmt.Errorf("攻击范围：%w", err)
+	}
 	if len(state.Created) > 0 {
 		if base, err = syncWeaponEffects(base, state.Created); err != nil {
 			return nil, fmt.Errorf("同步特效登记：%w", err)
@@ -319,6 +328,15 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 		}
 	}
 	for name := range frameSwitchFiles(source, state) {
+		allowed[name] = true
+	}
+	for name := range counterFiles(source, state) {
+		allowed[name] = true
+	}
+	for name := range blockElementFiles(source, state) {
+		allowed[name] = true
+	}
+	for name := range scopeFiles(source, state) {
 		allowed[name] = true
 	}
 	if info != nil {

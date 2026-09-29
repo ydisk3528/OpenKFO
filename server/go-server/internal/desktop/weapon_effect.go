@@ -39,6 +39,27 @@ func effectPreviews(blocks []block) []string {
 	return ids
 }
 
+// actionFrames returns the action's total frame count: the last frame its
+// <Anm> segments reach, plus one. Hold/loop segments (replaytimes) keep the
+// action alive past this, but the timeline itself is this long.
+func actionFrames(blocks []block) int {
+	last := -1
+	for _, blk := range blocks {
+		blk.node.walk(func(node *xmlNode) {
+			if node.tag != "Anm" {
+				return
+			}
+			if end, err := strconv.Atoi(node.get("endframe")); err == nil && end > last {
+				last = end
+			}
+		})
+	}
+	if last < 0 {
+		return 0
+	}
+	return last + 1
+}
+
 // syncWeaponEffects rewrites the WeaponEffect block of every self-made weapon
 // to exactly the set of effects its current itemact row references, minus the
 // always-loaded common block (ItemID 0) — matching how the shipped tables are

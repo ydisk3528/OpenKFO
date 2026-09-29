@@ -333,6 +333,20 @@ type Stage struct {
 	Effects   []string `json:"effects,omitempty"`
 	Supported bool     `json:"supported"`
 	Reason    string   `json:"reason"`
+	// Counter is the parry window this stage's action block declares — the
+	// third transition channel, triggered by the opponent's attack rather than
+	// by a key. It is not visible in the combo-chain or frame-switch editors.
+	Counter *CounterWindow `json:"counter,omitempty"`
+	// Frames is the action's real length in frames. Almost every shipped
+	// <AnmDesc> ends with a placeholder segment running to frame 99/999 (hold
+	// the pose until interrupted), so the raw max endframe is not the length.
+	// enrichStageFrames() replaces this with the frame count of the animation
+	// the stage actually plays (Data/animation/<name>.anm); Clip names it.
+	Frames int `json:"frames,omitempty"`
+	// RawFrames keeps the old max(endframe)+1 so callers can still spot the
+	// placeholder tail when the .anm could not be read.
+	RawFrames int    `json:"raw_frames,omitempty"`
+	Clip      string `json:"clip,omitempty"`
 }
 type Weapon struct {
 	ID          int              `json:"id"`
@@ -690,7 +704,32 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 				}
 			}
 
-			weapon.Stages = append(weapon.Stages, Stage{number, state, label, action, refIDs, hits, effectPreviews(candidates), reason == "", reason})
+			raw := actionFrames(candidates)
+			stage := Stage{
+				Stage: number, State: state, Label: label, Action: action,
+				PropertyIDs: refIDs, Hits: hits, Effects: effectPreviews(candidates),
+				Supported: reason == "", Reason: reason,
+				Frames: raw, RawFrames: raw,
+			}
+			stage.Counter = counterWindowOf(candidates)
+			weapon.Stages = append(weapon.Stages, stage)
+		}
+		// 招架落到空处是不生效的：目标状态必须是本武器动作行里真实存在的一列。
+		reachable := map[int]bool{}
+		for _, stage := range weapon.Stages {
+			if number, err := strconv.Atoi(stage.State); err == nil {
+				reachable[number] = true
+			}
+		}
+		for index := range weapon.Stages {
+			counter := weapon.Stages[index].Counter
+			if counter == nil {
+				continue
+			}
+			number, err := strconv.Atoi(counter.NextState)
+			if err != nil || !reachable[number] {
+				counter.NextUnreachable = true
+			}
 		}
 		// A donor-less weapon starts with every state zeroed, so it has no
 		// stages yet; it must still appear in the catalogue so the author can
@@ -1224,6 +1263,18 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(temp, path)
 }
 
+// snapshotState copies the current settings.json aside before a destructive
+// edit (清空定制 / 删除状态 / 删除武器), so a mistaken click can be undone by
+// hand. Best-effort: never fails the operation it guards.
+func snapshotState(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	backup := path + ".bak-" + time.Now().Format("20060102-150405")
+	_ = atomicWrite(backup, data)
+}
+
 // Blueprint describes a weapon invented without touching the client binary.
 // Its item row and action row are copied from a donor weapon that already ships
 // in the client's config.spf2, so the untouched client still draws an existing
@@ -1618,9 +1669,22 @@ type weaponState struct {
 	// present here is authoritative (an empty list means "no switches at all");
 	// a state absent keeps whatever the block already ships. Shared blocks are
 	// cloned before the rewrite, so the donor weapon is never touched.
-	FrameSwitches   map[string]map[int]frameSwitchStageEdit `json:"frame_switches,omitempty"`
-	Cleared         map[string]map[int]bool                 `json:"cleared,omitempty"`
-	ExtraProperties map[string]ExtraProperty                `json:"extra_properties,omitempty"`
+	FrameSwitches map[string]map[int]frameSwitchStageEdit `json:"frame_switches,omitempty"`
+	// Counters holds the authored parry window (<Counter> + <TriggerBox>) of
+	// one stage — the third transition channel, triggered by the opponent's
+	// attack rather than by a key. At most one per stage; nil deletes it.
+	Counters map[string]map[int]*CounterEdit `json:"counters,omitempty"`
+	// BlockElements holds the authored 「防护」(霸体/无敌/穿人) and 「自身状态」
+	// (UState/Ustate/AddBuff) elements, keyed by weapon → stage → tag. Only the
+	// tags an author actually touched appear here: a missing tag means "leave the
+	// block alone", an empty list means "remove that tag".
+	BlockElements map[string]map[int]map[string][]BlockElement `json:"block_elements,omitempty"`
+	// Scopes holds the authored attack range (<AttackScope>) per weapon → stage
+	// → animation segment id. A stage/segment absent here keeps the block's own
+	// declaration (usually inherited from the donor weapon).
+	Scopes          map[string]map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
+	Cleared         map[string]map[int]bool                         `json:"cleared,omitempty"`
+	ExtraProperties map[string]ExtraProperty                        `json:"extra_properties,omitempty"`
 	// Chains holds an author-authored combo state machine per weapon. When a
 	// weapon has an entry here, it replaces whatever delayacttable.xml says
 	// (including a borrowed donor table) with exactly these transitions.
@@ -1729,6 +1793,9 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if state.ComboRules == nil {
 		state.ComboRules = map[string]ComboRuleSet{}
 	}
+	if state.Scopes == nil {
+		state.Scopes = map[string]map[int]map[string][]FrameSwitchAttr{}
+	}
 	// 合并式导入不碰编辑集、也不依赖基线：直接读目标客户端的 config.spf2，
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过
 	// （比如线上更新器）就挡在门外——那正是合并导入要处理的场景。
@@ -1805,6 +1872,30 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			remapError = frameErr.Error()
 		}
 	}
+	// 招架（<Counter>）是第三条通道，同样要让编辑器看到"应用后的样子"。
+	if len(state.Counters) > 0 {
+		if countered, counterErr := applyCounters(base, &state, items); counterErr == nil {
+			base = countered
+		} else {
+			remapError = counterErr.Error()
+		}
+	}
+	// 防护（霸体/无敌/穿人）与自身状态（UState/AddBuff）。
+	if len(state.BlockElements) > 0 {
+		if applied, applyErr := applyBlockElements(base, &state, items); applyErr == nil {
+			base = applied
+		} else {
+			remapError = applyErr.Error()
+		}
+	}
+	// 攻击范围（<AttackScope>）：同样是动作块里的元素，编辑后要立刻在轨道上看到。
+	if len(state.Scopes) > 0 {
+		if applied, applyErr := applyScopes(base, &state, items); applyErr == nil {
+			base = applied
+		} else {
+			remapError = applyErr.Error()
+		}
+	}
 	// The acteffect registration follows the remapped itemact row, so publish
 	// and package see the same effect set the client will load on equip.
 	if len(state.Created) > 0 {
@@ -1818,6 +1909,8 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if err != nil {
 		return nil, err
 	}
+	// 招式时长要看动画自己的帧数，不是动作块尾巴那条 99/999 的占位片断。
+	enrichStageFrames(info, client)
 	if err = annotateComboState(info, base); err != nil {
 		return nil, err
 	}
@@ -1846,6 +1939,13 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if remapError != "" {
 			result["remap_error"] = remapError
 		}
+		// 招架（<Counter>）切到空状态只提示、不拦写盘：白架只影响那一招。
+		if warnings := counterWarnings(info); len(warnings) > 0 {
+			result["counter_warnings"] = warnings
+		}
+		// 状态目录（ustate.xml）：动作块里的 UState/Ustate/AddBuff 都按它的
+		// type 编号引用，带策划注释，给界面做下拉用。
+		result["ustates"] = ustateCatalog(base)
 		return result, nil
 	}
 	if request.Operation == "weapon_create" || request.Operation == "weapon_forget" {
@@ -1855,6 +1955,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			if _, ok := state.Created[key]; !ok {
 				return nil, fmt.Errorf("该武器不是自建武器")
 			}
+			snapshotState(statePath)
 			delete(state.Created, key)
 			delete(state.Drafts, key)
 			delete(state.Applied, key)
@@ -1864,6 +1965,8 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			delete(state.Chains, key)
 			delete(state.ComboRules, key)
 			delete(state.FrameSwitches, key)
+			delete(state.Counters, key)
+			delete(state.BlockElements, key)
 			delete(state.PropertyClones, key)
 			message = "已移除自建武器；重新应用或发布后才会从配置包消失"
 		} else {
@@ -2018,6 +2121,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		}
 		// 整把武器一次性替换：map 里没有的状态 = 不改（沿用块里原有的切换）。
 		if len(request.FrameSwitches) == 0 {
+			snapshotState(statePath)
 			delete(state.FrameSwitches, key)
 		} else {
 			if state.FrameSwitches == nil {
@@ -2040,6 +2144,135 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		}
 		return map[string]any{
 			"frame_switches": state.FrameSwitches[key],
+			"saved":          count,
+			"revision":       digest(append(append([]byte(nil), current...), encoded...)),
+			"message":        message,
+		}, nil
+	}
+	if request.Operation == "weapon_counter_set" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		key := strconv.Itoa(request.Weapon)
+		actionText, err := base.text("itemact.txt")
+		if err != nil {
+			return nil, err
+		}
+		if actionRowIndex(actionText)[key] == nil {
+			return nil, fmt.Errorf("武器 %s 不在本客户端的动作表中", key)
+		}
+		if err := validateCounters(base, key, request.Counters); err != nil {
+			return nil, err
+		}
+		count := 0
+		for _, edit := range request.Counters {
+			if edit != nil {
+				count++
+			}
+		}
+		// 整把武器一次性替换：map 里没有的状态 = 不改（沿用块里原有的招架）。
+		if len(request.Counters) == 0 {
+			snapshotState(statePath)
+			delete(state.Counters, key)
+		} else {
+			if state.Counters == nil {
+				state.Counters = map[string]map[int]*CounterEdit{}
+			}
+			state.Counters[key] = request.Counters
+		}
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("已保存招架（%d 条）；应用到游戏后写入配置包", count)
+		if len(request.Counters) == 0 {
+			message = "已清除该武器的招架编辑，动作块回到原样"
+		} else if count == 0 {
+			message = "已保存：这些状态改为没有招架"
+		}
+		return map[string]any{
+			"counters": state.Counters[key],
+			"saved":    count,
+			"revision": digest(append(append([]byte(nil), current...), encoded...)),
+			"message":  message,
+		}, nil
+	}
+	if request.Operation == "weapon_block_elements_set" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		key := strconv.Itoa(request.Weapon)
+		actionText, err := base.text("itemact.txt")
+		if err != nil {
+			return nil, err
+		}
+		if actionRowIndex(actionText)[key] == nil {
+			return nil, fmt.Errorf("武器 %s 不在本客户端的动作表中", key)
+		}
+		if err := validateBlockElements(base, key, request.BlockElements); err != nil {
+			return nil, err
+		}
+		count := 0
+		for _, perTag := range request.BlockElements {
+			for _, list := range perTag {
+				count += len(list)
+			}
+		}
+		// **合并**而不是整把替换：payload 里出现过的 (状态,标签) 才动 —— 传空列表是
+		// 删掉那个标签；没出现的一律保留（作者只选了某一项，就只整理那一项对应的块）。
+		if len(request.BlockElements) == 0 {
+			snapshotState(statePath)
+			delete(state.BlockElements, key)
+		} else {
+			if state.BlockElements == nil {
+				state.BlockElements = map[string]map[int]map[string][]BlockElement{}
+			}
+			perStage := state.BlockElements[key]
+			if perStage == nil {
+				perStage = map[int]map[string][]BlockElement{}
+			}
+			for stage, perTag := range request.BlockElements {
+				stageMap := perStage[stage]
+				if stageMap == nil {
+					stageMap = map[string][]BlockElement{}
+				}
+				for tag, list := range perTag {
+					if len(list) == 0 {
+						delete(stageMap, tag)
+					} else {
+						stageMap[tag] = list
+					}
+				}
+				if len(stageMap) == 0 {
+					delete(perStage, stage)
+				} else {
+					perStage[stage] = stageMap
+				}
+			}
+			if len(perStage) == 0 {
+				delete(state.BlockElements, key)
+			} else {
+				state.BlockElements[key] = perStage
+			}
+		}
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("已保存防护/自身状态（%d 条）；应用到游戏后写入配置包", count)
+		if len(request.BlockElements) == 0 {
+			message = "已清除该武器的防护/自身状态编辑，动作块回到原样"
+		} else if count == 0 {
+			message = "已保存：这些状态改为没有额外防护与自身状态"
+		}
+		return map[string]any{
+			"block_elements": state.BlockElements[key],
 			"saved":          count,
 			"revision":       digest(append(append([]byte(nil), current...), encoded...)),
 			"message":        message,
@@ -2102,6 +2335,96 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			"message":  message,
 		}, nil
 	}
+	// weapon_stage_track returns the frame timeline of one weapon: each stage's
+	// animation segments (with clip frame counts and attack/char boxes) plus the
+	// effect/audio/key/guard markers, so the editor can draw a frame track.
+	if request.Operation == "weapon_stage_track" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		return map[string]any{
+			"weapon":   request.Weapon,
+			"tracks":   stageTracks(info, client, strconv.Itoa(request.Weapon)),
+			"saved":    state.Scopes[strconv.Itoa(request.Weapon)],
+			"revision": revision,
+		}, nil
+	}
+	// weapon_scope_set saves the authored attack range of one weapon. Missing
+	// (stage, segment) pairs are left alone; the values are rendered into the
+	// action block on 应用到游戏.
+	if request.Operation == "weapon_scope_set" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		key := strconv.Itoa(request.Weapon)
+		actionText, err := base.text("itemact.txt")
+		if err != nil {
+			return nil, err
+		}
+		if actionRowIndex(actionText)[key] == nil {
+			return nil, fmt.Errorf("武器 %s 不在本客户端的动作表中", key)
+		}
+		if err := validateScopes(base, key, request.Scopes, info); err != nil {
+			return nil, err
+		}
+		count := 0
+		for _, perStage := range request.Scopes {
+			count += len(perStage)
+		}
+		// 合并而不是整把替换：payload 里出现过的 (状态,片断) 才动。
+		if len(request.Scopes) == 0 {
+			snapshotState(statePath)
+			delete(state.Scopes, key)
+		} else {
+			if state.Scopes == nil {
+				state.Scopes = map[string]map[int]map[string][]FrameSwitchAttr{}
+			}
+			perStage := state.Scopes[key]
+			if perStage == nil {
+				perStage = map[int]map[string][]FrameSwitchAttr{}
+			}
+			for stage, perSegment := range request.Scopes {
+				stageMap := perStage[stage]
+				if stageMap == nil {
+					stageMap = map[string][]FrameSwitchAttr{}
+				}
+				for id, attrs := range perSegment {
+					if len(attrs) == 0 {
+						delete(stageMap, id)
+					} else {
+						stageMap[id] = attrs
+					}
+				}
+				if len(stageMap) == 0 {
+					delete(perStage, stage)
+				} else {
+					perStage[stage] = stageMap
+				}
+			}
+			if len(perStage) == 0 {
+				delete(state.Scopes, key)
+			} else {
+				state.Scopes[key] = perStage
+			}
+		}
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("已保存攻击范围（%d 处）；应用到游戏后写入配置包", count)
+		if len(request.Scopes) == 0 {
+			message = "已清除该武器的攻击范围编辑，动作块回到原样"
+		}
+		return map[string]any{
+			"scopes":   state.Scopes[key],
+			"saved":    count,
+			"revision": digest(append(append([]byte(nil), current...), encoded...)),
+			"message":  message,
+		}, nil
+	}
 	// weapon_combo_chain returns the state-transition chain for one weapon so the
 	// editor can draw it as a readable flow instead of a flat stage list.
 	if request.Operation == "weapon_combo_chain" {
@@ -2122,6 +2445,14 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			"frame_switches": comboFrameSwitches(base, info, strconv.Itoa(request.Weapon)),
 			// 已保存的帧级连招编辑（按状态），编辑器据此区分"改过的"和"原样"。
 			"frame_switches_saved": state.FrameSwitches[strconv.Itoa(request.Weapon)],
+			// 第三条通道：动作块里被对手攻击触发的招架。
+			"counters":       comboCounters(info, strconv.Itoa(request.Weapon)),
+			"counters_saved": state.Counters[strconv.Itoa(request.Weapon)],
+			// 防护（霸体/无敌/穿人）与自身状态（UState/AddBuff）：
+			// 现状 + 已保存的编辑 + 可写元素的清单（供界面按类型分组）。
+			"block_elements":       comboBlockElements(info, strconv.Itoa(request.Weapon)),
+			"block_elements_saved": state.BlockElements[strconv.Itoa(request.Weapon)],
+			"block_element_groups": blockElementGroups(),
 			"frame_keys":           frameKeyOptions(),
 			"keys":                 keyInputs(base),
 			"revision":             revision,
@@ -2366,6 +2697,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if _, ok := state.Created[key]; !ok {
 			return nil, fmt.Errorf("只有自建武器可以删除状态")
 		}
+		snapshotState(statePath)
 		text, err := base.text("itemact.txt")
 		if err != nil {
 			return nil, err
