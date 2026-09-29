@@ -50,3 +50,40 @@ func TestIndependentTaskListQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestTreasurePurchasePriceQuery(t *testing.T) {
+	p := make([]byte, 9)
+	p[0] = 75
+	r := make([]byte, 108)
+	r[4] = 75
+	protocol.WriteUint32(r, 5, 753001)
+	if !matchesPurchasePriceQuery(p, r) {
+		t.Fatal("native zero-ID treasure request lost all specs")
+	}
+	protocol.WriteUint32(p, 1, 753001)
+	if !matchesPurchasePriceQuery(p, r) {
+		t.Fatal("exact item lookup failed")
+	}
+	protocol.WriteUint32(p, 1, 753002)
+	if matchesPurchasePriceQuery(p, r) {
+		t.Fatal("wrong item accepted")
+	}
+	protocol.WriteUint32(p, 1, 0)
+	protocol.WriteUint32(p, 5, 1)
+	if matchesPurchasePriceQuery(p, r) {
+		t.Fatal("renewal treated as purchase")
+	}
+	protocol.WriteUint32(p, 5, 0)
+	r[4] = 76
+	if matchesPurchasePriceQuery(p, r) {
+		t.Fatal("other ticket kind leaked")
+	}
+	p[0] = 25
+	r[4] = 25
+	if matchesPurchasePriceQuery(p, r) {
+		t.Fatal("weapon wildcard enabled")
+	}
+	if matchesPurchasePriceQuery(nil, r) || matchesPurchasePriceQuery(p, nil) {
+		t.Fatal("truncated query accepted")
+	}
+}

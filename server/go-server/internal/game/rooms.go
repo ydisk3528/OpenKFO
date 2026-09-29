@@ -14,6 +14,7 @@ import (
 )
 
 type Config struct {
+	ExperimentalTreasure   bool                             `json:"experimental_treasure,omitempty"`
 	ReleaseVersionURL      string                           `json:"release_version_url,omitempty"`
 	RequiredClientRelease  string                           `json:"required_client_release,omitempty"`
 	ExperimentalNeutralNPC bool                             `json:"-"`

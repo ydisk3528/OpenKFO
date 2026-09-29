@@ -47,6 +47,10 @@ func TestConfigHashMismatchReachesLoginAdmission(t *testing.T) {
 	roots.AddCert(parsed)
 	for _, version := range []string{"", "old", "new"} {
 		hash := strings.Repeat("b", 64)
+		// The same live server sends updated text while retaining the error code.
+		message := "自定义繁忙提示 " + version
+		messages := map[string]string{"busy": message}
+		s.loginText.Store(&messages)
 		c, err := tls.Dial("tcp", l.Addr().String(), &tls.Config{RootCAs: roots, ServerName: "kk-origin", MinVersion: tls.VersionTLS12})
 		if err != nil {
 			t.Fatal(err)
@@ -63,6 +67,9 @@ func TestConfigHashMismatchReachesLoginAdmission(t *testing.T) {
 		var reply tunnel.Frame
 		if err := json.Unmarshal(data, &reply); err != nil {
 			t.Fatal(err)
+		}
+		if reply.ErrorMessage != message {
+			t.Fatalf("custom login text lost: %q", reply.ErrorMessage)
 		}
 		want := "busy"
 		if reply.Error != want {

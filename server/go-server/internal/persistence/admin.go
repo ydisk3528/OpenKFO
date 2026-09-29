@@ -21,6 +21,8 @@ type AdminOffer struct {
 	Enabled bool `json:"enabled"`
 }
 type AdminRequest struct {
+	LoginErrors            *LoginErrorSettings  `json:"login_errors,omitempty"`
+	Treasure               *TreasureSettings    `json:"treasure,omitempty"`
 	RecommendationPriority int32                `json:"recommendation_priority"`
 	PinRecommended         bool                 `json:"pin_recommended"`
 	BatchItems             []BatchGrantItem     `json:"batch_items,omitempty"`
@@ -79,6 +81,26 @@ func (store *Store) adminOffers() ([]AdminOffer, error) {
 }
 func (store *Store) Admin(request AdminRequest) (any, error) {
 	switch request.Operation {
+	case "login_errors_get":
+		return store.LoginErrorSettings()
+	case "login_errors_save":
+		if request.LoginErrors == nil {
+			return nil, fmt.Errorf("缺少登录提示配置")
+		}
+		return store.SaveLoginErrorSettings(*request.LoginErrors)
+	case "treasure_preview":
+		if request.Treasure == nil || len(request.Treasure.Pools) != 1 {
+			return nil, fmt.Errorf("请选择一个总奖池预览")
+		}
+		return request.Treasure.Pools[0].RefreshSix()
+	case "treasure_get":
+		return store.TreasureSettings()
+	case "treasure_save":
+		if request.Treasure == nil {
+			return nil, fmt.Errorf("缺少百宝配置")
+		}
+		return store.SaveTreasureSettings(*request.Treasure)
+
 	case "grant_batch_create", "grant_batch_get", "grant_batch_list", "grant_batch_send", "grant_batch_send_many":
 		return store.adminGrantBatch(request)
 	case "users_list":

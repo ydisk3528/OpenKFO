@@ -342,7 +342,7 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 		if response.Error == "" {
 			return nil, loginRejected("invalid_server_response")
 		}
-		return nil, loginRejected(response.Error)
+		return nil, remoteLoginRejected{Code: loginRejected(response.Error), Message: response.ErrorMessage}
 	}
 	session.uid = response.UID
 	session.loggedOut = make(chan struct{})

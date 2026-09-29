@@ -54,6 +54,9 @@ type Channel struct {
 }
 
 type Session struct {
+	TreasureDraw         *treasureDrawState
+	TreasureSerial       uint32
+	TreasurePreviewAt    time.Time
 	ClientRelease        string
 	UpdateNoticeVersion  string
 	RandomWeaponMode     uint32
@@ -588,6 +591,8 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		return nil
 	}
 	switch message.ID {
+	case 19100, 19150, 19120:
+		return hub.treasureMessage(session, message)
 	case protocol.MsgStageStateQuery:
 		if len(payload) != 0 {
 			session.sendGame(notice("关卡状态查询格式不正确。"))
@@ -780,7 +785,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		}
 		var records []byte
 		for _, offer := range offers {
-			if message.ID == 1500 && (protocol.ReadUint32(payload, 5) != 0 || offer.Record[4] != payload[0] || protocol.ReadUint32(offer.Record, 5) != protocol.ReadUint32(payload, 1)) {
+			if message.ID == 1500 && !matchesPurchasePriceQuery(payload, offer.Record) {
 				continue
 			}
 			records = append(records, offer.Record...)

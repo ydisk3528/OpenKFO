@@ -101,3 +101,13 @@ func (h *Hub) renewItem(s *Session, p []byte) error {
 	// starts a new operation. The native request contains no transaction token.
 	return nil
 }
+
+// Native treasure purchase sends kind=75, itemID=0, mode=0: all ticket specs.
+// Keep zero-ID lookup scoped to ticket kinds; renewal mode remains separate.
+func matchesPurchasePriceQuery(p, record []byte) bool {
+	if len(p) != 9 || len(record) != 108 || protocol.ReadUint32(p, 5) != 0 || record[4] != p[0] {
+		return false
+	}
+	id := protocol.ReadUint32(p, 1)
+	return protocol.ReadUint32(record, 5) == id || (id == 0 && (p[0] == 75 || p[0] == 76))
+}

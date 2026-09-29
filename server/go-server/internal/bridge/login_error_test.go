@@ -59,3 +59,19 @@ func TestSpecificLoginFailureCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteLoginText(t *testing.T) {
+	for _, tc := range []struct{ message, want string }{
+		{"请联系值班管理员", "请联系值班管理员\n错误码：server_error"},
+		{"", loginFailureMessage(loginRejected("server_error"))},
+		{strings.Repeat("字", 301), loginFailureMessage(loginRejected("server_error"))},
+		{"错误\x00伪造", loginFailureMessage(loginRejected("server_error"))},
+	} {
+		if got := loginFailureMessage(remoteLoginRejected{Code: "server_error", Message: tc.message}); got != tc.want {
+			t.Fatalf("got %q want %q", got, tc.want)
+		}
+	}
+	if got := loginFailureMessage(remoteLoginRejected{Code: "bad\ncode", Message: "覆盖"}); strings.Contains(got, "覆盖") {
+		t.Fatal(got)
+	}
+}

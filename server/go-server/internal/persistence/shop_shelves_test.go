@@ -167,3 +167,12 @@ func TestCompatibleShelvesMySQL(t *testing.T) {
 		t.Fatal("expiry policy changed", days, err)
 	}
 }
+
+func TestTreasureTicketsOnItemsShelf(t *testing.T) {
+	kinds := compatibleShelfKinds(67, 67)
+	source := []shelfOffer{shelfFixture(1, 10, 75, true), shelfFixture(2, 10, 76, true)}
+	got := arrangeCompatibleShelf(67, 67, kinds, source)
+	if len(got) != 2 || got[0].Grant[4] != 75 || got[1].Grant[4] != 76 {
+		t.Fatal("treasure tickets missing", got)
+	}
+}

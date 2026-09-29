@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +28,10 @@ type loginLimit struct {
 	Since    time.Time
 }
 type Server struct {
+	loginTextMu sync.Mutex
+	loginTextAt time.Time
+	loginText   atomic.Pointer[map[string]string]
+
 	udp         *net.UDPConn
 	udpMutex    sync.Mutex
 	udpPeers    map[[16]byte]*serverDatagramPeer
@@ -174,7 +179,7 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 	encoder := json.NewEncoder(connection)
 	deny := func(reason string) {
 		log.Printf("login_rejected account=%q reason=%s", auth.Account, reason)
-		response := tunnel.Frame{Op: "auth", Error: reason}
+		response := tunnel.Frame{Op: "auth", Error: reason, ErrorMessage: server.loginErrorText(reason)}
 		probe.traceFrame("S->C", response)
 		encoder.Encode(response)
 	}

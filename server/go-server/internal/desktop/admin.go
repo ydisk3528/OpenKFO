@@ -18,6 +18,8 @@ import (
 )
 
 type Request struct {
+	LoginErrors            *persistence.LoginErrorSettings  `json:"login_errors,omitempty"`
+	Treasure               *persistence.TreasureSettings    `json:"treasure,omitempty"`
 	ClientConfig           *clientConfigRequest             `json:"client_config,omitempty"`
 	RecommendationPriority int32                            `json:"recommendation_priority"`
 	PinRecommended         bool                             `json:"pin_recommended"`
@@ -218,6 +220,8 @@ func (admin *Admin) Call(request Request) (any, error) {
 		return call(persistence.AdminRequest{Operation: "gm_version"})
 	}
 	remote := persistence.AdminRequest{Operation: request.Operation, ID: request.ID, UID: request.UID, Mode: request.Mode, Amount: request.Amount, Rewards: request.Rewards, RewardRevision: request.RewardRevision}
+	remote.LoginErrors = request.LoginErrors
+	remote.Treasure = request.Treasure
 	remote.Instance, remote.ExpiresAt = request.Instance, request.ExpiresAt
 	remote.UIDs, remote.All = request.UIDs, request.All
 	remote.Reason = request.Reason
@@ -250,7 +254,7 @@ func (admin *Admin) Call(request Request) (any, error) {
 		return result, err
 	case "users_list", "user_ban_save", "user_ban_history", "banned_words_get", "banned_words_save", "stage_unlocks_get", "stage_unlocks_save":
 		return call(remote)
-	case "tasks_get", "tasks_save", "titles_get", "titles_save":
+	case "login_errors_get", "login_errors_save", "treasure_get", "treasure_save", "treasure_preview", "tasks_get", "tasks_save", "titles_get", "titles_save":
 		return call(remote)
 	case "vip_shop_settings_get", "vip_shop_settings_save", "talisman_settings_get", "talisman_settings_save", "weapon_settings_get", "weapon_settings_save", "training_get", "training_save", "stages_get", "stages_save", "honour_get", "honour_save", "vip_get", "vip_grant":
 		return call(remote)

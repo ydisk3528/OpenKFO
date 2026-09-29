@@ -17,6 +17,8 @@ import 'weapon_levels_config.dart';
 import 'honour_config.dart';
 import 'vip_config.dart';
 import 'vip_shop_config.dart';
+import 'treasure_config.dart';
+import 'login_error_config.dart';
 import 'shop_config.dart';
 import 'wallet_config.dart';
 
@@ -868,6 +870,23 @@ class _ManagerState extends State<Manager> {
                         ListTile(
                           textColor: Colors.white,
                           iconColor: Colors.white,
+                          leading: const Icon(Icons.redeem),
+                          title: const Text('百宝奖池'),
+                          onTap: busy
+                              ? null
+                              : () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => TreasureConfigPage(
+                                      api: api,
+                                      environment: environmentLabel,
+                                    ),
+                                  ),
+                                ),
+                        ),
+                        ListTile(
+                          textColor: Colors.white,
+                          iconColor: Colors.white,
                           leading: const Icon(Icons.card_membership),
                           title: const Text('VIP商城折扣'),
                           onTap: busy
@@ -946,6 +965,13 @@ class _ManagerState extends State<Manager> {
                       leading: const Icon(Icons.settings, color: Colors.white),
                       title: const Text('管理设置'),
                       children: [
+                        ListTile(
+                          textColor: Colors.white,
+                          iconColor: Colors.white,
+                          leading: const Icon(Icons.error_outline),
+                          title: const Text('登录错误提示'),
+                          onTap: busy ? null : () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => LoginErrorConfigPage(api: api, environment: environmentLabel))),
+                        ),
                         ListTile(
                           textColor: Colors.white,
                           iconColor: Colors.white,

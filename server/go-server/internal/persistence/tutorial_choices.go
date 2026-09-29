@@ -69,6 +69,36 @@ func weaponRewardCatalog(tx *sql.Tx, choices []uint32) (catalog []byte, err erro
 	if len(choices) == 0 {
 		return nil, ErrDenied
 	}
+	defs := make([]ItemDefinition, 0, len(choices))
+	for _, key := range choices {
+		d, err := readDefinition(tx, key)
+		if err != nil {
+			return nil, err
+		}
+		if len(d.Record) != 68 || d.Record[4] != protocol.ItemWeapon {
+			return nil, ErrDenied
+		}
+		defs = append(defs, d)
+	}
+	return rewardCatalog(tx, defs)
+}
+
+// RewardCatalog adds display-only entries for the exact snapshotted rewards.
+func (m *RewardManager) RewardCatalog(defs []ItemDefinition) ([]byte, error) {
+	tx, cancel, err := beginTransaction(m.store.DB)
+	defer cancel()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	catalog, err := rewardCatalog(tx, defs)
+	if err != nil {
+		return nil, err
+	}
+	return catalog, tx.Commit()
+}
+
+func rewardCatalog(tx *sql.Tx, defs []ItemDefinition) (catalog []byte, err error) {
 	// Native A27F60/85C5C0 appends 108-byte entries indexed by DWORD +9,
 	// not +0. Keep ordinary entries and validate the same index the selector
 	// uses before adding display-only definitions (never purchasable offers).
@@ -103,16 +133,13 @@ func weaponRewardCatalog(tx *sql.Tx, choices []uint32) (catalog []byte, err erro
 		return nil, rowErr
 	}
 	seen := map[uint32]bool{}
-	for _, key := range choices {
+	for _, d := range defs {
+		key := d.Key
 		if seen[key] {
 			return nil, ErrDenied
 		}
 		seen[key] = true
-		d, e := readDefinition(tx, key)
-		if e != nil {
-			return nil, e
-		}
-		if d.Record[4] != protocol.ItemWeapon || protocol.ReadUint32(d.Record, 5) == 0 {
+		if key == 0 || len(d.Record) != 68 || protocol.ReadUint32(d.Record, 5) == 0 {
 			return nil, ErrDenied
 		}
 		existing, ok := records[key]
