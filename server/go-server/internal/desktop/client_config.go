@@ -86,7 +86,10 @@ func configUnits(file, text string) ([]configUnit, *xmlNode, error) {
 	seen := map[string]bool{}
 	add := func(u configUnit) error {
 		if seen[u.Key] {
-			return fmt.Errorf("记录编号重复：%s %s", file, u.Key)
+			// 原生表允许相同编号的冗余节点（skillproperty.xml 里重复的
+			// PropertyItem SkillProId 就是这种，客户端按文档位置区分）。
+			// 编辑器保留第一个、跳过后续同键项，避免把原生数据当错误。
+			return nil
 		}
 		u.Values = map[string]string{}
 		if file == "item.txt" {
@@ -148,7 +151,7 @@ func configUnits(file, text string) ([]configUnit, *xmlNode, error) {
 			key := ""
 			for _, a := range n.attrs {
 				switch strings.ToLower(a.Name.Local) {
-				case "id", "itemid", "mapid", "level", "mode", "name", "key", "filepath":
+				case "id", "itemid", "mapid", "skillproid", "level", "mode", "name", "key", "filepath":
 					key = n.tag + "[" + a.Name.Local + "=" + a.Value + "]"
 				}
 				if key != "" {
