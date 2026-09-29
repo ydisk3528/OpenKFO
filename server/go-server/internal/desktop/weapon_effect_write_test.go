@@ -25,7 +25,7 @@ func TestWriteActEffectToLocalClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := map[string]Blueprint{"253300": {ID: 253300, Name: "王八拳", Donor: 253013}}
-	synced, err := syncWeaponEffects(a, created)
+	synced, err := syncWeaponEffects(a, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

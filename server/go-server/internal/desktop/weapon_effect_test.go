@@ -78,7 +78,7 @@ func effectFixture(t *testing.T) *archive {
 func TestSyncWeaponEffectsInsertsBlock(t *testing.T) {
 	a := effectFixture(t)
 	created := map[string]Blueprint{"253300": {ID: 253300, Name: "测试"}}
-	synced, err := syncWeaponEffects(a, created)
+	synced, err := syncWeaponEffects(a, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestSyncWeaponEffectsInsertsBlock(t *testing.T) {
 		}
 	}
 	// Idempotent: syncing again must not change a byte.
-	again, err := syncWeaponEffects(synced, created)
+	again, err := syncWeaponEffects(synced, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestSyncWeaponEffectsInsertsBlock(t *testing.T) {
 func TestSyncWeaponEffectsReplacesAndRemoves(t *testing.T) {
 	a := effectFixture(t)
 	created := map[string]Blueprint{"253300": {ID: 253300, Name: "测试"}}
-	synced, err := syncWeaponEffects(a, created)
+	synced, err := syncWeaponEffects(a, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestSyncWeaponEffectsReplacesAndRemoves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleared, err := syncWeaponEffects(synced, created)
+	cleared, err := syncWeaponEffects(synced, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestSyncWeaponEffectsReplacesAndRemoves(t *testing.T) {
 
 func TestSyncWeaponEffectsNoCreatedNoop(t *testing.T) {
 	a := effectFixture(t)
-	same, err := syncWeaponEffects(a, nil)
+	same, err := syncWeaponEffects(a, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSyncWeaponEffectsRealArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := map[string]Blueprint{"253300": {ID: 253300, Name: "王八拳", Donor: 253013}}
-	synced, err := syncWeaponEffects(a, created)
+	synced, err := syncWeaponEffects(a, created, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

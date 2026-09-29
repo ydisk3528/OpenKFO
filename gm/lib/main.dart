@@ -35,6 +35,11 @@ class Backend {
   Backend({this.root, this.localSettings});
   String? localSettings;
   String? root;
+
+  /// Path of the gm-settings.json that supplied [root]. Handed to the backend so
+  /// it can read and rewrite the client directory in the same file the GM is
+  /// launched from, instead of guessing where the executable lives.
+  String? settingsPath;
   void resolvePaths({
     Directory? executableDirectory,
     Directory? currentDirectory,
@@ -43,6 +48,7 @@ class Backend {
         executableDirectory ?? File(Platform.resolvedExecutable).parent;
     final settings = File('${executable.path}/gm-settings.json');
     if (root == null && settings.existsSync()) {
+      settingsPath = settings.path;
       final config =
           jsonDecode(settings.readAsStringSync()) as Map<String, dynamic>;
       String? resolve(dynamic value) {
@@ -91,6 +97,7 @@ class Backend {
         '-root',
         root!,
         if (localSettings != null) ...['-local-settings', localSettings!],
+        if (settingsPath != null) ...['-gm-settings', settingsPath!],
       ],
       workingDirectory: root,
     );

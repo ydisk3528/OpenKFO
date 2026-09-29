@@ -132,7 +132,8 @@ func comboRowCounts(text string) map[string]int {
 func appendComboRows(text, donor, target string) (string, int, error) {
 	rows := comboRowsOf(text, donor)
 	if len(rows) == 0 {
-		return text, 0, fmt.Errorf("参考武器 %s 没有连招表，无法借用", donor)
+		// 借体没有连招表就跳过连招复制；特效等其它可借的登记照常进行。
+		return text, 0, nil
 	}
 	if len(comboRowsOf(text, target)) > 0 {
 		return text, 0, nil

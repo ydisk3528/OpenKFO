@@ -67,7 +67,7 @@ func actionFrames(blocks []block) int {
 // the id (122 shipped rows alias *_skill files instead of the raw id); ids
 // nobody registers fall back to the id itself. It runs after applyRemaps so
 // the block always describes the actions the weapon will actually play.
-func syncWeaponEffects(a *archive, created map[string]Blueprint) (*archive, error) {
+func syncWeaponEffects(a *archive, created map[string]Blueprint, rows map[string][]EffectRow) (*archive, error) {
 	if len(created) == 0 {
 		return a, nil
 	}
@@ -126,6 +126,29 @@ func syncWeaponEffects(a *archive, created map[string]Blueprint) (*archive, erro
 		animations[name] = text
 		return text, nil
 	}
+	// 块索引：一个 animation 文件只全量扫一次。currentBlock() 每调用一次都要
+	// 重新正则扫描整个文件并逐个块做 XML 解析，而这里每个动作都要查一次——
+	// 实测 16 个动作就能花掉 3.3 秒。
+	blockIndexes := map[string]map[string]string{}
+	blockOf := func(file, animation, blockID string) (string, bool) {
+		index, ok := blockIndexes[file]
+		if !ok {
+			index = map[string]string{}
+			for _, candidate := range animationPattern.FindAllString(animation, -1) {
+				node, err := parseXML(candidate)
+				if err != nil {
+					continue
+				}
+				id := strings.TrimSpace(node.get("id"))
+				if _, exists := index[id]; !exists {
+					index[id] = candidate
+				}
+			}
+			blockIndexes[file] = index
+		}
+		text, found := index[blockID]
+		return text, found
+	}
 
 	keys := make([]string, 0, len(created))
 	for key := range created {
@@ -135,29 +158,43 @@ func syncWeaponEffects(a *archive, created map[string]Blueprint) (*archive, erro
 	changed := false
 	for _, key := range keys {
 		ids := map[string]bool{}
-		for _, action := range actions[key] {
-			if len(action) <= 4 {
-				continue
+		if manual, ok := rows[key]; ok {
+			// 这把武器的登记被手动编辑过：以编辑集为准，保留用户增删的条目，
+			// 不再按动作引用自动推导。
+			for _, row := range manual {
+				if strings.TrimSpace(row.EffectID) == "" {
+					continue
+				}
+				ids[row.EffectID] = true
+				if file := strings.TrimSpace(row.File); file != "" {
+					files[row.EffectID] = file
+				}
 			}
-			file := "animation/" + action[:4] + ".xml"
-			animation, err := loadAnimation(file)
-			if err != nil {
-				// itemact ships dead references (cells pointing at animation
-				// files the archive never carried); they render nothing and
-				// contribute no effects, so skip them quietly.
-				continue
-			}
-			blockID := action[4:]
-			if number, err := strconv.Atoi(blockID); err == nil {
-				blockID = strconv.Itoa(number)
-			}
-			block, ok := currentBlock(animation, blockID)
-			if !ok {
-				continue // a stray cell the render never plays; skip quietly
-			}
-			for _, m := range effectIdPattern.FindAllStringSubmatch(block, -1) {
-				if !common[m[1]] {
-					ids[m[1]] = true
+		} else {
+			for _, action := range actions[key] {
+				if len(action) <= 4 {
+					continue
+				}
+				file := "animation/" + action[:4] + ".xml"
+				animation, err := loadAnimation(file)
+				if err != nil {
+					// itemact ships dead references (cells pointing at animation
+					// files the archive never carried); they render nothing and
+					// contribute no effects, so skip them quietly.
+					continue
+				}
+				blockID := action[4:]
+				if number, err := strconv.Atoi(blockID); err == nil {
+					blockID = strconv.Itoa(number)
+				}
+				block, ok := blockOf(file, animation, blockID)
+				if !ok {
+					continue // a stray cell the render never plays; skip quietly
+				}
+				for _, m := range effectIdPattern.FindAllStringSubmatch(block, -1) {
+					if !common[m[1]] {
+						ids[m[1]] = true
+					}
 				}
 			}
 		}
@@ -182,65 +219,92 @@ func syncWeaponEffects(a *archive, created map[string]Blueprint) (*archive, erro
 	return parseArchive(data)
 }
 
-// replaceWeaponEffectBlock swaps (or inserts, or removes) the block of one
-// weapon inside the acteffect table text. The replacement keeps the shipped
-// layout: tab-indented tags, LF line endings, a short comment line above a
-// freshly inserted block.
-func replaceWeaponEffectBlock(text, weapon string, ids map[string]bool, files map[string]string) (string, bool, error) {
-	var replacement string
-	if len(ids) > 0 {
-		sorted := make([]string, 0, len(ids))
-		for id := range ids {
-			sorted = append(sorted, id)
-		}
-		sort.Strings(sorted)
-		var b strings.Builder
-		// No leading indent: the block pattern matches from "<" onward, so the
-		// tab already sitting before the shipped block stays in place and the
-		// swap stays byte-stable across runs.
-		b.WriteString("<WeaponEffect ItemID = \"" + weapon + "\">")
-		for _, id := range sorted {
-			file := files[id]
-			if file == "" {
-				file = id
-			}
-			b.WriteString("\n\t<EffectFile EffectId = \"" + id + "\" File = \"" + file + "\" />")
-		}
-		b.WriteString("\n\t</WeaponEffect>")
-		replacement = b.String()
+// weaponEffectBlockText renders one <WeaponEffect> block.
+func weaponEffectBlockText(weapon string, ids map[string]bool, files map[string]string) string {
+	if len(ids) == 0 {
+		return ""
 	}
-	for _, block := range weaponEffectBlockPattern.FindAllString(text, -1) {
-		m := weaponEffectIdPattern.FindStringSubmatch(block)
-		if m == nil || m[1] != weapon {
+	sorted := make([]string, 0, len(ids))
+	for id := range ids {
+		sorted = append(sorted, id)
+	}
+	sort.Strings(sorted)
+	var b strings.Builder
+	// No leading indent: the block text is inserted after the tab that already
+	// sits in the file, so the result stays byte-stable across runs.
+	b.WriteString("<WeaponEffect ItemID = \"" + weapon + "\">")
+	for _, id := range sorted {
+		file := files[id]
+		if file == "" {
+			file = id
+		}
+		b.WriteString("\n\t<EffectFile EffectId = \"" + id + "\" File = \"" + file + "\" />")
+	}
+	b.WriteString("\n\t</WeaponEffect>")
+	return b.String()
+}
+
+// replaceWeaponEffectBlock swaps (or inserts, or removes) the block of one
+// weapon inside the acteffect table text.
+//
+// 按起始标签逐个定位而不是让正则去啃非贪婪区间：同一个武器在文件里可能存在
+// **多个** <WeaponEffect> 块（历史数据或早期反复写入留下的重复），而且见过缺
+// </WeaponEffect> 的脏块——那时非贪婪匹配会跨过整段文本，替换就会悄悄退化成
+// "再插一个新块"。这里明确：第一个块换成新内容，其余连同上方注释一起删掉。
+func replaceWeaponEffectBlock(text, weapon string, ids map[string]bool, files map[string]string) (string, bool, error) {
+	replacement := weaponEffectBlockText(weapon, ids, files)
+	openPattern := regexp.MustCompile(`<WeaponEffect\b[^>]*>`)
+	closePattern := regexp.MustCompile(`</WeaponEffect\s*>`)
+	type span struct{ start, end int }
+	spans := []span{}
+	for _, loc := range openPattern.FindAllStringIndex(text, -1) {
+		m := weaponEffectIdPattern.FindStringSubmatch(text[loc[0]:loc[1]])
+		if m == nil || strings.TrimSpace(m[1]) != weapon {
 			continue
 		}
-		if block == replacement {
+		end := len(text)
+		if rel := closePattern.FindStringIndex(text[loc[1]:]); rel != nil {
+			end = loc[1] + rel[1]
+		}
+		spans = append(spans, span{loc[0], end})
+	}
+	if len(spans) == 0 {
+		if replacement == "" {
 			return text, false, nil
 		}
-		if replacement == "" {
-			// No effects left: drop the block together with the blank line
-			// and comment line directly above it, if any.
-			start := strings.Index(text, block)
-			head := text[:start]
+		insertion := "\n\n\t<!-- 自建武器 " + weapon + " 需要加载的特效 -->\n\t" + replacement + "\n"
+		idx := strings.LastIndex(text, "</ActEffect>")
+		if idx < 0 {
+			return "", false, fmt.Errorf("特效登记表缺少 ActEffect 结束标签")
+		}
+		return text[:idx] + insertion + text[idx:], true, nil
+	}
+	result := text
+	changed := false
+	// 从后往前改，前面的偏移不受影响。
+	for index := len(spans) - 1; index >= 0; index-- {
+		current := spans[index]
+		block := result[current.start:current.end]
+		want := replacement
+		if index > 0 {
+			want = "" // 重复块直接删
+		}
+		if block == want {
+			continue
+		}
+		head, tail := result[:current.start], result[current.end:]
+		if want == "" {
+			// 连同紧贴上方的注释行与空行一起删。
 			if idx := strings.LastIndex(head, "\n\n"); idx >= 0 {
 				rest := strings.TrimLeft(head[idx+2:], "\t")
 				if strings.HasPrefix(rest, "<!--") {
 					head = head[:idx+1]
 				}
 			}
-			return head + strings.TrimLeft(text[start+len(block):], "\n"), true, nil
+			tail = strings.TrimLeft(tail, "\n")
 		}
-		return strings.Replace(text, block, replacement, 1), true, nil
+		result = head + want + tail
+		changed = true
 	}
-	if replacement == "" {
-		return text, false, nil
-	}
-	// New weapon: append before the closing tag, following the blank line +
-	// comment convention of the shipped blocks.
-	insertion := "\n\n\t<!-- 自建武器 " + weapon + " 需要加载的特效 -->\n\t" + replacement + "\n"
-	idx := strings.LastIndex(text, "</ActEffect>")
-	if idx < 0 {
-		return "", false, fmt.Errorf("特效登记表缺少 ActEffect 结束标签")
-	}
-	return text[:idx] + insertion + text[idx:], true, nil
+	return result, changed, nil
 }

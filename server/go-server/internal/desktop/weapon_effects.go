@@ -56,6 +56,11 @@ func weaponEffects(request Request, client string, items []Item, folder string) 
 	id := strconv.Itoa(request.Weapon)
 	loaded := map[string]bool{}
 	registrations := map[string][]*xmlNode{}
+	// ownedRows are the rows inside this weapon's own <WeaponEffect> block — the
+	// ones the ledger editor rewrites; commonRows is the always-loaded ItemID 0
+	// block, kept read-only.
+	ownedRows := map[string]*xmlNode{}
+	commonRows := map[string]*xmlNode{}
 	for _, group := range root.children {
 		if group.tag != "WeaponEffect" {
 			continue
@@ -69,23 +74,38 @@ func weaponEffects(request Request, client string, items []Item, folder string) 
 			if group.get("ItemID") == "0" || group.get("ItemID") == id {
 				loaded[key] = true
 			}
+			if group.get("ItemID") == id {
+				if _, exists := ownedRows[key]; !exists {
+					ownedRows[key] = entry
+				}
+			}
+			if group.get("ItemID") == "0" {
+				if _, exists := commonRows[key]; !exists {
+					commonRows[key] = entry
+				}
+			}
 		}
 	}
 	refs := map[string]bool{}
 	issues := []string{}
 	for _, stage := range weapon.Stages {
 		blocks := info.blocks[actionKey(stage.Action)]
-		if len(blocks) != 1 {
-			issues = append(issues, "动作 "+stage.Action+" 无法唯一解析")
+		if len(blocks) == 0 {
+			// itemact 里存在指向客户端根本没带的动作文件的引用（实测就有），
+			// 这种招式读不到块，只能如实报出来。
+			issues = append(issues, "动作 "+stage.Action+" 在客户端里找不到对应动画块")
 			continue
 		}
-		blocks[0].node.walk(func(n *xmlNode) {
-			for _, attr := range n.attrs {
-				if strings.EqualFold(attr.Name.Local, "effectid") && strings.TrimSpace(attr.Value) != "" {
-					refs[attr.Value] = true
+		// 同一个动作在归档里出现多次时也照样收集：能读到特效就补登记。
+		for _, blk := range blocks {
+			blk.node.walk(func(n *xmlNode) {
+				for _, attr := range n.attrs {
+					if strings.EqualFold(attr.Name.Local, "effectid") && strings.TrimSpace(attr.Value) != "" {
+						refs[attr.Value] = true
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 	ids := []string{}
 	for ref := range refs {
@@ -100,7 +120,16 @@ func weaponEffects(request Request, client string, items []Item, folder string) 
 		}
 		rows := registrations[ref]
 		if len(rows) == 0 {
-			issues = append(issues, "特效 "+ref+" 没有原始登记")
+			// 原表里没有这条特效、也没有可复制的资源名：用编号本身兜底。只要客户端
+			// 的 Data/effect/effect/<编号> 在，就先补上登记——招式里引用的特效不
+			// 登记就永远不会加载。
+			resource := filepath.Join(client, "Data", "effect", "effect", filepath.FromSlash(strings.ReplaceAll(ref, "\\", "/")))
+			if stat, statErr := os.Stat(resource); statErr == nil && stat.Mode().IsRegular() {
+				additions = append(additions, effectRegistration{ref, ref})
+				encodedRows = append(encodedRows, `<EffectFile EffectId = "`+ref+`" File = "`+ref+`" />`)
+			} else {
+				issues = append(issues, "特效 "+ref+" 没有原始登记，客户端也缺少资源文件")
+			}
 			continue
 		}
 		first, err := rows[0].serialize()
@@ -135,6 +164,11 @@ func weaponEffects(request Request, client string, items []Item, folder string) 
 		}
 		additions = append(additions, effectRegistration{ref, file})
 		encodedRows = append(encodedRows, first)
+	}
+	// 特效预览：把「动作块引用的」和「acteffect.xml 里登记的」对上，并把登记资源的
+	// 贴图读成缩略图。原有武器可预览不可编辑，自建（带标记）的才能改。
+	if request.Operation == "weapon_effect_view" {
+		return effectPreviewView(a, client, weapon, info, ownedRows, commonRows), nil
 	}
 	result := map[string]any{"revision": digest(a.data), "additions": additions, "issues": issues, "message": "检查完成", "path": path}
 	if request.Operation != "weapon_effects_apply" {

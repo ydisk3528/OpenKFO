@@ -59,7 +59,7 @@ func TestInstalledShopImages(t *testing.T) {
 	if _, err := shopImages(client, items, make([]string, 25)); err == nil {
 		t.Fatal("unbounded batch accepted")
 	}
-	all, err := catalog(client, false)
+	all, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

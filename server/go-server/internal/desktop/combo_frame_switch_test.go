@@ -14,7 +14,7 @@ func TestComboFrameSwitches(t *testing.T) {
 	if client == "" {
 		t.Skip("set OPENKFO_WEAPON_TEST_CLIENT for installed resource validation")
 	}
-	items, err := catalog(client, false)
+	items, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

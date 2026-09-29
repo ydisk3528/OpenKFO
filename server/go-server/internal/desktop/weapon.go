@@ -437,6 +437,11 @@ type inspection struct {
 	properties map[string][]*xmlNode
 	ordered    []*xmlNode
 	owners     map[string]map[string]bool
+	// marked holds the self-made weapons the client data itself declares:
+	// weapon id -> donor, read from the marker comment inside their action
+	// blocks. The editing set can be lost or pointed at another root; the
+	// marker travels with the client, so the flag survives.
+	marked map[string]int
 }
 
 var animationPattern = regexp.MustCompile(`(?s)<AnmDesc\b[^>]*>.*?</AnmDesc\s*>`)
@@ -450,6 +455,221 @@ func actionKey(action string) string {
 		return ""
 	}
 	return action[:4] + "/" + strconv.Itoa(id)
+}
+
+// weaponMarkerColumn is the extra item.txt column the editor appends for
+// self-made weapons. It must live beyond the 60 native columns the client
+// parses: column 17 (index 17) is the client's own skill-description field and
+// overwriting it hides the weapon in game. Appending at index 60 keeps the
+// marker travelling with the configuration package without touching anything
+// the client reads.
+const weaponMarkerColumn = 60
+
+const weaponMarkerTag = "GM自建"
+
+// weaponMarker renders the value for that column.
+func weaponMarker(donor int) string {
+	return fmt.Sprintf("%s donor=%d", weaponMarkerTag, donor)
+}
+
+// parseWeaponMarker reads the marker back, returning the donor it names.
+func parseWeaponMarker(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, weaponMarkerTag) {
+		return 0, false
+	}
+	donor := 0
+	for _, field := range strings.Fields(value) {
+		if raw, ok := strings.CutPrefix(field, "donor="); ok {
+			donor, _ = strconv.Atoi(raw)
+		}
+	}
+	return donor, true
+}
+
+// markedWeapons reads the marker column of every item row, so the weapon list
+// itself states which entries the editor created.
+func markedWeapons(itemText string) map[string]int {
+	result := map[string]int{}
+	for _, row := range splitRows(itemText) {
+		if len(row) <= weaponMarkerColumn || len(row) < 2 {
+			continue
+		}
+		donor, ok := parseWeaponMarker(row[weaponMarkerColumn])
+		if !ok {
+			continue
+		}
+		id, err := strconv.Atoi(strings.TrimSpace(row[1]))
+		if err != nil {
+			continue
+		}
+		result[strconv.Itoa(id)] = donor
+	}
+	return result
+}
+
+// editTabRow rewrites one row identified by column/value, leaving every other
+// byte of the table untouched.
+func editTabRow(text string, column int, value string, edit func([]string) []string) (string, bool) {
+	crlf := strings.Contains(text, "\r\n")
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for index, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		cells := strings.Split(line, "\t")
+		if column >= len(cells) || strings.TrimSpace(cells[column]) != value {
+			continue
+		}
+		lines[index] = strings.Join(edit(cells), "\t")
+		joined := strings.Join(lines, "\n")
+		if crlf {
+			joined = strings.ReplaceAll(joined, "\n", "\r\n")
+		}
+		return joined, true
+	}
+	return text, false
+}
+
+// editableWeapons merges the editor's blueprints with the markers the client
+// data carries. A marked weapon whose editing-set entry went missing (another
+// root, deleted settings.json) stays editable: its itemact row and action blocks
+// already live in the client, which is all the structural editors need.
+func editableWeapons(state *weaponState, info *inspection) map[string]bool {
+	result := map[string]bool{}
+	for key := range state.Created {
+		result[key] = true
+	}
+	for key := range info.marked {
+		result[key] = true
+	}
+	return result
+}
+
+// isEditableWeapon is editableWeapons for a single weapon.
+func isEditableWeapon(state *weaponState, info *inspection, key string) bool {
+	if _, ok := state.Created[key]; ok {
+		return true
+	}
+	_, ok := info.marked[key]
+	return ok
+}
+
+// blueprintView is a blueprint plus the flag telling the UI that the entry was
+// recovered from the client data rather than authored in this editing set.
+type blueprintView struct {
+	Blueprint
+	Recovered bool `json:"recovered,omitempty"`
+}
+
+// mergedCreated is what the UI treats as "self-made weapons": the editing set
+// plus one synthesised entry per marker that has no blueprint, so a weapon
+// recovered purely from client data still shows up, carries its donor and can be
+// edited. Subtype and model stay empty there — those are read off the client row
+// when the blueprint is rebuilt for real.
+func mergedCreated(state *weaponState, info *inspection) map[string]blueprintView {
+	result := map[string]blueprintView{}
+	for key, blueprint := range state.Created {
+		result[key] = blueprintView{Blueprint: blueprint}
+	}
+	for key, donor := range info.marked {
+		if _, exists := result[key]; exists {
+			continue
+		}
+		id, err := strconv.Atoi(key)
+		if err != nil {
+			continue
+		}
+		entry := Blueprint{ID: id, Donor: donor}
+		for _, weapon := range info.weapons {
+			if weapon.ID != id {
+				continue
+			}
+			entry.Name = weapon.Name
+			entry.Description = weapon.Description
+			break
+		}
+		if entry.Name == "" {
+			continue
+		}
+		result[key] = blueprintView{Blueprint: entry, Recovered: true}
+	}
+	return result
+}
+
+// blueprintFromItems rebuilds the editing-set entry of a marked weapon from the
+// item row the client already carries. It is used when the marker outlives the
+// blueprint (the GM points at another root, or settings.json was lost), so such
+// a weapon stays editable instead of turning read-only.
+func blueprintFromItems(items []Item, id, donor int) (Blueprint, bool) {
+	for _, item := range items {
+		if item.ID != uint32(id) || item.Kind != 25 {
+			continue
+		}
+		fields := item.Fields
+		if len(fields) <= 7 {
+			return Blueprint{}, false
+		}
+		blueprint := Blueprint{
+			ID:    id,
+			Donor: donor,
+			Type:  strings.TrimSpace(fields[2]),
+			Model: strings.TrimSpace(fields[7]),
+			Name:  strings.TrimSpace(fields[3]),
+		}
+		if len(fields) > 9 {
+			if icon := strings.TrimSpace(fields[9]); icon != "" && icon != "#" {
+				blueprint.Icon = icon
+			}
+		}
+		if len(fields) > 16 {
+			if description := strings.TrimSpace(fields[16]); description != "" && description != "#" && description != blueprint.Name {
+				blueprint.Description = description
+			}
+		}
+		if blueprint.Name == "" || blueprint.Type == "" || blueprint.Model == "" {
+			return Blueprint{}, false
+		}
+		return blueprint, true
+	}
+	return Blueprint{}, false
+}
+
+// applyWeaponMarkers stamps the self-made flag into the item row of every
+// registered weapon, so the weapon list inside the configuration package itself
+// states which entries the editor created. The editing set can be lost or pointed
+// at another root; the flag then survives with the client.
+func applyWeaponMarkers(a *archive, state *weaponState) (*archive, error) {
+	if len(state.Created) == 0 {
+		return a, nil
+	}
+	text, err := a.text("item.txt")
+	if err != nil {
+		return nil, err
+	}
+	changed := false
+	for key, blueprint := range state.Created {
+		updated, ok := editTabRow(text, 1, key, func(row []string) []string {
+			return setCell(row, weaponMarkerColumn, weaponMarker(blueprint.Donor))
+		})
+		if !ok || updated == text {
+			continue
+		}
+		text = updated
+		changed = true
+	}
+	if !changed {
+		return a, nil
+	}
+	encoded, err := encodeText(text)
+	if err != nil {
+		return nil, err
+	}
+	data, err := a.replace(map[string][]byte{"item.txt": encoded})
+	if err != nil {
+		return nil, err
+	}
+	return parseArchive(data)
 }
 
 // currentBlock returns the text of the one <AnmDesc> block inside animation
@@ -472,6 +692,40 @@ func currentBlock(animation, want string) (string, bool) {
 		}
 	}
 	return found, count == 1
+}
+
+// clearStageBlockEdits 清掉一个状态上"绑在动作块/片断"上的全部编辑。
+//
+// 重映射换了动作以后，旧记录指向的片断与块已经不属于这个状态：留着它们，
+// applyScopes / applyFrameSwitches / applyCounters / applyBlockElements 会去改
+// **新块里恰好同号的片断**，还会反复触发"共用块先克隆"的分支，把 itemact 的动作列
+// 改成一个和 remap 记录对不上的克隆编号（实测 253300 状态 2081 就是这样：
+// remap 记的是 2204086，客户端列却被改成 2204999，技能直接放不出来）。
+func clearStageBlockEdits(state *weaponState, key string, stage int) {
+	if perStage, ok := state.Scopes[key]; ok {
+		delete(perStage, stage)
+		if len(perStage) == 0 {
+			delete(state.Scopes, key)
+		}
+	}
+	if perStage, ok := state.FrameSwitches[key]; ok {
+		delete(perStage, stage)
+		if len(perStage) == 0 {
+			delete(state.FrameSwitches, key)
+		}
+	}
+	if perStage, ok := state.Counters[key]; ok {
+		delete(perStage, stage)
+		if len(perStage) == 0 {
+			delete(state.Counters, key)
+		}
+	}
+	if perStage, ok := state.BlockElements[key]; ok {
+		delete(perStage, stage)
+		if len(perStage) == 0 {
+			delete(state.BlockElements, key)
+		}
+	}
 }
 
 func inspect(a *archive, items []Item) (*inspection, error) {
@@ -515,7 +769,15 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 			}
 		}
 	}
-	result := &inspection{weapons: []Weapon{}, blocks: map[string][]block{}, properties: map[string][]*xmlNode{}, owners: owners}
+	result := &inspection{weapons: []Weapon{}, blocks: map[string][]block{}, properties: map[string][]*xmlNode{}, owners: owners, marked: map[string]int{}}
+	// The weapon list itself carries the self-made flag: one extra column on the
+	// item row, so a lost or repointed editing set cannot make those weapons
+	// read-only again.
+	itemText, err := a.text("item.txt")
+	if err != nil {
+		return nil, err
+	}
+	result.marked = markedWeapons(itemText)
 	files := map[string]bool{}
 	for action := range owners {
 		if len(action) > 4 {
@@ -1291,6 +1553,10 @@ type Blueprint struct {
 	// behaviour of reusing the name.
 	Description string `json:"description,omitempty"`
 	Note        string `json:"note,omitempty"`
+	// Glow names the effect script in Data/effect/effect/ that plays as a
+	// standing glow on this weapon — how the shipped "退魔/黑暗" versions work
+	// (item.txt column 54). Empty keeps the plain look.
+	Glow string `json:"glow,omitempty"`
 }
 
 const blueprintMinID, blueprintMaxID = 253000, 253999
@@ -1548,6 +1814,12 @@ func applyBlueprints(a *archive, created map[string]Blueprint) (*archive, error)
 		}
 		itemRow = setCell(itemRow, 9, icon)
 		itemRow = setCell(itemRow, 16, blueprintDescription(blueprint))
+		// 第 54 列：武器常驻光效（空/占位符 = 无光效）。
+		glow := strings.TrimSpace(blueprint.Glow)
+		if glow == "#" {
+			glow = "#"
+		}
+		itemRow = setCell(itemRow, 53, glow)
 		itemText = appendTabRow(itemText, strings.Join(itemRow, "\t"))
 
 		actionRow := append([]string(nil), donorAction...)
@@ -1597,6 +1869,10 @@ func validateBlueprintInfo(blueprint Blueprint) error {
 	}
 	if len([]rune(blueprint.Note)) > 200 {
 		return fmt.Errorf("备注过长")
+	}
+	glow := strings.TrimSpace(blueprint.Glow)
+	if glow != "" && glow != "#" && !effectIdShape.MatchString(glow) {
+		return fmt.Errorf("光效脚本编号 %q 无效", glow)
 	}
 	return nil
 }
@@ -1701,6 +1977,12 @@ type weaponState struct {
 	// ids — the client matches rules by number and never notices the miss.
 	// Keyed by weapon id, then "stage|pre-clone property id".
 	PropertyClones map[string]map[string]string `json:"property_clones,omitempty"`
+	// StageEffects authors the effect nodes (<Effect> / <HitEffect>) of one state.
+	// A state present here is authoritative: an empty list means "no effects".
+	StageEffects map[string]map[int][]StageEffect `json:"stage_effects,omitempty"`
+	// EffectRows is the weapon's own acteffect.xml ledger. A weapon present here
+	// keeps exactly these rows instead of the ones derived from its actions.
+	EffectRows map[string][]EffectRow `json:"effect_rows,omitempty"`
 }
 
 // 武器配置操作的独占锁。两个细节缺一不可：
@@ -1758,7 +2040,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		return nil, err
 	}
 	defer release()
-	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" {
+	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" || request.Operation == "weapon_effect_view" {
 		return weaponEffects(request, client, items, folder)
 	}
 	statePath := filepath.Join(folder, "settings.json")
@@ -1798,6 +2080,12 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	if state.Scopes == nil {
 		state.Scopes = map[string]map[int]map[string][]FrameSwitchAttr{}
+	}
+	if state.StageEffects == nil {
+		state.StageEffects = map[string]map[int][]StageEffect{}
+	}
+	if state.EffectRows == nil {
+		state.EffectRows = map[string][]EffectRow{}
 	}
 	// 合并式导入不碰编辑集、也不依赖基线：直接读目标客户端的 config.spf2，
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过
@@ -1849,7 +2137,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if err != nil {
 			return nil, err
 		}
-		if items, err = itemsFromText(client, text, true); err != nil {
+		if items, err = itemsFromText(client, text, true, true); err != nil {
 			return nil, err
 		}
 	}
@@ -1899,10 +2187,18 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			remapError = applyErr.Error()
 		}
 	}
+	// 招式特效（<Effect> / <HitEffect>）：编辑后同样要立刻在武器页与招式页看到。
+	if len(state.StageEffects) > 0 {
+		if applied, applyErr := applyStageEffects(base, &state); applyErr == nil {
+			base = applied
+		} else {
+			remapError = applyErr.Error()
+		}
+	}
 	// The acteffect registration follows the remapped itemact row, so publish
 	// and package see the same effect set the client will load on equip.
 	if len(state.Created) > 0 {
-		if synced, syncErr := syncWeaponEffects(base, state.Created); syncErr == nil {
+		if synced, syncErr := syncWeaponEffects(base, state.Created, state.EffectRows); syncErr == nil {
 			base = synced
 		} else {
 			return nil, syncErr
@@ -1926,6 +2222,20 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if err != nil {
 		return nil, err
 	}
+	// The self-made marker lives in the client's own package, not in the
+	// baseline: the baseline is the pristine snapshot the editor renders onto,
+	// so a marker written by an earlier apply only exists in the package on
+	// disk. Merge it in, otherwise a lost editing set turns those weapons
+	// read-only again.
+	if live, liveErr := parseArchive(current); liveErr == nil {
+		if text, textErr := live.text("item.txt"); textErr == nil {
+			for key, donor := range markedWeapons(text) {
+				if _, exists := info.marked[key]; !exists {
+					info.marked[key] = donor
+				}
+			}
+		}
+	}
 	revision := digest(append(append([]byte(nil), current...), stateBytes...))
 	if request.Operation == "weapon_catalog" {
 		buffRows, err := buffs(base)
@@ -1938,7 +2248,8 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		// file itself (not the baseline) and report the ids it does not ship, so
 		// the list can mark them instead of claiming they are installed here.
 		undeployed := undeployedWeaponIDs(current, info.weapons)
-		result := map[string]any{"weapons": info.weapons, "effects": effects(info), "fields": propertyFields, "hit_options": hitOptions, "buffs": buffRows, "drafts": state.Drafts, "applied": state.Applied, "created": state.Created, "combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules, "remaps": state.Remaps, "extra_properties": state.ExtraProperties, "cleared": state.Cleared, "states": itemactStates(base), "client": describeClient(entry, folder), "clients": describeBaselines(&state, folder), "models": weaponModels(client), "types": weaponTypes, "used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed, "blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID, "revision": revision, "folder": folder}
+		editable := editableWeapons(&state, info)
+		result := map[string]any{"weapons": info.weapons, "effects": effects(info), "fields": propertyFields, "hit_options": hitOptions, "buffs": buffRows, "drafts": state.Drafts, "applied": state.Applied, "created": mergedCreated(&state, info), "editable": editable, "marked": info.marked, "combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules, "remaps": state.Remaps, "extra_properties": state.ExtraProperties, "cleared": state.Cleared, "states": itemactStates(base), "client": describeClient(entry, folder), "clients": describeBaselines(&state, folder), "models": weaponModels(client), "types": weaponTypes, "used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed, "blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID, "revision": revision, "folder": folder}
 		if remapError != "" {
 			result["remap_error"] = remapError
 		}
@@ -2016,7 +2327,19 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		key := strconv.Itoa(request.Weapon)
 		existing, ok := state.Created[key]
 		if !ok {
-			return nil, fmt.Errorf("只有自建武器可以编辑信息")
+			// The client data marks this weapon as the editor's own, but its
+			// blueprint is gone (editing set lost, or the GM was repointed).
+			// Rebuild it from the item row so the weapon stays editable.
+			donor, marked := info.marked[key]
+			if !marked {
+				return nil, fmt.Errorf("只有自建武器可以编辑信息")
+			}
+			rebuilt, rebuiltOK := blueprintFromItems(items, request.Weapon, donor)
+			if !rebuiltOK {
+				return nil, fmt.Errorf("读不到武器 %d 的物品行，无法恢复它的信息", request.Weapon)
+			}
+			state.Created[key] = rebuilt
+			existing = rebuilt
 		}
 		blueprint := existing
 		if request.Blueprint != nil {
@@ -2024,6 +2347,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			blueprint.Icon = strings.TrimSpace(request.Blueprint.Icon)
 			blueprint.Description = strings.TrimSpace(request.Blueprint.Description)
 			blueprint.Note = strings.TrimSpace(request.Blueprint.Note)
+			blueprint.Glow = strings.TrimSpace(request.Blueprint.Glow)
 		}
 		if err := validateBlueprintInfo(blueprint); err != nil {
 			return nil, err
@@ -2042,6 +2366,64 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			return nil, err
 		}
 		return map[string]any{"created": state.Created, "revision": digest(append(append([]byte(nil), current...), encoded...)), "message": "已更新武器信息；应用到游戏后写入配置包"}, nil
+	}
+	// 招式特效：按状态接管动作块里的 <Effect> / <HitEffect> 节点。共用动作块会先
+	// 克隆成该武器独占，所以其它武器与原有招式一个字节都不动。
+	if request.Operation == "weapon_effect_stage_set" {
+		key := strconv.Itoa(request.Weapon)
+		if !isEditableWeapon(&state, info, key) {
+			return nil, fmt.Errorf("原有武器只能预览特效；只有自建武器可以编辑")
+		}
+		if request.Stage == 0 {
+			return nil, fmt.Errorf("请选择要编辑特效的招式")
+		}
+		effects := request.StageEffects
+		if effects == nil {
+			effects = []StageEffect{}
+		}
+		if err := validateStageEffects(base, key, map[int][]StageEffect{request.Stage: effects}); err != nil {
+			return nil, err
+		}
+		snapshotState(statePath)
+		if state.StageEffects[key] == nil {
+			state.StageEffects[key] = map[int][]StageEffect{}
+		}
+		state.StageEffects[key][request.Stage] = effects
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		return map[string]any{"stage_effects": state.StageEffects, "revision": digest(append(append([]byte(nil), current...), encoded...)), "message": fmt.Sprintf("已保存状态 %d 的特效（%d 条）；应用到游戏后写入配置包", request.Stage, len(effects))}, nil
+	}
+	// 武器特效登记：接管该武器在 acteffect.xml 里的 <WeaponEffect> 块。登记不全
+	// 时特效不会加载，所以这里允许手动增删，而不是只做自动补齐。
+	if request.Operation == "weapon_effect_ledger_set" {
+		key := strconv.Itoa(request.Weapon)
+		if !isEditableWeapon(&state, info, key) {
+			return nil, fmt.Errorf("原有武器只能预览特效；只有自建武器可以编辑")
+		}
+		if err := validateEffectRows(client, request.EffectRows); err != nil {
+			return nil, err
+		}
+		snapshotState(statePath)
+		rows := append([]EffectRow(nil), request.EffectRows...)
+		sort.Slice(rows, func(i, j int) bool { return rows[i].EffectID < rows[j].EffectID })
+		if len(rows) == 0 {
+			delete(state.EffectRows, key)
+		} else {
+			state.EffectRows[key] = rows
+		}
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err = atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		return map[string]any{"effect_rows": state.EffectRows, "revision": digest(append(append([]byte(nil), current...), encoded...)), "message": fmt.Sprintf("已保存 %d 条特效登记；应用到游戏后写入配置包", len(rows))}, nil
 	}
 	// weapon_combo completes the combo registration of an existing weapon. A
 	// shipped weapon can carry a full action row yet own no transitions in
@@ -2083,14 +2465,15 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 				return nil, fmt.Errorf("本客户端没有连招表，无法补齐")
 			}
 			tables := comboRowCounts(tableText)
-			if tables[donor] == 0 {
-				return nil, fmt.Errorf("参考武器 %s 自身也没有连招表，无法借用", donor)
-			}
 			if tables[target] > 0 {
 				return nil, fmt.Errorf("该武器已有连招表，无需补齐")
 			}
 			state.Combos[target] = request.Donor
-			message = fmt.Sprintf("已登记：借用参考武器的 %d 条连招；应用后生效", tables[donor])
+			if tables[donor] == 0 {
+				message = "参考武器没有连招表：已登记，应用时只复制它有的特效等登记；连招需自行配置"
+			} else {
+				message = fmt.Sprintf("已登记：借用参考武器的 %d 条连招；应用后生效", tables[donor])
+			}
 		}
 		encoded, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {
@@ -2501,7 +2884,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if text, err := source.text("comborule.xml"); err == nil {
 			official = comboRuleWeapons(text)[key]
 		}
-		if !comboRuleEditable(&state, key, official, overridden) {
+		if !comboRuleEditable(&state, info, key, official, overridden) {
 			return nil, fmt.Errorf("武器 %s 的连招限制由客户端内置，编辑器只读；不会改写官方数据", key)
 		}
 		if set.empty() {
@@ -2649,12 +3032,15 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 						delete(state.Remaps, key)
 					}
 				}
+				clearStageBlockEdits(&state, key, request.Stage)
 				message = "已取消该状态的重映射"
 			} else {
 				if state.Remaps[key] == nil {
 					state.Remaps[key] = map[int]*StageRemap{}
 				}
 				state.Remaps[key][request.Stage] = &StageRemap{Action: action, PropertyID: propertyID, Label: strings.TrimSpace(request.Label)}
+				// 换了动作，旧动作块上那些"绑片断/绑块"的编辑全部失效，必须一起清掉。
+				clearStageBlockEdits(&state, key, request.Stage)
 				// Defining a state again re-activates a column the author had
 				// deleted earlier: the remap wins over the clearing.
 				if state.Cleared[key] != nil {
@@ -2697,7 +3083,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if request.Weapon == 0 || request.Stage == 0 {
 			return nil, fmt.Errorf("请选择武器和状态")
 		}
-		if _, ok := state.Created[key]; !ok {
+		if !isEditableWeapon(&state, info, key) {
 			return nil, fmt.Errorf("只有自建武器可以删除状态")
 		}
 		snapshotState(statePath)
@@ -2712,16 +3098,13 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if _, err = strconv.Atoi(column); err != nil {
 			return nil, fmt.Errorf("状态编号无效")
 		}
+		// 状态被删掉，它上面所有绑动作块/片断的编辑（重映射、帧级按键、招架、
+		// 防护、攻击范围）一并失效，必须一起清。
+		clearStageBlockEdits(&state, key, request.Stage)
 		if state.Remaps[key] != nil {
 			delete(state.Remaps[key], request.Stage)
 			if len(state.Remaps[key]) == 0 {
 				delete(state.Remaps, key)
-			}
-		}
-		if state.FrameSwitches[key] != nil {
-			delete(state.FrameSwitches[key], request.Stage)
-			if len(state.FrameSwitches[key]) == 0 {
-				delete(state.FrameSwitches, key)
 			}
 		}
 		if state.Cleared[key] == nil {

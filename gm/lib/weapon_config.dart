@@ -1,5 +1,7 @@
 import 'item_pictures.dart';
 
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -172,6 +174,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       context: context,
       builder: (_) => _ClientPickerDialog(
         current: '${_clientInfo['directory'] ?? ''}',
+        savedTo: '${_clientInfo['saved_to'] ?? ''}',
         detected: [
           for (final value in (_clientInfo['detected'] as List? ?? []))
             Map<String, dynamic>.from(value as Map),
@@ -2792,6 +2795,106 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           ) ==
           true;
 
+  /// 特效视图（含缩略图 data URI）缓存：编号 → 图。
+  Map<String, String> _effectThumbs = {};
+
+  Future<Map<String, dynamic>> _loadEffectView(int id) async {
+    final view = Map<String, dynamic>.from(await widget.api({
+      'operation': 'weapon_effect_view',
+      'weapon': id,
+    }));
+    final thumbs = <String, String>{};
+    for (final entry in (view['registered'] as List? ?? [])) {
+      final map = Map<String, dynamic>.from(entry as Map);
+      final data = '${map['thumbnail'] ?? ''}';
+      if (data.isNotEmpty) thumbs['${map['effect_id']}'] = data;
+    }
+    _effectThumbs = thumbs;
+    return view;
+  }
+
+  /// 武器级特效：预览登记了什么、招式引用了什么，并允许增删登记（自建武器）。
+  Future<void> openEffectEditor() async {
+    final selected = weapon;
+    if (selected == null || busy) return;
+    setState(() => busy = true);
+    try {
+      final view = await _loadEffectView(selected['id'] as int);
+      if (!mounted) return;
+      setState(() => busy = false);
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (_) => _EffectLedgerDialog(
+          title: '${selected['name']}',
+          editable: isCreated(selected['id']),
+          view: view,
+          onSubmit: (rows) => widget.api({
+            'operation': 'weapon_effect_ledger_set',
+            'weapon': selected['id'],
+            'effect_rows': rows,
+          }),
+        ),
+      );
+      if (saved == true && mounted) {
+        setState(() => message = '特效登记已保存；点「应用到游戏」写入客户端配置包');
+        await load(prefer: selected['id'] as int?);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          message = '$e';
+        });
+      }
+    }
+  }
+
+  /// 招式级特效：预览并编辑该状态动作块里的 <Effect> / <HitEffect>。
+  /// 共用动作块由后端克隆成该武器独占，原有招式不受影响。
+  Future<void> openStageEffects(int index) async {
+    final selected = weapon;
+    if (selected == null || busy) return;
+    final stage = Map<String, dynamic>.from(selected['stages'][index] as Map);
+    setState(() => busy = true);
+    try {
+      final view = await _loadEffectView(selected['id'] as int);
+      if (!mounted) return;
+      setState(() => busy = false);
+      final state = '${stage['state']}';
+      final current = [
+        for (final ref in (view['references'] as List? ?? []))
+          if ('${(ref as Map)['state']}' == state)
+            Map<String, dynamic>.from(ref),
+      ];
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (_) => _StageEffectDialog(
+          title: '状态 $state · ${stage['label'] ?? ''}',
+          editable: isCreated(selected['id']),
+          rows: current,
+          thumbs: _effectThumbs,
+          onSubmit: (rows) => widget.api({
+            'operation': 'weapon_effect_stage_set',
+            'weapon': selected['id'],
+            'stage': stage['stage'],
+            'stage_effects': rows,
+          }),
+        ),
+      );
+      if (saved == true && mounted) {
+        setState(() => message = '招式特效已保存；点「应用到游戏」写入客户端配置包');
+        await load(prefer: selected['id'] as int?);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          message = '$e';
+        });
+      }
+    }
+  }
+
   Future<void> repairEffects() async {
     final selected = weapon;
     if (selected == null || busy) return;
@@ -4707,6 +4810,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                       icon: const Icon(Icons.timeline, size: 18),
                       onPressed: busy ? null : () => openStageTrack(index!),
                     ),
+                    IconButton(
+                      tooltip: '招式特效预览与编辑',
+                      icon: const Icon(Icons.auto_fix_high, size: 18),
+                      onPressed: busy ? null : () => openStageEffects(index!),
+                    ),
                     const Icon(Icons.edit_outlined),
                   ],
                 ),
@@ -4762,6 +4870,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
+                if ('${_clientInfo['source'] ?? ''}'.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    '来自 ${_clientInfo['source']}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).hintColor,
+                    ),
+                  ),
+                ],
                 if (baselineState.isNotEmpty) ...[
                   const SizedBox(width: 8),
                   baselineChip(baselineState),
@@ -4903,7 +5021,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                     child: Text(
                       registered == null
                           ? '缺少连招表：进游戏后只能出第一段，按键不会推进到下一段'
-                          : '连招表已补齐：借用「${weaponName(reference)}」的 $rows 条转移',
+                          : rows == 0
+                              ? '参考武器「${weaponName(reference)}」没有连招表，未复制连招；它有的动作特效等登记仍会照常复制'
+                              : '连招表已补齐：借用「${weaponName(reference)}」的 $rows 条转移',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         color: registered == null
@@ -5221,6 +5341,32 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                               ],
                                             ),
                                           ),
+                                          const SizedBox(width: 12),
+                                          Column(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.center,
+                                            children: [
+                                              OutlinedButton.icon(
+                                                onPressed: busy
+                                                    ? null
+                                                    : openEffectEditor,
+                                                icon: const Icon(
+                                                  Icons.auto_fix_high,
+                                                  size: 16,
+                                                ),
+                                                label: const Text('模型特效'),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                '装备时预加载',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: Theme.of(context)
+                                                      .hintColor,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -5451,7 +5597,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                         ),
                                         label: const Text('编辑信息'),
                                       ),
-                                    if (isCreated(weapon!['id']))
+                                    if (isCreated(weapon!['id']) &&
+                                        blueprintOf(weapon!['id'])['recovered'] !=
+                                            true)
                                       TextButton(
                                         onPressed: busy ? null : forget,
                                         child: const Text('移除自建武器'),
@@ -5611,11 +5759,14 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ),
       );
       if (changed == true && mounted) {
-        // 保存过就丢弃缓存，下次打开重新读。
+        // 保存改了编辑集，主页面的 revision 必须跟着更新：只清缓存不重拉的话，
+        // 下一次「保存方案」会带着旧 revision 提交，被"配置已被其他操作更新"拦下。
         setState(() {
           stageTracks = {};
           scopeSaved = {};
+          message = '攻击范围已保存；点「应用到游戏」写入客户端配置包';
         });
+        await load(prefer: weapon?['id'] as int?);
       }
     } catch (e) {
       if (mounted) {
@@ -7997,6 +8148,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
   late final TextEditingController icon;
   late final TextEditingController description;
   late final TextEditingController note;
+  late final TextEditingController glow;
 
   @override
   void initState() {
@@ -8009,6 +8161,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
       text: '${widget.initial['description'] ?? ''}',
     );
     note = TextEditingController(text: '${widget.initial['note'] ?? ''}');
+    glow = TextEditingController(text: '${widget.initial['glow'] ?? ''}');
   }
 
   @override
@@ -8017,6 +8170,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
     icon.dispose();
     description.dispose();
     note.dispose();
+    glow.dispose();
     super.dispose();
   }
 
@@ -8046,6 +8200,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
       'icon': icon.text.trim(),
       'description': description.text.trim(),
       'note': note.text.trim(),
+      'glow': glow.text.trim(),
     });
   }
 
@@ -8234,10 +8389,15 @@ class _ComboDonorDialogState extends State<_ComboDonorDialog> {
 /// field is always offered as a fallback. A plain ListTile-based list is used
 /// instead of RadioListTile to stay clear of the Radio API churn.
 class _ClientPickerDialog extends StatefulWidget {
-  const _ClientPickerDialog({required this.current, required this.detected});
+  const _ClientPickerDialog({
+    required this.current,
+    required this.detected,
+    this.savedTo = '',
+  });
 
   final String current;
   final List<Map<String, dynamic>> detected;
+  final String savedTo;
 
   @override
   State<_ClientPickerDialog> createState() => _ClientPickerDialogState();
@@ -8270,6 +8430,16 @@ class _ClientPickerDialogState extends State<_ClientPickerDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('自动找到的客户端：', style: TextStyle(fontSize: 12)),
+            if (widget.savedTo.isNotEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                '选择后写入 ${widget.savedTo}',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).hintColor,
+                ),
+              ),
+            ],
             const SizedBox(height: 2),
             Expanded(
               child: widget.detected.isEmpty
@@ -9160,3 +9330,737 @@ class _RemapEditorState extends State<_RemapEditor> {
   }
 }
 
+
+/// 特效的绑定方式（bindtype）。游戏里没有公开的枚举名，这张表是按全库 9000+ 处
+/// <Effect> / <HitEffect> 的实际用法归纳出来的：6 几乎只配 bindindex=0（出招瞬间在
+/// 武器原点），2 几乎只出现在 <HitEffect> 且带具体骨骼号。所以按“绑在哪”来理解。
+/// bindindex 是骨骼编号（客户端骨架实测 27 根，取值 0–26）。
+const effectBindTypes = <String, String>{
+  '': '默认（走 bindbone / custombind）',
+  '1': '1 · 角色骨骼',
+  '2': '2 · 命中部位骨骼（HitEffect 常见）',
+  '3': '3 · 武器挂点',
+  '4': '4 · 手部',
+  '5': '5 · 少见',
+  '6': '6 · 武器原点（单帧出招最常用）',
+  '10': '10 · 特殊',
+  '19': '19 · 特殊',
+};
+
+/// 特效缩略图：后端给的是 data URI（PNG base64）；读不到图时给占位。
+Widget _effectThumb(String dataUri, double size) {
+  final placeholder = Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: Colors.black12,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Icon(Icons.image_not_supported_outlined, size: size * 0.45),
+  );
+  if (dataUri.isEmpty) return placeholder;
+  try {
+    final bytes = base64Decode(dataUri.split(',').last);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: Image.memory(
+        bytes,
+        width: size,
+        height: size,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: Colors.black12,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Icon(Icons.broken_image_outlined, size: size * 0.45),
+        ),
+      ),
+    );
+  } catch (_) {
+    return placeholder;
+  }
+}
+
+/// 武器特效：预览登记了什么、招式引用了什么，并允许增删登记。
+class _EffectLedgerDialog extends StatefulWidget {
+  const _EffectLedgerDialog({
+    required this.title,
+    required this.editable,
+    required this.view,
+    required this.onSubmit,
+  });
+
+  final String title;
+  final bool editable;
+  final Map<String, dynamic> view;
+  final Future<dynamic> Function(List<Map<String, dynamic>> rows) onSubmit;
+
+  @override
+  State<_EffectLedgerDialog> createState() => _EffectLedgerDialogState();
+}
+
+class _EffectLedgerDialogState extends State<_EffectLedgerDialog> {
+  late List<Map<String, dynamic>> rows;
+  final idInput = TextEditingController();
+  final fileInput = TextEditingController();
+  bool busy = false;
+  String message = '';
+
+  @override
+  void initState() {
+    super.initState();
+    rows = [
+      for (final entry in (widget.view['registered'] as List? ?? []))
+        {
+          'effect_id': '${(entry as Map)['effect_id']}',
+          'file': '${entry['file']}',
+        },
+    ];
+  }
+
+  @override
+  void dispose() {
+    idInput.dispose();
+    fileInput.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final thumbs = <String, String>{};
+    for (final entry in (widget.view['registered'] as List? ?? [])) {
+      final map = Map<String, dynamic>.from(entry as Map);
+      final data = '${map['thumbnail'] ?? ''}';
+      if (data.isNotEmpty) thumbs['${map['effect_id']}'] = data;
+    }
+    final unregistered =
+        (widget.view['unregistered'] as List? ?? []).map((e) => '$e').toList();
+    final references = widget.view['references'] as List? ?? [];
+    return AlertDialog(
+      title: Text('${widget.title} · 模型特效（装备时预加载）'),
+      content: SizedBox(
+        width: 740,
+        height: 470,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.editable
+                  ? '这是**武器模型**要预加载的特效登记（acteffect.xml）。招式里引用的特效若不在'
+                      '这张表里就不会加载；这里只写编辑集，点「应用到游戏」才进配置包。'
+                  : '这是武器模型的特效登记。原有武器只能预览，编辑只对自建武器开放。',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '招式引用 ${references.length} 处 · 公共登记 ${widget.view['common_count'] ?? 0} 条',
+              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+            ),
+            if (unregistered.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '招式引用了但尚未登记：${unregistered.join('、')}',
+                  style: const TextStyle(fontSize: 12, color: Colors.deepOrange),
+                ),
+              ),
+            const SizedBox(height: 8),
+            if (thumbs.isNotEmpty)
+              SizedBox(
+                height: 50,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    for (final entry in thumbs.entries) ...[
+                      Tooltip(
+                        message: entry.key,
+                        child: _effectThumb(entry.value, 44),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                  ],
+                ),
+              ),
+            Expanded(
+              child: rows.isEmpty
+                  ? const Center(child: Text('这个武器还没有特效登记'))
+                  : ListView.builder(
+                      itemCount: rows.length,
+                      itemBuilder: (context, index) {
+                        final row = rows[index];
+                        final id = '${row['effect_id']}';
+                        return ListTile(
+                          dense: true,
+                          leading: _effectThumb(thumbs[id] ?? '', 32),
+                          title: Text(id),
+                          subtitle: Text('资源 ${row['file']}'),
+                          trailing: widget.editable
+                              ? IconButton(
+                                  tooltip: '删除登记',
+                                  icon: const Icon(Icons.delete_outline, size: 18),
+                                  onPressed: busy
+                                      ? null
+                                      : () => setState(() => rows.removeAt(index)),
+                                )
+                              : null,
+                        );
+                      },
+                    ),
+            ),
+            if (widget.editable) ...[
+              const Divider(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: idInput,
+                      decoration: const InputDecoration(
+                        labelText: '特效编号',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: fileInput,
+                      decoration: const InputDecoration(
+                        labelText: '资源文件名（留空同编号）',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: busy ? null : addRow,
+                    child: const Text('添加'),
+                  ),
+                ],
+              ),
+            ],
+            if (message.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(message, style: const TextStyle(fontSize: 12)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: busy ? null : () => Navigator.pop(context, false),
+          child: const Text('关闭'),
+        ),
+        if (widget.editable)
+          FilledButton(
+            onPressed: busy ? null : save,
+            child: Text(busy ? '保存中…' : '保存登记'),
+          ),
+      ],
+    );
+  }
+
+  void addRow() {
+    final id = idInput.text.trim();
+    if (id.isEmpty) {
+      setState(() => message = '请填特效编号');
+      return;
+    }
+    final file = fileInput.text.trim().isEmpty ? id : fileInput.text.trim();
+    setState(() {
+      rows.removeWhere((row) => '${row['effect_id']}' == id);
+      rows.add({'effect_id': id, 'file': file});
+      idInput.clear();
+      fileInput.clear();
+      message = '';
+    });
+  }
+
+  Future<void> save() async {
+    setState(() {
+      busy = true;
+      message = '';
+    });
+    try {
+      await widget.onSubmit(rows);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          message = '保存失败：$e';
+        });
+      }
+    }
+  }
+}
+
+/// 单条招式特效：改帧号（区间）与绑定方式 / 骨骼号。
+class _EffectRowDialog extends StatefulWidget {
+  const _EffectRowDialog({required this.row});
+
+  final Map<String, dynamic> row;
+
+  @override
+  State<_EffectRowDialog> createState() => _EffectRowDialogState();
+}
+
+class _EffectRowDialogState extends State<_EffectRowDialog> {
+  late String kind;
+  late String bindType;
+  late final TextEditingController idInput;
+  late final TextEditingController startInput;
+  late final TextEditingController endInput;
+  late final TextEditingController bindIndexInput;
+
+  @override
+  void initState() {
+    super.initState();
+    kind = '${widget.row['kind'] ?? 'effect'}';
+    bindType = '${widget.row['bind_type'] ?? ''}';
+    idInput = TextEditingController(text: '${widget.row['effect_id'] ?? ''}');
+    startInput = TextEditingController(text: '${widget.row['start'] ?? 0}');
+    endInput = TextEditingController(text: '${widget.row['end'] ?? 0}');
+    bindIndexInput =
+        TextEditingController(text: '${widget.row['bind_index'] ?? ''}');
+  }
+
+  @override
+  void dispose() {
+    idInput.dispose();
+    startInput.dispose();
+    endInput.dispose();
+    bindIndexInput.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('编辑这条特效'),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                DropdownButton<String>(
+                  value: kind,
+                  items: const [
+                    DropdownMenuItem(value: 'effect', child: Text('单帧特效')),
+                    DropdownMenuItem(value: 'hit', child: Text('命中特效')),
+                  ],
+                  onChanged: (value) =>
+                      setState(() => kind = value ?? 'effect'),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: idInput,
+                    decoration: const InputDecoration(
+                      labelText: '特效编号',
+                      isDense: true,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                SizedBox(
+                  width: 90,
+                  child: TextField(
+                    controller: startInput,
+                    decoration: const InputDecoration(
+                      labelText: '起始帧',
+                      isDense: true,
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 90,
+                  child: TextField(
+                    controller: endInput,
+                    decoration: const InputDecoration(
+                      labelText: '结束帧',
+                      isDense: true,
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 82,
+                  child: TextField(
+                    controller: bindIndexInput,
+                    decoration: const InputDecoration(
+                      labelText: '骨骼号',
+                      isDense: true,
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: bindType,
+              decoration: const InputDecoration(
+                labelText: 'bindtype（特效绑在哪）',
+                isDense: true,
+              ),
+              items: [
+                for (final entry in effectBindTypes.entries)
+                  DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+              ],
+              onChanged: (value) => setState(() => bindType = value ?? ''),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'bindindex 是骨骼编号（0–26）；bindtype 留空表示沿用原来的写法。',
+              style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context).hintColor,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final start = int.tryParse(startInput.text.trim()) ?? 0;
+            var end = int.tryParse(endInput.text.trim()) ?? 0;
+            if (kind == 'effect') end = start;
+            Navigator.pop(context, {
+              'kind': kind,
+              'effect_id': idInput.text.trim(),
+              'start': start,
+              'end': end,
+              'bind_type': bindType,
+              'bind_index': bindIndexInput.text.trim(),
+            });
+          },
+          child: const Text('确定'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 招式特效：预览并编辑某个状态动作块里的特效节点。
+class _StageEffectDialog extends StatefulWidget {
+  const _StageEffectDialog({
+    required this.title,
+    required this.editable,
+    required this.rows,
+    required this.thumbs,
+    required this.onSubmit,
+  });
+
+  final String title;
+  final bool editable;
+  final List<Map<String, dynamic>> rows;
+  final Map<String, String> thumbs;
+  final Future<dynamic> Function(List<Map<String, dynamic>> rows) onSubmit;
+
+  @override
+  State<_StageEffectDialog> createState() => _StageEffectDialogState();
+}
+
+class _StageEffectDialogState extends State<_StageEffectDialog> {
+  late List<Map<String, dynamic>> edits;
+  final idInput = TextEditingController();
+  final startInput = TextEditingController(text: '0');
+  final endInput = TextEditingController(text: '0');
+  final bindIndexInput = TextEditingController(text: '0');
+  String kind = 'effect';
+  String bindType = '';
+  bool busy = false;
+  String message = '';
+
+  @override
+  void initState() {
+    super.initState();
+    edits = [
+      for (final row in widget.rows)
+        {
+          'kind': '${row['kind'] ?? 'effect'}',
+          'effect_id': '${row['effect_id']}',
+          'start': row['start'] ?? 0,
+          'end': row['end'] ?? 0,
+          'bind_type': '${row['bind_type'] ?? ''}',
+          'bind_index': '${row['bind_index'] ?? ''}',
+        },
+    ];
+  }
+
+  @override
+  void dispose() {
+    idInput.dispose();
+    startInput.dispose();
+    endInput.dispose();
+    bindIndexInput.dispose();
+    super.dispose();
+  }
+
+  String _label(Map<String, dynamic> row) {
+    final id = '${row['effect_id']}';
+    final start = row['start'] ?? 0;
+    final end = row['end'] ?? 0;
+    if ('${row['kind']}' == 'hit') {
+      return '命中特效 $id · 第 $start–$end 帧';
+    }
+    return '特效 $id · 第 $start 帧';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('${widget.title} · 招式特效'),
+      content: SizedBox(
+        width: 680,
+        height: 440,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.editable
+                  ? '这里改的是这个状态动作块里的 <Effect>（单帧）与 <HitEffect>（命中区间）。'
+                      '共用动作块会先克隆成这把武器独占，其它武器和原有招式不受影响；'
+                      '列表即最终结果（空 = 该招式没有特效）。'
+                  : '原有武器只能预览特效；编辑只对自建武器开放。',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: edits.isEmpty
+                  ? const Center(child: Text('这个招式没有特效'))
+                  : ListView.builder(
+                      itemCount: edits.length,
+                      itemBuilder: (context, index) {
+                        final row = edits[index];
+                        final id = '${row['effect_id']}';
+                        final bind = '${row['bind_type'] ?? ''}';
+                        return ListTile(
+                          dense: true,
+                          leading: _effectThumb(widget.thumbs[id] ?? '', 32),
+                          title: Text(_label(row)),
+                          subtitle: Text(
+                            '绑定 ${bind.isEmpty ? '默认' : (effectBindTypes[bind] ?? bind)}'
+                            ' · 骨骼 ${row['bind_index'] ?? ''}',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          trailing: widget.editable
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      tooltip: '改帧号 / 绑定方式',
+                                      icon: const Icon(Icons.edit_outlined,
+                                          size: 18),
+                                      onPressed: busy
+                                          ? null
+                                          : () => editRow(index),
+                                    ),
+                                    IconButton(
+                                      tooltip: '删除',
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 18),
+                                      onPressed: busy
+                                          ? null
+                                          : () => setState(
+                                              () => edits.removeAt(index)),
+                                    ),
+                                  ],
+                                )
+                              : null,
+                        );
+                      },
+                    ),
+            ),
+            if (widget.editable) ...[
+              const Divider(height: 12),
+              Row(
+                children: [
+                  DropdownButton<String>(
+                    value: kind,
+                    items: const [
+                      DropdownMenuItem(value: 'effect', child: Text('单帧特效')),
+                      DropdownMenuItem(value: 'hit', child: Text('命中特效')),
+                    ],
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() => kind = value ?? 'effect'),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: idInput,
+                      decoration: const InputDecoration(
+                        labelText: '特效编号',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 84,
+                    child: TextField(
+                      controller: startInput,
+                      decoration: const InputDecoration(
+                        labelText: '起始帧',
+                        isDense: true,
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 84,
+                    child: TextField(
+                      controller: endInput,
+                      decoration: const InputDecoration(
+                        labelText: '结束帧',
+                        isDense: true,
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 72,
+                    child: TextField(
+                      controller: bindIndexInput,
+                      decoration: const InputDecoration(
+                        labelText: '骨骼号',
+                        isDense: true,
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  DropdownButton<String>(
+                    value: bindType,
+                    items: [
+                      for (final entry in effectBindTypes.entries)
+                        DropdownMenuItem(
+                          value: entry.key,
+                          child: Text(
+                            entry.value,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                    ],
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() => bindType = value ?? ''),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: busy ? null : addRow,
+                    child: const Text('添加'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'bindtype = 特效绑在哪（2 多用于命中部位、6 多用于出招瞬间的武器特效）；'
+                'bindindex = 骨骼编号 0–26。已有条目点右侧铅笔单独改。',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).hintColor,
+                ),
+              ),
+            ],
+            if (message.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(message, style: const TextStyle(fontSize: 12)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: busy ? null : () => Navigator.pop(context, false),
+          child: const Text('关闭'),
+        ),
+        if (widget.editable)
+          FilledButton(
+            onPressed: busy ? null : save,
+            child: Text(busy ? '保存中…' : '保存招式特效'),
+          ),
+      ],
+    );
+  }
+
+  void addRow() {
+    final id = idInput.text.trim();
+    if (id.isEmpty) {
+      setState(() => message = '请填特效编号');
+      return;
+    }
+    final start = int.tryParse(startInput.text.trim()) ?? 0;
+    var end = int.tryParse(endInput.text.trim()) ?? 0;
+    if (kind == 'effect') {
+      end = start;
+    } else if (end < start) {
+      setState(() => message = '结束帧不能小于起始帧');
+      return;
+    }
+    setState(() {
+      edits.add({
+        'kind': kind,
+        'effect_id': id,
+        'start': start,
+        'end': end,
+        'bind_type': bindType,
+        'bind_index': bindIndexInput.text.trim(),
+      });
+      idInput.clear();
+      message = '';
+    });
+  }
+
+  Future<void> editRow(int index) async {
+    final updated = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _EffectRowDialog(row: edits[index]),
+    );
+    if (updated == null || !mounted) return;
+    setState(() => edits[index] = updated);
+  }
+
+  Future<void> save() async {
+    setState(() {
+      busy = true;
+      message = '';
+    });
+    try {
+      await widget.onSubmit(edits);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          message = '保存失败：$e';
+        });
+      }
+    }
+  }
+}

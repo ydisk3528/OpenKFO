@@ -11,25 +11,22 @@ import (
 )
 
 // Which game client the admin tool reads and writes is configuration, not
-// hard-coded: client-path.json holds it and the GM exposes a picker. Detection
-// is deliberately shallow — a game client is simply a folder that carries a
-// parseable Data/config.spf2 — so we only look one level around the server
-// tree instead of walking the disk.
+// hard-coded. Two files may carry it, in order of precedence:
+//
+//  1. gm-settings.json next to the GM executable — launcher level, so a switch
+//     here is what the next start reads and it is shared by every server tree;
+//  2. runtime-local/client-path.json inside the server tree (legacy fallback).
+//
+// Detection is deliberately shallow — a game client is simply a folder that
+// carries a parseable Data/config.spf2 — so we only look one level around the
+// server tree instead of walking the disk.
 func (admin *Admin) clientDirectory(request Request) (any, error) {
-	path := filepath.Join(admin.Root, "runtime-local", "client-path.json")
-	current := ""
-	if data, err := os.ReadFile(path); err == nil {
-		var config struct {
-			Directory string `json:"client_directory"`
-		}
-		if json.Unmarshal(data, &config) == nil {
-			current = strings.TrimSpace(config.Directory)
-		}
-	}
-	resolved := resolveDirectory(admin.Root, current)
+	resolved, source := admin.clientDirectorySetting()
 	if request.Operation == "client_directory_get" {
 		return map[string]any{
 			"directory":   resolved,
+			"source":      source,
+			"saved_to":    admin.clientDirectoryTarget(),
 			"valid":       isClientDirectory(resolved),
 			"problem":     clientDirectoryProblem(resolved),
 			"config_hash": configHash(resolved),
@@ -45,19 +42,18 @@ func (admin *Admin) clientDirectory(request Request) (any, error) {
 	if problem := clientDirectoryProblem(directory); problem != "" {
 		return nil, fmt.Errorf("%s 不能作为客户端：%s", directory, problem)
 	}
-	encoded, err := encodeClientPath(directory)
+	written, err := admin.saveClientDirectory(directory)
 	if err != nil {
-		return nil, err
-	}
-	if err = atomicWrite(path, encoded); err != nil {
 		return nil, err
 	}
 	return map[string]any{
 		"directory":   directory,
+		"source":      written,
+		"saved_to":    written,
 		"config_hash": configHash(directory),
 		"detected":    detectClients(admin.Root, directory),
 		"servers":     describeConfigHashFiles(admin.Root, configHash(directory)),
-		"message":     "已切换客户端；重新读取后生效",
+		"message":     "已切换客户端并写入 " + written + "；重新读取后生效",
 	}, nil
 }
 
@@ -136,7 +132,7 @@ func (admin *Admin) setServerConfigHash(request Request) (any, error) {
 		return nil, fmt.Errorf("请指定要写入的服务端配置")
 	}
 	wanted = filepath.Clean(wanted)
-	hash := configHash(resolveDirectory(admin.Root, readClientDirectory(admin.Root)))
+	hash := configHash(admin.clientDirectoryValue())
 	if hash == "" {
 		return nil, fmt.Errorf("当前客户端没有可用的 Data/config.spf2")
 	}
@@ -171,8 +167,116 @@ func (admin *Admin) setServerConfigHash(request Request) (any, error) {
 	return nil, fmt.Errorf("只能写入探测到的服务端配置，%s 不在其中", wanted)
 }
 
-func readClientDirectory(root string) string {
-	path := filepath.Join(root, "runtime-local", "client-path.json")
+// clientDirectorySetting reports the client the GM works on, resolved to an
+// absolute path, plus the file that named it ("" when nothing is configured and
+// the caller should keep using the runtime-local/client symlink).
+func (admin *Admin) clientDirectorySetting() (string, string) {
+	if directory := admin.gmSettingsDirectory(); directory != "" {
+		return directory, "gm-settings.json"
+	}
+	if configured := readClientPathFile(admin.clientPathFile()); configured != "" {
+		return resolveDirectory(admin.Root, configured), "runtime-local/client-path.json"
+	}
+	return "", ""
+}
+
+// clientDirectoryValue is clientDirectorySetting for callers that only need the
+// path (task templates, config hash sync, weapon baselines).
+func (admin *Admin) clientDirectoryValue() string {
+	directory, _ := admin.clientDirectorySetting()
+	return directory
+}
+
+// clientDirectoryTarget names the file a switch would rewrite: gm-settings.json
+// whenever it exists, the legacy runtime-local file otherwise.
+func (admin *Admin) clientDirectoryTarget() string {
+	if admin.gmSettingsFile() != "" {
+		return "gm-settings.json"
+	}
+	return "runtime-local/client-path.json"
+}
+
+// saveClientDirectory writes the new client to the file the GM reads from and
+// reports which one that was.
+func (admin *Admin) saveClientDirectory(directory string) (string, error) {
+	if file := admin.gmSettingsFile(); file != "" {
+		if err := writeSettingsClientDirectory(file, directory); err != nil {
+			return "", err
+		}
+		return "gm-settings.json", nil
+	}
+	encoded, err := encodeClientPath(directory)
+	if err != nil {
+		return "", err
+	}
+	if err := atomicWrite(admin.clientPathFile(), encoded); err != nil {
+		return "", err
+	}
+	return "runtime-local/client-path.json", nil
+}
+
+func (admin *Admin) clientPathFile() string {
+	return filepath.Join(admin.Root, "runtime-local", "client-path.json")
+}
+
+// gmSettingsFile returns the launcher settings path only when that file is
+// really there, so a missing gm-settings.json falls back to the legacy file.
+func (admin *Admin) gmSettingsFile() string {
+	if admin.GMSettings == "" {
+		return ""
+	}
+	if _, err := os.Stat(admin.GMSettings); err != nil {
+		return ""
+	}
+	return admin.GMSettings
+}
+
+// gmSettingsDirectory reads client_directory out of gm-settings.json. Relative
+// values resolve against the folder holding that file (the GM executable
+// folder), matching how the launcher resolves `root` itself.
+func (admin *Admin) gmSettingsDirectory() string {
+	file := admin.gmSettingsFile()
+	if file == "" {
+		return ""
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Directory string `json:"client_directory"`
+	}
+	if json.Unmarshal(bytes.TrimPrefix(data, []byte{239, 187, 191}), &payload) != nil {
+		return ""
+	}
+	directory := strings.TrimSpace(payload.Directory)
+	if directory == "" {
+		return ""
+	}
+	return resolveDirectory(filepath.Dir(file), directory)
+}
+
+// writeSettingsClientDirectory rewrites only client_directory, keeping root,
+// local_settings and anything else the user put in the file.
+func writeSettingsClientDirectory(file, directory string) error {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{}
+	if unmarshalErr := json.Unmarshal(bytes.TrimPrefix(data, []byte{239, 187, 191}), &payload); unmarshalErr != nil {
+		return fmt.Errorf("gm-settings.json 不是有效的 JSON（%v）", unmarshalErr)
+	}
+	payload["client_directory"] = directory
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	return atomicWrite(file, encoded)
+}
+
+func readClientPathFile(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -180,10 +284,10 @@ func readClientDirectory(root string) string {
 	var config struct {
 		Directory string `json:"client_directory"`
 	}
-	if json.Unmarshal(data, &config) != nil {
+	if json.Unmarshal(bytes.TrimPrefix(data, []byte{239, 187, 191}), &config) != nil {
 		return ""
 	}
-	return config.Directory
+	return strings.TrimSpace(config.Directory)
 }
 
 func resolveDirectory(root, directory string) string {

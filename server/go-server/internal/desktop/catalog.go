@@ -63,9 +63,13 @@ func timed(kind byte) bool {
 	}
 	return false
 }
-func Catalog(client string) ([]Item, error) { return catalog(client, true) }
 
-func catalog(client string, icons bool) ([]Item, error) {
+// Catalog 是给外部调用方（道具库视图）用的，需要全部道具的图标。
+func Catalog(client string) ([]Item, error) { return catalog(client, true, false) }
+
+// catalog 读取整个道具表。weaponIconsOnly 用于武器编辑器：它只需要武器图标，
+// 而给全部 3504 条道具解图标要 ~2.5 秒（每件都有 EvalSymlinks + 读文件 + sha256）。
+func catalog(client string, icons, weaponIconsOnly bool) ([]Item, error) {
 	a, err := loadArchive(filepath.Join(client, "Data", "config.spf2"))
 	if err != nil {
 		return nil, err
@@ -74,13 +78,14 @@ func catalog(client string, icons bool) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return itemsFromText(client, text, icons)
+	return itemsFromText(client, text, icons, weaponIconsOnly)
 }
 
 // itemsFromText builds the catalogue for one item.txt body. It is separate from
 // catalog so weapon creation can inspect a configuration that already carries
 // the new rows but has not been written to disk yet.
-func itemsFromText(client, text string, icons bool) ([]Item, error) {
+// weaponIconsOnly 为真时只解析武器（kind 25）的图标。
+func itemsFromText(client, text string, icons, weaponIconsOnly bool) ([]Item, error) {
 	items := []Item{}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
@@ -109,7 +114,7 @@ func itemsFromText(client, text string, icons bool) ([]Item, error) {
 			labels = [2]string{"其他道具", fmt.Sprintf("类型 %d", kind)}
 		}
 		icon := ""
-		if icons {
+		if icons && (!weaponIconsOnly || byte(kind) == 25) {
 			icon, err = catalogIcon(client, byte(kind), id, fields)
 			if err != nil {
 				return nil, err

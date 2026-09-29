@@ -77,6 +77,8 @@ type Request struct {
 	Counters               map[int]*CounterEdit                 `json:"counters,omitempty"`
 	BlockElements          map[int]map[string][]BlockElement    `json:"block_elements,omitempty"`
 	Scopes                 map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
+	StageEffects           []StageEffect                        `json:"stage_effects,omitempty"`
+	EffectRows             []EffectRow                          `json:"effect_rows,omitempty"`
 	ComboRule              *ComboRuleSet                        `json:"combo_rule,omitempty"`
 	Target                 string                               `json:"target"`
 	Path                   string                               `json:"path"`
@@ -88,7 +90,11 @@ type Request struct {
 type Admin struct {
 	Root          string
 	LocalSettings string
-	Remote        func(persistence.AdminRequest) (json.RawMessage, error)
+	// GMSettings is the launcher's own gm-settings.json (next to the GM
+	// executable). It may name the client directory, which outranks the
+	// server-tree runtime-local/client-path.json.
+	GMSettings string
+	Remote     func(persistence.AdminRequest) (json.RawMessage, error)
 }
 
 func New(root string) *Admin { admin := &Admin{Root: root}; admin.Remote = admin.remote; return admin }
@@ -291,20 +297,24 @@ func (admin *Admin) Call(request Request) (any, error) {
 		return admin.setServerConfigHash(request)
 	}
 	client := filepath.Join(admin.Root, "runtime-local", "client")
-	pathConfig := filepath.Join(admin.Root, "runtime-local", "client-path.json")
-	if data, readErr := os.ReadFile(pathConfig); readErr == nil {
-		var config struct {
-			Directory string `json:"client_directory"`
+	if configured := admin.gmSettingsDirectory(); configured != "" {
+		client = configured
+	} else {
+		pathConfig := admin.clientPathFile()
+		if data, readErr := os.ReadFile(pathConfig); readErr == nil {
+			var config struct {
+				Directory string `json:"client_directory"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil || strings.TrimSpace(config.Directory) == "" {
+				return nil, fmt.Errorf("客户端路径配置无效：%s", pathConfig)
+			}
+			client = config.Directory
+			if !filepath.IsAbs(client) {
+				client = filepath.Join(admin.Root, client)
+			}
+		} else if !os.IsNotExist(readErr) {
+			return nil, readErr
 		}
-		if err := json.Unmarshal(data, &config); err != nil || strings.TrimSpace(config.Directory) == "" {
-			return nil, fmt.Errorf("客户端路径配置无效：%s", pathConfig)
-		}
-		client = config.Directory
-		if !filepath.IsAbs(client) {
-			client = filepath.Join(admin.Root, client)
-		}
-	} else if !os.IsNotExist(readErr) {
-		return nil, readErr
 	}
 	if request.Operation == "task_extended_templates" {
 		catalogues, hash, err := readExtendedTaskCatalogues(filepath.Join(client, "Data", "config.spf2"))
@@ -343,7 +353,8 @@ func (admin *Admin) Call(request Request) (any, error) {
 		}
 		return map[string]any{"source": "client_titlemission", "missions": missions}, nil
 	}
-	items, err := catalog(client, request.Operation == "catalog" || request.Operation == "weapon_catalog")
+	// 武器编辑器只要武器图标：道具库那条路径才需要全部道具的图标。
+	items, err := catalog(client, request.Operation == "catalog" || request.Operation == "weapon_catalog", request.Operation == "weapon_catalog")
 	if err != nil {
 		return nil, err
 	}

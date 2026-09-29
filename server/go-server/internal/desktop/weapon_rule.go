@@ -541,11 +541,11 @@ func weaponByID(info *inspection, key string) (Weapon, bool) {
 // not constrain yet — adding a limit where none exists cannot damage shipped
 // data. Rewriting a block that ships in the client is refused, which keeps the
 // original rule set recoverable from the baseline alone.
-func comboRuleEditable(state *weaponState, key string, official, overridden bool) bool {
+func comboRuleEditable(state *weaponState, info *inspection, key string, official, overridden bool) bool {
 	if overridden {
 		return true
 	}
-	if _, selfMade := state.Created[key]; selfMade {
+	if isEditableWeapon(state, info, key) {
 		return true
 	}
 	return !official
@@ -572,7 +572,7 @@ func comboRuleView(shipped *archive, info *inspection, state *weaponState, key, 
 	weapon, _ := weaponByID(info, key)
 	// 下拉必须给「应用之后客户端会读到的编号」，否则选出来的规则写进去就永不匹配。
 	options := appliedSkillOptions(info, state, key, skillOptions(info, weapon))
-	editable := comboRuleEditable(state, key, official, overridden)
+	editable := comboRuleEditable(state, info, key, official, overridden)
 	reason := ""
 	if !editable {
 		reason = "本客户端已内置该武器的连招限制，属官方数据，编辑器只改自建武器与未登记限制的武器"

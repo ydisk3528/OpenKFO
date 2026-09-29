@@ -14,6 +14,7 @@ import (
 func run() (any, error) {
 	root := flag.String("root", ".", "repository directory")
 	localSettings := flag.String("local-settings", "", "local debug server private settings path")
+	gmSettings := flag.String("gm-settings", "", "GM launcher settings path (gm-settings.json)")
 	flag.Parse()
 	absolute, err := filepath.Abs(*root)
 	if err != nil {
@@ -37,6 +38,13 @@ func run() (any, error) {
 	}
 	admin := desktop.New(absolute)
 	admin.LocalSettings = *localSettings
+	if *gmSettings != "" {
+		if settingsPath, err := filepath.Abs(*gmSettings); err == nil {
+			admin.GMSettings = settingsPath
+		} else {
+			admin.GMSettings = *gmSettings
+		}
+	}
 	return admin.Call(request)
 }
 func main() {

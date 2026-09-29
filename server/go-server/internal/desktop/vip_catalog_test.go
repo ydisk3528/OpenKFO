@@ -11,7 +11,7 @@ func TestVIPClientCatalogue(t *testing.T) {
 	if path == "" {
 		t.Skip("read-only client archive required")
 	}
-	items, err := catalog(filepath.Dir(filepath.Dir(path)), false)
+	items, err := catalog(filepath.Dir(filepath.Dir(path)), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

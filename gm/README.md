@@ -64,11 +64,14 @@ Android 可在 Windows/Linux/macOS 上构建，需要 Android SDK 和兼容 JDK�
 ```json
 {
   "root": "C:/kfo-runtime",
-  "local_settings": "C:/kfo-runtime/settings.private.json"
+  "local_settings": "C:/kfo-runtime/settings.private.json",
+  "client_directory": "C:/kfo-client"
 }
 ```
 
 `root` 中需有 `runtime-local/client`，供读取客户端的道具与武器配置。若不写 gm-settings.json，可用 `--root <目录>`、`--local-settings <文件>` 指定；自动查找模式依赖上级目录的 `runtime-local/online-admin.json`，仅用本地模式也建议显式配置 root。
+
+`client_directory`（可选）指定 GM 读取与写入的游戏客户端。写了它就以它为准，武器编辑器的“更换客户端”也改写这个字段（保留 root、local_settings 等其它键）；没写则回退到 `root/runtime-local/client-path.json`，两者都没有时用 `root/runtime-local/client`。相对路径按 gm-settings.json 所在目录解析。一次切换只影响当前这份配置，其余客户端各自的 `config.spf2` 基线保存在 `runtime-local/weapon-config/baselines/`，不会被覆盖。
 
 本地模式的 `settings.private.json` 至少包含：
 

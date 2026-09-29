@@ -18,7 +18,7 @@ func TestWeaponActionCoverage(t *testing.T) {
 		client = filepath.Join(root, "runtime-local/client")
 		source = filepath.Join(root, "runtime-local/weapon-config/original.spf2")
 	}
-	items, err := catalog(client, false)
+	items, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestWeaponActionCoverage(t *testing.T) {
 
 func TestSharedAndCrossFileWeaponActions(t *testing.T) {
 	root := installedRoot(t)
-	items, err := catalog(filepath.Join(root, "runtime-local/client"), false)
+	items, err := catalog(filepath.Join(root, "runtime-local/client"), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

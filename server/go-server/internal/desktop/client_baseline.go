@@ -199,7 +199,7 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if err != nil {
 		return nil, fmt.Errorf("武器表缺失：%w", err)
 	}
-	items, err := itemsFromText(entry.Directory, itemText, true)
+	items, err := itemsFromText(entry.Directory, itemText, true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -219,8 +219,13 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if base, err = applyScopes(base, state, items); err != nil {
 		return nil, fmt.Errorf("攻击范围：%w", err)
 	}
+	// 招式特效（<Effect> / <HitEffect>）：共用动作块会先克隆成该武器独占，
+	// 原有招式与其它武器不受影响。
+	if base, err = applyStageEffects(base, state); err != nil {
+		return nil, fmt.Errorf("招式特效：%w", err)
+	}
 	if len(state.Created) > 0 {
-		if base, err = syncWeaponEffects(base, state.Created); err != nil {
+		if base, err = syncWeaponEffects(base, state.Created, state.EffectRows); err != nil {
 			return nil, fmt.Errorf("同步特效登记：%w", err)
 		}
 	}
@@ -280,6 +285,12 @@ func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
 		if base, err = applyBlueprints(source, state.Created); err != nil {
 			return nil, err
 		}
+		// The "self-made" flag lives in the client data as well — a marker
+		// comment inside each action block — so it survives an editing set that
+		// was lost or pointed at another root.
+		if base, err = applyWeaponMarkers(base, state); err != nil {
+			return nil, err
+		}
 	}
 	plan := comboPlanOf(state.Created, state.Combos)
 	for key := range plan {
@@ -327,16 +338,19 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 			}
 		}
 	}
-	for name := range frameSwitchFiles(source, state) {
+	for name := range frameSwitchFiles(verified, state) {
 		allowed[name] = true
 	}
-	for name := range counterFiles(source, state) {
+	for name := range counterFiles(verified, state) {
 		allowed[name] = true
 	}
-	for name := range blockElementFiles(source, state) {
+	for name := range blockElementFiles(verified, state) {
 		allowed[name] = true
 	}
-	for name := range scopeFiles(source, state) {
+	for name := range scopeFiles(verified, state) {
+		allowed[name] = true
+	}
+	for name := range stageEffectFiles(verified, state) {
 		allowed[name] = true
 	}
 	if info != nil {

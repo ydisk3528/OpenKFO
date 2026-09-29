@@ -313,15 +313,9 @@ func (admin *Admin) clientConfig(operation string, r clientConfigRequest) (any, 
 			_ = json.Unmarshal(raw, &project)
 		}
 		if project.Base == "" {
-			var saved struct {
-				Directory string `json:"client_directory"`
-			}
-			if raw, e := os.ReadFile(filepath.Join(admin.Root, "runtime-local", "client-path.json")); e == nil && json.Unmarshal(raw, &saved) == nil {
-				project.ResourceRoot = saved.Directory
-				if !filepath.IsAbs(project.ResourceRoot) {
-					project.ResourceRoot = filepath.Join(admin.Root, project.ResourceRoot)
-				}
-				project.Base = filepath.Join(project.ResourceRoot, "Data", "config.spf2")
+			if directory := admin.clientDirectoryValue(); directory != "" {
+				project.ResourceRoot = directory
+				project.Base = filepath.Join(directory, "Data", "config.spf2")
 			}
 		}
 		return map[string]any{"plans": plans, "folder": folder, "base": project.Base, "resource_root": project.ResourceRoot}, nil

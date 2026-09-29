@@ -22,7 +22,7 @@ func TestWeaponWriteStopsWhenClientConfigReplaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := catalog(client, false)
+	items, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

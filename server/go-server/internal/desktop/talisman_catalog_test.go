@@ -40,7 +40,7 @@ func TestInstalledTalismanCatalogue(t *testing.T) {
 	if client == "" {
 		t.Skip("installed client required")
 	}
-	items, err := catalog(client, false)
+	items, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

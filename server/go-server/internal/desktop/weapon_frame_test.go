@@ -19,11 +19,11 @@ func frameTestSource(t *testing.T) (*archive, []Item) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := catalog(client, false)
+	items, err := catalog(client, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err = itemsFromText(client, mustText(t, a, "item.txt"), true)
+	items, err = itemsFromText(client, mustText(t, a, "item.txt"), true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
