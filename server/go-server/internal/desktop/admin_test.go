@@ -64,7 +64,7 @@ func TestInstalledCatalogAndWeaponRoundTrip(t *testing.T) {
 		t.Fatal("C1 unsupported")
 	}
 	rules := []Rule{{Stage: 1, Buff: 1, Level: 1, Duration: 3000, Properties: map[string]map[string]float64{first.PropertyIDs[0]: {"SkillDamage": 30}}}}
-	rendered, err := render(source, items, map[string][]Rule{"253013": rules})
+	rendered, err := render(source, items, map[string][]Rule{"253013": rules}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestInstalledCatalogAndWeaponRoundTrip(t *testing.T) {
 	if !found {
 		t.Fatal("configured property missing")
 	}
-	restored, err := render(source, items, map[string][]Rule{})
+	restored, err := render(source, items, map[string][]Rule{}, nil)
 	if err != nil || !bytes.Equal(restored, source.data) {
 		t.Fatal("empty plan does not restore baseline")
 	}

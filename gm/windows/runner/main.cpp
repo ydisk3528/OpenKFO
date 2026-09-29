@@ -25,8 +25,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
-  Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1440, 900);
+  Win32Window::Point origin(180, 60);
+  // The weapon editor works best wide: the combo chain and the per-state
+  // panels sit side by side.
+  Win32Window::Size size(1900, 1150);
   if (!window.Create(L"功夫小子 · GM管理器", origin, size)) {
     return EXIT_FAILURE;
   }

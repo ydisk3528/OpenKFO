@@ -617,7 +617,9 @@ func (admin *Admin) buildClientConfig(folder string, base *archive, r clientConf
 		}
 	}
 	if len(weapons) > 0 {
-		raw, e := render(a, items, weapons)
+		// configPlan carries rules only; per-weapon property clones belong to the
+		// weapon editor state and are absent from a published plan.
+		raw, e := render(a, items, weapons, nil)
 		if e != nil {
 			return nil, e
 		}

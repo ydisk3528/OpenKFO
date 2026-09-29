@@ -225,3 +225,62 @@ func (a *archive) replace(replacements map[string][]byte) ([]byte, error) {
 	little.PutUint32(result[56:], crc32.ChecksumIEEE(summary))
 	return result, nil
 }
+
+// compactArchive 重建数据区，只保留索引表当前指向的块；没有可回收的就原样返回。
+//
+// replace() 是追加式写入：把新副本挂到数据区尾部、只把索引表改指向新块，
+// **旧副本永远留在文件里**。而一次「应用到游戏」会连着走好几次 replace()
+// （蓝图 → applyRemaps → applyFrameSwitches → render），所以客户端 config.spf2
+// 每次编辑都胖一圈。2026-09-27 实测：线上 10,605,791 字节里 8,102,658 字节（76%）
+// 是这种死副本；新增一把武器真内容只涨 346 字节，文件却涨 663,036 字节。
+//
+// 这个函数按条目号顺序把「当前生效的那份块」重新紧凑排一遍，成本是一次线性拷贝，
+// 换来「文件大小 = 真实内容大小」。落盘前调用一次即可。
+func compactArchive(data []byte) ([]byte, error) {
+	a, err := parseArchive(data)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]byte, 0, a.tree-64)
+	table := make([]byte, a.count*8)
+	checksums := make([]byte, a.count*8)
+	for index := 0; index < a.count; index++ {
+		offset, size, err := a.bounds(index)
+		if err != nil {
+			return nil, err
+		}
+		if little.Uint32(a.data[offset:]) != 0x2200 {
+			return nil, fmt.Errorf("配置条目标志错误")
+		}
+		block := a.data[offset : offset+size+4]
+		little.PutUint32(table[index*8:], uint32(64+len(blocks)))
+		little.PutUint32(table[index*8+4:], uint32(size))
+		blocks = append(blocks, block...)
+		little.PutUint32(checksums[index*8:], crc32.ChecksumIEEE(block))
+		// 校验表每条 8 字节，后 4 字节是保留位：照搬原件，避免无谓的字节抖动，
+		// 也让「已经紧凑的文件」重跑一次逐字节不变。
+		copy(checksums[index*8+4:index*8+8], a.data[a.checksums+index*8+4:a.checksums+index*8+8])
+	}
+	result := make([]byte, 0, 64+len(blocks)+(a.table-a.tree)+a.count*16)
+	result = append(result, a.data[:64]...)
+	result = append(result, blocks...)
+	treeAt := len(result)
+	result = append(result, a.data[a.tree:a.table]...)
+	tableAt := len(result)
+	result = append(result, table...)
+	checksumsAt := len(result)
+	result = append(result, checksums...)
+	if len(result) >= len(data) {
+		return data, nil
+	}
+	little.PutUint32(result[40:], uint32(treeAt))
+	little.PutUint32(result[44:], uint32(tableAt))
+	little.PutUint32(result[48:], uint32(checksumsAt))
+	little.PutUint32(result[52:], uint32(a.count))
+	summary := make([]byte, 0, a.count*4)
+	for index := 0; index < a.count; index++ {
+		summary = append(summary, result[checksumsAt+index*8:checksumsAt+index*8+4]...)
+	}
+	little.PutUint32(result[56:], crc32.ChecksumIEEE(summary))
+	return result, nil
+}

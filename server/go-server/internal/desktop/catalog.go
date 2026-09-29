@@ -74,9 +74,15 @@ func catalog(client string, icons bool) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	return itemsFromText(client, text, icons)
+}
+
+// itemsFromText builds the catalogue for one item.txt body. It is separate from
+// catalog so weapon creation can inspect a configuration that already carries
+// the new rows but has not been written to disk yet.
+func itemsFromText(client, text string, icons bool) ([]Item, error) {
 	items := []Item{}
 	seen := map[string]bool{}
-	iconRoot := filepath.Join(client, "Data", "UI")
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -104,35 +110,9 @@ func catalog(client string, icons bool) ([]Item, error) {
 		}
 		icon := ""
 		if icons {
-			relative := strings.ReplaceAll(fields[9], "\\", "/")
-			if strings.Contains(relative, ":") || strings.HasPrefix(relative, "/") {
-				return nil, fmt.Errorf("图标路径越界")
-			}
-			icon = filepath.Join(iconRoot, filepath.FromSlash(relative))
-			rel, err := filepath.Rel(iconRoot, icon)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return nil, fmt.Errorf("图标路径越界")
-			}
-			if info, err := os.Stat(icon); err != nil || info.IsDir() {
-				icon = ""
-			} else {
-				resolved, err := filepath.EvalSymlinks(icon)
-				if err != nil {
-					return nil, err
-				}
-				resolvedRoot, err := filepath.EvalSymlinks(iconRoot)
-				if err != nil {
-					return nil, err
-				}
-				rel, err = filepath.Rel(resolvedRoot, resolved)
-				if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-					return nil, fmt.Errorf("图标链接越界")
-				}
-				// All catalog Image.file callers receive the same recovered PNG as the shop.
-				icon, err = cachedTexture(resolved)
-				if err != nil {
-					icon = ""
-				}
+			icon, err = catalogIcon(client, byte(kind), id, fields)
+			if err != nil {
+				return nil, err
 			}
 		}
 		gender := "通用"
@@ -152,4 +132,108 @@ func catalog(client string, icons bool) ([]Item, error) {
 		items = append(items, Item{key, uint32(id), byte(kind), fields[3], labels[0], labels[1], description, icon, gender, quantityItem, timed(byte(kind)), quantityItem || timed(byte(kind)), fields})
 	}
 	return items, nil
+}
+
+// catalogIcon resolves the picture shown for one inventory entry. The icon
+// column (item.txt field 10) wins whenever it points at a usable file; only then
+// does it fall back to textures derived from the model column. The fallback is
+// required because thrown sub-weapons and several costume sets ship '#' in the
+// icon column while still having a texture the client itself draws.
+func catalogIcon(client string, kind byte, id uint64, fields []string) (string, error) {
+	iconRoot := filepath.Join(client, "Data", "UI")
+	if len(fields) < 10 {
+		return "", nil
+	}
+	relative := strings.ReplaceAll(fields[9], "\\", "/")
+	if strings.Contains(relative, ":") || strings.HasPrefix(relative, "/") {
+		return "", fmt.Errorf("图标路径越界")
+	}
+	source := filepath.Join(iconRoot, filepath.FromSlash(relative))
+	rel, err := filepath.Rel(iconRoot, source)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("图标路径越界")
+	}
+	if info, err := os.Stat(source); err == nil && !info.IsDir() {
+		resolved, err := filepath.EvalSymlinks(source)
+		if err != nil {
+			return "", err
+		}
+		resolvedRoot, err := filepath.EvalSymlinks(iconRoot)
+		if err != nil {
+			return "", err
+		}
+		rel, err = filepath.Rel(resolvedRoot, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("图标链接越界")
+		}
+		// All catalog Image.file callers receive the same recovered PNG as the shop.
+		if icon, err := cachedTexture(resolved); err == nil {
+			return icon, nil
+		}
+	}
+	for _, candidate := range modelTextures(client, kind, id, fields) {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(filepath.Dir(filepath.Dir(iconRoot)), resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if icon, err := cachedTexture(resolved); err == nil {
+			return icon, nil
+		}
+	}
+	return "", nil
+}
+
+// itemCategories maps an item kind to the costume part the client bakes into its
+// role texture name (cha_<gender>_<set>_<part>.png).
+var itemCategories = map[byte]string{12: "body", 13: "face", 14: "foot", 15: "hair", 16: "leg", 17: "hand", 18: "body"}
+
+// modelTextures lists fallback pictures derived from item.txt field 8 (the model
+// file), in priority order. Names come from filepath.Base so no value from the
+// configuration can escape the texture directory.
+func modelTextures(client string, kind byte, id uint64, fields []string) []string {
+	if len(fields) < 8 {
+		return nil
+	}
+	stem := textureStem(fields[7])
+	if stem == "" {
+		return nil
+	}
+	data := filepath.Join(client, "Data")
+	number := strconv.FormatUint(id, 10)
+	switch kind {
+	case 25, 26: // 武器 / 投掷 / 副武器
+		return []string{
+			filepath.Join(data, "Weapon", "Texture", stem+".png"),
+			filepath.Join(data, "Weapon", "Texture", number+".png"),
+		}
+	case 12, 13, 14, 15, 16, 17, 18: // 服装外观
+		part := itemCategories[kind]
+		return []string{
+			filepath.Join(data, "Role", "Texture", stem+"_"+part+".png"),
+			filepath.Join(data, "Role", "Texture", stem+".png"),
+			filepath.Join(data, "Role", "Texture", number+".png"),
+		}
+	}
+	return nil
+}
+
+// textureStem lowers a model reference to a bare, path-safe file stem.
+func textureStem(model string) string {
+	model = filepath.Base(strings.ReplaceAll(model, "\\", "/"))
+	if dot := strings.IndexByte(model, '.'); dot >= 0 {
+		model = model[:dot]
+	}
+	model = strings.TrimSpace(model)
+	if model == "" || model == "#" || strings.ContainsAny(model, `/\:`) {
+		return ""
+	}
+	return strings.ToLower(model)
 }

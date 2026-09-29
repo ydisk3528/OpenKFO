@@ -18,51 +18,72 @@ import (
 )
 
 type Request struct {
-	LoginErrors            *persistence.LoginErrorSettings  `json:"login_errors,omitempty"`
-	Treasure               *persistence.TreasureSettings    `json:"treasure,omitempty"`
-	ClientConfig           *clientConfigRequest             `json:"client_config,omitempty"`
-	RecommendationPriority int32                            `json:"recommendation_priority"`
-	PinRecommended         bool                             `json:"pin_recommended"`
-	BatchItems             []persistence.BatchGrantItem     `json:"batch_items,omitempty"`
-	UIDs                   []uint64                         `json:"uids,omitempty"`
-	Reason                 string                           `json:"reason"`
-	BannedWords            *persistence.BannedWordsSettings `json:"banned_words,omitempty"`
-	GMVersion              string                           `json:"gm_version"`
-	Recommended            *bool                            `json:"recommended,omitempty"`
-	Notes                  string                           `json:"notes,omitempty"`
-	Definition             *persistence.ItemDefinition      `json:"definition,omitempty"`
-	StageUnlocks           *persistence.StagePlayerUnlocks  `json:"stage_unlocks,omitempty"`
-	WeaponSettings         *persistence.WeaponSettings      `json:"weapon_settings,omitempty"`
-	VIPShopSettings        *persistence.VIPShopSettings     `json:"vip_shop_settings,omitempty"`
-	TalismanSettings       *persistence.TalismanSettings    `json:"talisman_settings,omitempty"`
-	Titles                 *persistence.TitleSettings       `json:"titles,omitempty"`
-	Tasks                  *persistence.TaskSettings        `json:"tasks,omitempty"`
-	Training               *persistence.TrainingSettings    `json:"training,omitempty"`
-	VIPKind                uint32                           `json:"vip_kind,omitempty"`
-	Honour                 *persistence.HonourSettings      `json:"honour,omitempty"`
-	StageAccess            *persistence.StageAccess         `json:"stage_access,omitempty"`
-	ServerExpiryDays       *uint32                          `json:"server_expiry_days,omitempty"`
-	Instance               uint32                           `json:"instance"`
-	ExpiresAt              *int64                           `json:"expires_at,omitempty"`
-	Environment            string                           `json:"environment"`
-	Rewards                *persistence.RewardRules         `json:"rewards,omitempty"`
-	RewardRevision         uint64                           `json:"reward_revision"`
-	Operation              string                           `json:"operation"`
-	ID                     string                           `json:"id"`
-	UID                    uint64                           `json:"uid"`
-	Mode                   string                           `json:"mode"`
-	Amount                 uint32                           `json:"amount"`
-	Keys                   []string                         `json:"keys"`
-	Key                    string                           `json:"key"`
-	Quantity               int                              `json:"quantity"`
-	Days                   int                              `json:"days"`
-	Currency               string                           `json:"currency"`
-	Price                  int64                            `json:"price"`
-	Enabled                *bool                            `json:"enabled"`
-	All                    bool                             `json:"all"`
-	Weapon                 int                              `json:"weapon"`
-	Revision               string                           `json:"revision"`
-	Rules                  []Rule                           `json:"rules"`
+	LoginErrors            *persistence.LoginErrorSettings      `json:"login_errors,omitempty"`
+	Treasure               *persistence.TreasureSettings        `json:"treasure,omitempty"`
+	ClientConfig           *clientConfigRequest                 `json:"client_config,omitempty"`
+	RecommendationPriority int32                                `json:"recommendation_priority"`
+	PinRecommended         bool                                 `json:"pin_recommended"`
+	BatchItems             []persistence.BatchGrantItem         `json:"batch_items,omitempty"`
+	UIDs                   []uint64                             `json:"uids,omitempty"`
+	Reason                 string                               `json:"reason"`
+	BannedWords            *persistence.BannedWordsSettings     `json:"banned_words,omitempty"`
+	GMVersion              string                               `json:"gm_version"`
+	Recommended            *bool                                `json:"recommended,omitempty"`
+	Notes                  string                               `json:"notes,omitempty"`
+	Definition             *persistence.ItemDefinition          `json:"definition,omitempty"`
+	StageUnlocks           *persistence.StagePlayerUnlocks      `json:"stage_unlocks,omitempty"`
+	WeaponSettings         *persistence.WeaponSettings          `json:"weapon_settings,omitempty"`
+	VIPShopSettings        *persistence.VIPShopSettings         `json:"vip_shop_settings,omitempty"`
+	TalismanSettings       *persistence.TalismanSettings        `json:"talisman_settings,omitempty"`
+	Titles                 *persistence.TitleSettings           `json:"titles,omitempty"`
+	Tasks                  *persistence.TaskSettings            `json:"tasks,omitempty"`
+	Training               *persistence.TrainingSettings        `json:"training,omitempty"`
+	VIPKind                uint32                               `json:"vip_kind,omitempty"`
+	Honour                 *persistence.HonourSettings          `json:"honour,omitempty"`
+	StageAccess            *persistence.StageAccess             `json:"stage_access,omitempty"`
+	ServerExpiryDays       *uint32                              `json:"server_expiry_days,omitempty"`
+	Instance               uint32                               `json:"instance"`
+	ExpiresAt              *int64                               `json:"expires_at,omitempty"`
+	Environment            string                               `json:"environment"`
+	Rewards                *persistence.RewardRules             `json:"rewards,omitempty"`
+	RewardRevision         uint64                               `json:"reward_revision"`
+	Operation              string                               `json:"operation"`
+	ID                     string                               `json:"id"`
+	UID                    uint64                               `json:"uid"`
+	Mode                   string                               `json:"mode"`
+	Amount                 uint32                               `json:"amount"`
+	Keys                   []string                             `json:"keys"`
+	Key                    string                               `json:"key"`
+	Quantity               int                                  `json:"quantity"`
+	Days                   int                                  `json:"days"`
+	Currency               string                               `json:"currency"`
+	Price                  int64                                `json:"price"`
+	Enabled                *bool                                `json:"enabled"`
+	All                    bool                                 `json:"all"`
+	Weapon                 int                                  `json:"weapon"`
+	Revision               string                               `json:"revision"`
+	Rules                  []Rule                               `json:"rules"`
+	Donor                  int                                  `json:"donor"`
+	Stage                  int                                  `json:"stage"`
+	Action                 string                               `json:"action"`
+	PropertyID             string                               `json:"property_id"`
+	Label                  string                               `json:"label,omitempty"`
+	SourcePath             string                               `json:"source_path,omitempty"`
+	Template               string                               `json:"template"`
+	TemplateWeapon         int                                  `json:"template_weapon"`
+	TemplateStage          int                                  `json:"template_stage"`
+	Transitions            []ComboTransition                    `json:"transitions"`
+	FrameSwitches          map[int][]FrameSwitch                `json:"frame_switches,omitempty"`
+	Counters               map[int]*CounterEdit                 `json:"counters,omitempty"`
+	BlockElements          map[int]map[string][]BlockElement    `json:"block_elements,omitempty"`
+	Scopes                 map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
+	ComboRule              *ComboRuleSet                        `json:"combo_rule,omitempty"`
+	Target                 string                               `json:"target"`
+	Path                   string                               `json:"path"`
+	Directory              string                               `json:"directory"`
+	Blueprint              *Blueprint                           `json:"blueprint,omitempty"`
+	Include                []string                             `json:"include,omitempty"`
+	AppliedOnly            bool                                 `json:"applied_only,omitempty"`
 }
 type Admin struct {
 	Root          string
@@ -260,6 +281,14 @@ func (admin *Admin) Call(request Request) (any, error) {
 		return call(remote)
 	case "definitions_get", "definition_save", "accounts", "inventory", "inventory_expiry", "wallet_accounts", "wallet_update", "rewards_get", "rewards_save":
 		return call(remote)
+	}
+	// Switching which client the tool works on is handled before the client
+	// directory is resolved, so a wrong pick can be corrected from the UI.
+	if request.Operation == "client_directory_get" || request.Operation == "client_directory_set" {
+		return admin.clientDirectory(request)
+	}
+	if request.Operation == "server_config_hash_set" {
+		return admin.setServerConfigHash(request)
 	}
 	client := filepath.Join(admin.Root, "runtime-local", "client")
 	pathConfig := filepath.Join(admin.Root, "runtime-local", "client-path.json")
