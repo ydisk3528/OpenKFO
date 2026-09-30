@@ -285,12 +285,6 @@ func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
 		if base, err = applyBlueprints(source, state.Created); err != nil {
 			return nil, err
 		}
-		// The "self-made" flag lives in the client data as well — a marker
-		// comment inside each action block — so it survives an editing set that
-		// was lost or pointed at another root.
-		if base, err = applyWeaponMarkers(base, state); err != nil {
-			return nil, err
-		}
 	}
 	plan := comboPlanOf(state.Created, state.Combos)
 	for key := range plan {

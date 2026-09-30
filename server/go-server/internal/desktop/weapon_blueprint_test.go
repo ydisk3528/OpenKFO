@@ -1,6 +1,8 @@
 package desktop
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,6 +108,23 @@ func TestApplyBlueprintsInfoRerender(t *testing.T) {
 	if rows == nil || rows[3] != "重命名刀" || rows[16] != "重命名刀" {
 		t.Fatalf("first render lost identity cells: %v", rows)
 	}
+	if len(rows) != len(donorRow) || rows[17] != donorRow[17] || rows[53] != donorRow[53] {
+		t.Fatalf("borrowed weapon changed the native row layout or inherited fields: %v", rows)
+	}
+	base, err := buildWeaponBase(source, &weaponState{Created: map[string]Blueprint{"253999": blueprint}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseText, err := base.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := itemRowIndex(baseText)["253999"]; len(got) != len(donorRow) {
+		t.Fatalf("base render added columns to client item table: %v", got)
+	}
+	if got := itemRowIndex(baseText)[strconv.Itoa(donor)]; strings.Join(got, "\t") != strings.Join(donorRow, "\t") {
+		t.Fatal("building a weapon changed its donor")
+	}
 	actionText, err := first.text("itemact.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +154,18 @@ func TestApplyBlueprintsInfoRerender(t *testing.T) {
 	if count := countRowsWithID(text, "253999"); count != 1 {
 		t.Fatalf("expected exactly one item row for 253999, got %d", count)
 	}
+	blueprint.Glow = "#"
+	withGlow, err := applyBlueprints(source, map[string]Blueprint{"253999": blueprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	glowText, err := withGlow.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := itemRowIndex(glowText)["253999"][53]; got != "#" {
+		t.Fatalf("explicit glow override was lost: %q", got)
+	}
 	actionText, err = second.text("itemact.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +176,197 @@ func TestApplyBlueprintsInfoRerender(t *testing.T) {
 	}
 	if count := countRowsWithID(actionText, "253999"); count != 1 {
 		t.Fatalf("expected exactly one action row for 253999, got %d", count)
+	}
+}
+
+func TestCurrentBlueprintsKeepNativeRows(t *testing.T) {
+	folder := os.Getenv("OPENKFO_WEAPON_TEST_STATE")
+	if folder == "" {
+		t.Skip("editing-set fixture required")
+	}
+	contents, err := os.ReadFile(filepath.Join(folder, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state weaponState
+	if err := json.Unmarshal(contents, &state); err != nil {
+		t.Fatal(err)
+	}
+	source, err := loadArchive(filepath.Join(folder, "original.spf2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.verify(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := source.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := buildWeaponBase(source, &state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := rendered.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, after := itemRowIndex(original), itemRowIndex(result)
+	for _, id := range []string{"253300", "253301", "253350"} {
+		blueprint, ok := state.Created[id]
+		if !ok {
+			t.Fatalf("missing editing-set blueprint %s", id)
+		}
+		donor := before[strconv.Itoa(blueprint.Donor)]
+		row := after[id]
+		if len(donor) != 60 || len(row) != len(donor) || row[17] != donor[17] || row[53] != donor[53] {
+			t.Fatalf("weapon %s: columns=%d description=%q glow=%q; donor columns=%d description=%q glow=%q", id, len(row), row[17], row[53], len(donor), donor[17], donor[53])
+		}
+		if got := after[strconv.Itoa(blueprint.Donor)]; strings.Join(got, "\t") != strings.Join(donor, "\t") {
+			t.Fatalf("donor %d was changed", blueprint.Donor)
+		}
+	}
+}
+
+func TestCurrentWeaponRenderDryRun(t *testing.T) {
+	folder := os.Getenv("OPENKFO_WEAPON_TEST_STATE")
+	client := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")
+	if folder == "" || client == "" {
+		t.Skip("editing set and client fixtures required")
+	}
+	contents, err := os.ReadFile(filepath.Join(folder, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state weaponState
+	if err := json.Unmarshal(contents, &state); err != nil {
+		t.Fatal(err)
+	}
+	entry := state.baselineFor(client)
+	source, err := loadArchive(entry.path(folder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := buildWeaponBase(source, &state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemText, err := base.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := itemsFromText(client, itemText, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := applyRemaps(base, &state, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := inspect(view, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := make(map[string][]Rule, len(state.Applied))
+	for key, rules := range state.Applied {
+		plans[key] = rules
+	}
+	prepared, err := prepareClient(entry, folder, &state, plans, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := parseArchive(prepared.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := parseArchive(prepared.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := []string{}
+	for name := range current.entries {
+		old, err := current.raw(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, err := result.raw(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(old, updated) {
+			changed = append(changed, name)
+		}
+	}
+	for _, id := range []string{"253300", "253301", "253350"} {
+		text, err := result.text("item.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := itemRowIndex(text)[id]
+		if len(row) != 60 {
+			t.Fatalf("weapon %s has %d columns after full render", id, len(row))
+		}
+	}
+	t.Logf("changed archive entries (%d): %v", len(changed), changed)
+}
+
+func TestAppliedWeaponRestoreChangesOnlyItemTable(t *testing.T) {
+	beforePath := os.Getenv("OPENKFO_WEAPON_BEFORE")
+	client := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")
+	if beforePath == "" || client == "" {
+		t.Skip("before and client fixtures required")
+	}
+	before, err := loadArchive(beforePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := loadArchive(filepath.Join(client, "Data", "config.spf2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []*archive{before, after} {
+		if err := a.verify(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(before.entries) != len(after.entries) {
+		t.Fatalf("archive entry count changed: %d -> %d", len(before.entries), len(after.entries))
+	}
+	changed := []string{}
+	for name := range before.entries {
+		old, err := before.raw(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated, err := after.raw(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(old, updated) {
+			changed = append(changed, name)
+		}
+	}
+	if len(changed) != 1 || changed[0] != "item.txt" {
+		t.Fatalf("unexpected archive entry changes: %v", changed)
+	}
+	beforeText, err := before.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterText, err := after.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRows, newRows := itemRowIndex(beforeText), itemRowIndex(afterText)
+	for id, donorID := range map[string]string{"253300": "253013", "253301": "253043", "253350": "253504"} {
+		row, donor := newRows[id], oldRows[donorID]
+		if len(row) != 60 || len(donor) != 60 || row[17] != donor[17] || row[53] != donor[53] {
+			t.Fatalf("weapon %s: columns=%d, skill description=%q, glow=%q; donor glow=%q", id, len(row), row[17], row[53], donor[53])
+		}
+		if got := newRows[donorID]; strings.Join(got, "\t") != strings.Join(donor, "\t") {
+			t.Fatalf("donor %s changed", donorID)
+		}
+		t.Logf("weapon %s: %d -> %d columns, glow %q -> %q", id, len(oldRows[id]), len(row), oldRows[id][53], row[53])
 	}
 }
 

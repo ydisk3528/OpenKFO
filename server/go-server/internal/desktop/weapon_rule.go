@@ -537,18 +537,11 @@ func weaponByID(info *inspection, key string) (Weapon, bool) {
 }
 
 // comboRuleEditable decides whether the editor may write this weapon's rules.
-// Self-made weapons are always fair game, and so is any weapon the client does
-// not constrain yet — adding a limit where none exists cannot damage shipped
-// data. Rewriting a block that ships in the client is refused, which keeps the
-// original rule set recoverable from the baseline alone.
+// Every weapon is now editable, including ones whose rules ship in the client:
+// the shipped block is recoverable from the baseline, and the front end asks
+// the user to confirm before editing a weapon the editor did not create.
 func comboRuleEditable(state *weaponState, info *inspection, key string, official, overridden bool) bool {
-	if overridden {
-		return true
-	}
-	if isEditableWeapon(state, info, key) {
-		return true
-	}
-	return !official
+	return true
 }
 
 // comboRuleView is the read side of the editor: the effective rule set, the
@@ -574,9 +567,6 @@ func comboRuleView(shipped *archive, info *inspection, state *weaponState, key, 
 	options := appliedSkillOptions(info, state, key, skillOptions(info, weapon))
 	editable := comboRuleEditable(state, info, key, official, overridden)
 	reason := ""
-	if !editable {
-		reason = "本客户端已内置该武器的连招限制，属官方数据，编辑器只改自建武器与未登记限制的武器"
-	}
 	return map[string]any{
 		"weapon":         key,
 		"rules":          effective,

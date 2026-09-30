@@ -34,6 +34,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   bool busy = true, dirty = false, failed = false;
   String? selectedAction;
   int editorVersion = 0;
+  /// 非自建武器「启用编辑」开关：每次重新选中武器都会复位，需要再次手动开启。
+  bool editUnlocked = false;
   /// 最近一次导出发版包的结果（后端 packageResult）；空 map 表示还没导出过。
   Map<String, dynamic> exportResult = {};
   /// 最近一次导出是不是合并包（只含当前武器的配置）。
@@ -98,6 +100,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       Map<String, dynamic>.from(data?['created'] as Map? ?? const {});
 
   bool isCreated(dynamic id) => created.containsKey('$id');
+
+  /// 编辑按钮的显示开关：自建武器直接可编辑；非自建武器需先点「启用编辑」。
+  bool canEdit(dynamic id) => isCreated(id) || editUnlocked;
 
   /// 编辑集里有、当前客户端自己的 config.spf2 里还没有的武器编号。
   /// 武器列表是「客户端 + 全局编辑集」渲染出来的，编辑集不随客户端切换，
@@ -951,8 +956,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 连招链：按「老状态」分组展示 delayacttable.xml 的状态转移，可编辑。
   /// 自建武器即使一条转移都没有也要显示这张卡片，否则没法从零开始编连招。
   Widget comboChainCard() {
-    final created = weapon != null && isCreated(weapon!['id']);
-    if (comboChain.isEmpty && frameSwitches.isEmpty && !chainEditing && !created) {
+    final editable = weapon != null && canEdit(weapon!['id']);
+    if (comboChain.isEmpty && frameSwitches.isEmpty && !chainEditing && !editable) {
       return const SizedBox.shrink();
     }
     final states = [for (final s in (data?['states'] as List? ?? [])) '$s'];
@@ -1092,7 +1097,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     }
     if (comboRuleInfo.isEmpty) return comboRuleUnavailable();
     final editing = comboRuleEditing;
-    final editable = comboRuleEditable;
+    final editable = weapon != null && canEdit(weapon!['id']);
     final skillItems = comboRuleSkillItems(comboRuleUsedSkills);
     // 两种模式共用同一份草稿：只读时它就是从服务端同步下来的规则，编辑时
     // 它才是真正的草稿。分开渲染就会出现「有官方条目却显示（无）」这类偏差。
@@ -1143,7 +1148,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             const SizedBox(height: 6),
             if (!editable)
               comboRuleNotice(
-                '本客户端已内置这把武器的连招限制（官方数据），编辑器只读。'
+                '本客户端已内置这把武器的连招限制（官方数据）。点上方「启用编辑」后可修改；'
                 '下面是游戏当前真正生效的条目。',
                 Colors.blueGrey,
               ),
@@ -2752,6 +2757,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     editorVersion++;
     selectedAction = null;
     weapon = value;
+    editUnlocked = false;
     final stored = data!['drafts']['${value['id']}'] as List? ?? [];
     rules = (value['stages'] as List).map((stage) {
       final saved = stored.where((r) => r['stage'] == stage['stage']);
@@ -2826,7 +2832,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         context: context,
         builder: (_) => _EffectLedgerDialog(
           title: '${selected['name']}',
-          editable: isCreated(selected['id']),
+          editable: canEdit(selected['id']),
           view: view,
           onSubmit: (rows) => widget.api({
             'operation': 'weapon_effect_ledger_set',
@@ -2870,7 +2876,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         context: context,
         builder: (_) => _StageEffectDialog(
           title: '状态 $state · ${stage['label'] ?? ''}',
-          editable: isCreated(selected['id']),
+          editable: canEdit(selected['id']),
           rows: current,
           thumbs: _effectThumbs,
           onSubmit: (rows) => widget.api({
@@ -4370,7 +4376,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 自建武器的状态管理卡片：新增状态列（从零定义）与提示。
   Widget stateBuilderCard() {
-    if (weapon == null || !isCreated(weapon!['id'])) {
+    if (weapon == null || !canEdit(weapon!['id'])) {
       return const SizedBox.shrink();
     }
     final states = unusedStates;
@@ -4619,7 +4625,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               ),
             const SizedBox(height: 8),
             remapSection(index, Map<String, dynamic>.from(stage as Map)),
-            if (isCreated(weapon!['id']))
+            if (canEdit(weapon!['id']))
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(
@@ -4779,7 +4785,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Widget actionChoice(String key, int? index, String label) {
     // 自建武器的每条动作都可以直接删掉（= 删除该状态列），不用先点进编辑卡。
-    final deletable = index != null && isCreated(weapon!['id']);
+    final deletable = index != null && canEdit(weapon!['id']);
     return Column(
       children: [
         ListTile(
@@ -5072,6 +5078,46 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                       child: const Text('换一个参考武器'),
                     ),
                 ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 非自建武器默认只读；点「启用编辑」后本次选中期间开放全部编辑按钮，
+  /// 重新选中武器即复位。
+  Widget editUnlockBanner() {
+    if (weapon == null || isCreated(weapon!['id']) || editUnlocked) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Card(
+        color: Colors.amber.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              const Icon(Icons.lock_open_outlined,
+                  size: 18, color: Colors.deepOrange),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '「${weapon!['name']}」不是编辑器登记的自建武器。'
+                  '启用编辑后，本次会开放全部招式、连招与特效编辑；'
+                  '重新选中武器后会恢复只读。',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: busy
+                    ? null
+                    : () => setState(() => editUnlocked = true),
+                icon: const Icon(Icons.edit, size: 16),
+                label: const Text('启用编辑'),
               ),
             ],
           ),
@@ -5374,6 +5420,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                 ),
                                 const SizedBox(height: 8),
                                 comboBanner(),
+                                editUnlockBanner(),
                                 remapErrorBanner(),
                                 counterWarningBanner(),
                                 const SizedBox(height: 8),
@@ -5417,7 +5464,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                                         .titleMedium,
                                                   ),
                                                 ),
-                                                if (isCreated(weapon!['id']))
+                                                if (canEdit(weapon!['id']))
                                                   TextButton.icon(
                                                     onPressed: busy
                                                         ? null
