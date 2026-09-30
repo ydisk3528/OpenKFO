@@ -108,7 +108,7 @@ void main() {
   });
 
   testWidgets(
-    'wallet gift requires confirmation and targets selected account',
+    'wallet balance setting requires confirmation and targets selected account',
     (tester) async {
       Map<String, dynamic>? update;
       Future<dynamic> api(Map<String, dynamic> request) async {
@@ -123,16 +123,16 @@ void main() {
 
       await tester.pumpWidget(MaterialApp(home: WalletConfigPage(api: api)));
       await tester.pumpAndSettle();
-      await tester.enterText(find.widgetWithText(TextFormField, '赠送数量'), '80');
+      await tester.enterText(find.widgetWithText(TextFormField, '目标余额'), '80');
       await tester.tap(find.text('确认操作…'));
       await tester.pumpAndSettle();
       expect(update, isNull);
-      expect(find.text('localtest：20 → 100 点券'), findsOneWidget);
+      expect(find.text('localtest：20 → 80 点券'), findsOneWidget);
       await tester.tap(find.text('确认'));
       await tester.pumpAndSettle();
       expect(update?['uid'], 1003);
       expect(update?['amount'], 80);
-      expect(update?['mode'], 'gift');
+      expect(update?['mode'], 'set');
       expect(update?['id'], startsWith('wallet-'));
       expect(tester.takeException(), isNull);
     },

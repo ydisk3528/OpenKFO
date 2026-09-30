@@ -5,7 +5,10 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 class ItemPictures {
-  ItemPictures(this.api);
+  factory ItemPictures(Future<dynamic> Function(Map<String, dynamic>) api) =>
+      _shared[api] ??= ItemPictures._(api);
+  ItemPictures._(this.api);
+  static final _shared = Expando<ItemPictures>();
   final Future<dynamic> Function(Map<String, dynamic>) api;
   Future<dynamic>? _catalog;
   Widget byId(int id) {

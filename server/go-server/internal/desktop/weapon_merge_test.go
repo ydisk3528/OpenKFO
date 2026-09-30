@@ -261,6 +261,7 @@ func TestWeaponMergePreviewAndImport(t *testing.T) {
 	if err != nil {
 		t.Skip(err.Error())
 	}
+	existing.ItemRow = replaceTableCell(t, existing.ItemRow, 3, "更新后的测试武器")
 	// 新增：把同一把武器的材料换成目标里没有的编号 253999。
 	const newNumber = "253999"
 	if weaponIDsOf(src)[newNumber] {

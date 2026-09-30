@@ -58,6 +58,7 @@ func New(token string, call func(desktop.Request) (any, error)) http.Handler {
 			return
 		}
 		switch req.Operation {
+		case "notice_send", "notice_status":
 		case "grant_batch_create", "grant_batch_get", "grant_batch_list", "grant_batch_send", "grant_batch_send_many":
 		case "login_errors_get", "login_errors_save", "treasure_get", "treasure_save", "treasure_preview", "users_list", "user_ban_save", "user_ban_history", "banned_words_get", "banned_words_save", "tasks_get", "tasks_save", "titles_get", "titles_save":
 		case "stage_unlocks_get", "stage_unlocks_save", "vip_shop_settings_get", "vip_shop_settings_save", "talisman_settings_get", "talisman_settings_save", "weapon_settings_get", "weapon_settings_save", "training_get", "training_save", "stages_get", "stages_save", "honour_get", "honour_save", "vip_get", "vip_grant":

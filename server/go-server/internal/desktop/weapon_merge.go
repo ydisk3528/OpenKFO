@@ -572,6 +572,7 @@ type mergePreview struct {
 	Reference string           `json:"reference"`
 	New       []map[string]any `json:"new"`
 	Modified  []map[string]any `json:"modified"`
+	Unchanged []map[string]any `json:"unchanged"`
 	Weapons   []map[string]any `json:"weapons"`
 }
 
@@ -642,7 +643,11 @@ func weaponMergePreview(request Request, client string) (any, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	target, err := loadArchive(configPath(client))
+	path := configPath(client)
+	if request.MergeWorkspace == "" && request.ClientConfig != nil && request.ClientConfig.Base != "" {
+		path = request.ClientConfig.Base
+	}
+	target, err := loadArchive(path)
 	if err != nil {
 		return nil, err
 	}
@@ -651,16 +656,26 @@ func weaponMergePreview(request Request, client string) (any, error) {
 	}
 	existing := weaponIDsOf(target)
 	preview := mergePreview{
-		Reference: configPath(client),
+		Reference: path,
 		New:       []map[string]any{},
 		Modified:  []map[string]any{},
 		Weapons:   []map[string]any{},
+		Unchanged: []map[string]any{},
 	}
 	for _, weapon := range manifest.Weapons {
 		entry := map[string]any{"id": weapon.ID, "name": weapon.Name}
 		preview.Weapons = append(preview.Weapons, entry)
 		if existing[strconv.Itoa(weapon.ID)] {
-			preview.Modified = append(preview.Modified, entry)
+			changes, err := mergeWeaponDifferences(target, weapon)
+			if err != nil {
+				return nil, err
+			}
+			entry["changes"] = changes
+			if len(changes) == 0 {
+				preview.Unchanged = append(preview.Unchanged, entry)
+			} else {
+				preview.Modified = append(preview.Modified, entry)
+			}
 		} else {
 			preview.New = append(preview.New, entry)
 		}
@@ -712,6 +727,23 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 		return nil, err
 	}
 	defer reader.Close()
+	if len(request.MergeWeapons) > 0 {
+		chosen := map[int]bool{}
+		for _, id := range request.MergeWeapons {
+			chosen[id] = true
+		}
+		weapons := []mergeWeapon{}
+		for _, w := range manifest.Weapons {
+			if chosen[w.ID] {
+				weapons = append(weapons, w)
+				delete(chosen, w.ID)
+			}
+		}
+		if len(chosen) > 0 || len(weapons) == 0 {
+			return nil, fmt.Errorf("所选武器不在合并包中")
+		}
+		manifest.Weapons = weapons
+	}
 
 	target, err := loadArchive(configPath(client))
 	if err != nil {
@@ -1120,6 +1152,9 @@ func insertPropertyNode(text, nodeText string) (string, error) {
 
 // extractZipEntry 解压一个 zip 条目到目标路径（父目录自动创建）。
 func extractZipEntry(file *zip.File, target string) error {
+	if file.UncompressedSize64 > 64<<20 {
+		return fmt.Errorf("资源超过 64 MiB：%s", file.Name)
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
@@ -1129,8 +1164,11 @@ func extractZipEntry(file *zip.File, target string) error {
 	}
 	defer handle.Close()
 	var buffer bytes.Buffer
-	if _, err = io.Copy(&buffer, io.LimitReader(handle, 64<<20)); err != nil {
+	if _, err = io.Copy(&buffer, io.LimitReader(handle, (64<<20)+1)); err != nil {
 		return err
+	}
+	if buffer.Len() > 64<<20 || uint64(buffer.Len()) != file.UncompressedSize64 {
+		return fmt.Errorf("资源长度异常：%s", file.Name)
 	}
 	return atomicWrite(target, buffer.Bytes())
 }

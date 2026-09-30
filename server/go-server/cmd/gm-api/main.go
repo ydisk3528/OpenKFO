@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"golang.org/x/crypto/bcrypt"
 	"kungfu.local/server/internal/adminhttp"
 	"kungfu.local/server/internal/desktop"
 	"kungfu.local/server/internal/persistence"
@@ -64,7 +65,32 @@ func main() {
 		}
 		return json.Marshal(result)
 	}
-	server := &http.Server{Addr: *listen, Handler: adminhttp.New(token, admin.Call), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	handler := adminhttp.New(token, admin.Call)
+	if file := os.Getenv("KK_GM_ACCOUNTS_FILE"); file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			log.Fatal("cannot read GM accounts file")
+		}
+		var accounts map[string]string
+		if json.Unmarshal(data, &accounts) != nil || len(accounts) == 0 {
+			log.Fatal("invalid GM accounts file")
+		}
+		for _, hash := range accounts {
+			if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+				log.Fatal("invalid GM password hash")
+			}
+		}
+		dummy, _ := bcrypt.GenerateFromPassword([]byte("unused-password"), bcrypt.DefaultCost)
+		handler = adminhttp.WithLogin(handler, token, func(account, password string) bool {
+			hash, ok := accounts[account]
+			if !ok {
+				hash = string(dummy)
+			}
+			valid := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+			return valid && ok && account != ""
+		})
+	}
+	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 90 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	log.Printf("GM API listening on %s", *listen)
 	if *cert != "" {
 		log.Fatal(server.ListenAndServeTLS(*cert, *key))

@@ -37,7 +37,7 @@ class OnlineBackend {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
         request.write(
           jsonEncode({
-            ...input,
+            ...Map<String, dynamic>.from(input)..remove('_refresh'),
             'environment': 'online',
             'gm_version': gmVersion,
           }),

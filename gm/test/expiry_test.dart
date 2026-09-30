@@ -25,6 +25,8 @@ void main() {
       throw StateError('unexpected request');
     }
     await tester.pumpWidget(ItemManager(api:api));await tester.pumpAndSettle();
+    await tester.tap(find.text('选择玩家'));await tester.pumpAndSettle();
+    await tester.tap(find.text('测试 · test'));await tester.pumpAndSettle();
     await tester.tap(find.text('测试武器'));await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('修改服务器期限'));
     await tester.tap(find.text('修改服务器期限'));await tester.pumpAndSettle();
