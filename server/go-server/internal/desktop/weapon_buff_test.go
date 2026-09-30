@@ -151,3 +151,41 @@ func TestBuffPlayerAPINotEmpty(t *testing.T) {
 		t.Fatalf("API 条目过少：%d", total)
 	}
 }
+
+func TestBuffSelfMadeAndDependencies(t *testing.T) {
+	xml := "<?xml version=\"1.0\"?>\n<UState>\n" +
+		"\t<!--中毒-->\n\t<Data type=\"30\" Icon=\"a30.png\"><Logic></Logic></Data>\n" +
+		"\t<!--吸魔（自建 432）：机制载体-->\n\t<Data type=\"432\" Icon=\"\"><Logic></Logic></Data>\n" +
+		"\t<!--吸魔图标（自建 433）：虚弱图标-->\n\t<Data type=\"433\" Icon=\"abnormalstate8.png\"><Logic></Logic></Data>\n" +
+		"\t<!--吸魔图标（自建 434）：怒气图标-->\n\t<Data type=\"434\" Icon=\"abnormalstate30.png\"><Logic></Logic></Data>\n" +
+		"</UState>\n"
+
+	selfMade := buffSelfMadeSet(xml)
+	for _, n := range []string{"432", "433", "434"} {
+		if !selfMade[n] {
+			t.Errorf("预期 %s 为自建", n)
+		}
+	}
+	if selfMade["30"] {
+		t.Error("原生状态 30 不应被标记为自建")
+	}
+
+	lua := "" +
+		"function OnGetUstate_432( ustate, self, attackerid )\n" +
+		"\tPlayer.AddUstate( attackerid, 434, 4, 500, attackerid );\n" +
+		"\tPlayer.DelUstate( self, 432 );\n" +
+		"\tPlayer.AddUstate( self, 433, 1, 500, attackerid );\n" +
+		"\tPlayer.AddUstate( self, 30, 4, 500, attackerid );\n" + // 原生状态，不应导出
+		"\treturn;\n" +
+		"end\n" +
+		"function OnGetUstate_433( ustate, self, attackerid )\n" +
+		"\tPlayer.AddUstate( self, 434, 1, 500, attackerid );\n" + // 二级依赖
+		"\treturn;\n" +
+		"end\n"
+
+	deps := buffDependencies("432", lua, selfMade)
+	got := strings.Join(deps, ",")
+	if got != "433,434" {
+		t.Errorf("依赖应为 433,434，实际 %q", got)
+	}
+}

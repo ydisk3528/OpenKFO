@@ -387,7 +387,6 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
     'effects': '特效资源和武器加载绑定',
     'maps': '场景、音乐、封面及地图校验',
     'items': '头饰、背饰、套装、称号与道具定义',
-    'buffs': '状态/Buff 图标与 Lua 效果定制',
     'package': '选择方案，检查依赖，生成更新包',
   };
   static const icons = {
@@ -396,7 +395,6 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
     'effects': Icons.auto_awesome,
     'maps': Icons.landscape_outlined,
     'items': Icons.inventory_2_outlined,
-    'buffs': Icons.healing_outlined,
     'package': Icons.archive_outlined,
   };
   Widget section(String title, Widget child) => Card(

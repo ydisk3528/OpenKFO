@@ -45,6 +45,8 @@ var (
 	luaStringRe     = regexp.MustCompile(`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`)
 	ustateActiveRe  = regexp.MustCompile(`\bActiveState\s*=\s*"([^"]*)"`)
 	ustateTransRe   = regexp.MustCompile(`\bTransformStop\s*=\s*"([^"]*)"`)
+	// 状态 lua 里「挂/摘状态」的引用（第二参数是状态号），导出时据此找依赖。
+	buffStateRefRe = regexp.MustCompile(`Player\.(?:AddUstate|DelUstate)\s*\(\s*[^,]+,\s*(\d+)`)
 )
 
 type ustateSpan struct {
@@ -706,7 +708,7 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 		return weaponBuffPackages(folder)
 
 	case "weapon_buff_merge_import":
-		return weaponBuffMergeImport(request, client)
+		return weaponBuffMergeImport(request, state, client, folder, statePath)
 
 	case "weapon_buff_preview":
 		a, err := buffSourceArchive(state, client, folder)
@@ -864,7 +866,9 @@ func applyBuffMerge(a *archive, manifest *buffMergeManifest) (*archive, error) {
 	return applyBuffEdits(a, tmp)
 }
 
-// weaponBuffExport 把某个状态的节点 + lua 函数导出成 JSON 合并包。
+// weaponBuffExport 把某个状态的节点 + lua 函数导出成 JSON 合并包，并自动带上
+// 它 lua 里 AddUstate/DelUstate 引用的其它自建状态（如 432 依赖的 433/434），
+// 保证导出的是一个自包含的完整 buff 配置。
 // 编辑框里的最新内容通过 request.UState.Text / request.LuaText 直接带上，避免
 // 「还没保存就导不出」。
 func weaponBuffExport(request Request, state *weaponState, client, folder string) (any, error) {
@@ -872,48 +876,72 @@ func weaponBuffExport(request Request, state *weaponState, client, folder string
 	if key == "" {
 		return nil, fmt.Errorf("缺少状态号")
 	}
-	node := ""
-	lua := ""
-	if request.UState != nil && strings.TrimSpace(request.UState.Text) != "" {
-		node = strings.TrimSpace(request.UState.Text)
-		if _, err := validateUStateNode(node, key); err != nil {
+	a, err := buffSourceArchive(state, client, folder)
+	if err != nil {
+		return nil, err
+	}
+	xmlText := ""
+	if t, err := a.text("ustate.xml"); err == nil {
+		xmlText = t
+	}
+	luaText := ""
+	if t, err := a.text(buffLuaEntry); err == nil {
+		luaText = t
+	}
+
+	// node/lua 读取：选中状态的编辑框最新内容优先，其余从当前视图取。
+	nodeOf := func(k string) string {
+		if k == key && request.UState != nil && strings.TrimSpace(request.UState.Text) != "" {
+			return strings.TrimSpace(request.UState.Text)
+		}
+		for _, span := range ustateSpans(xmlText) {
+			if span.Type == k {
+				return span.Text
+			}
+		}
+		return ""
+	}
+	luaOf := func(k string) string {
+		if k == key && strings.TrimSpace(request.LuaText) != "" {
+			return strings.TrimSpace(request.LuaText)
+		}
+		if body, ok := luaFunctionText(luaText, "OnGetUstate_"+k); ok {
+			return body
+		}
+		return ""
+	}
+
+	selfMade := buffSelfMadeSet(xmlText)
+	deps := buffDependencies(key, luaText, selfMade)
+
+	items := []buffMergeItem{}
+	add := func(k string) error {
+		node := nodeOf(k)
+		if node != "" {
+			if _, err := validateUStateNode(node, k); err != nil {
+				return fmt.Errorf("状态 %s：%w", k, err)
+			}
+		}
+		lua := luaOf(k)
+		if node == "" && lua == "" {
+			return nil
+		}
+		items = append(items, buffMergeItem{Type: k, Node: node, Lua: lua})
+		return nil
+	}
+	if err := add(key); err != nil {
+		return nil, err
+	}
+	for _, dep := range deps {
+		if err := add(dep); err != nil {
 			return nil, err
 		}
 	}
-	lua = strings.TrimSpace(request.LuaText)
-	if node == "" || lua == "" {
-		a, err := buffSourceArchive(state, client, folder)
-		if err != nil {
-			return nil, err
-		}
-		if node == "" {
-			text, err := a.text("ustate.xml")
-			if err != nil {
-				return nil, err
-			}
-			for _, span := range ustateSpans(text) {
-				if span.Type == key {
-					node = span.Text
-					break
-				}
-			}
-		}
-		if lua == "" {
-			if lt, err := a.text(buffLuaEntry); err == nil {
-				if body, ok := luaFunctionText(lt, "OnGetUstate_"+key); ok {
-					lua = body
-				}
-			}
-		}
-	}
-	if node == "" && lua == "" {
+	if len(items) == 0 {
 		return nil, fmt.Errorf("状态 %s 没有可导出的内容", key)
 	}
-	manifest := buffMergeManifest{
-		Format:  "openkfo-buff-merge",
-		Version: 1,
-		Buffs:   []buffMergeItem{{Type: key, Node: node, Lua: lua}},
-	}
+
+	manifest := buffMergeManifest{Format: "openkfo-buff-merge", Version: 1, Buffs: items}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return nil, err
@@ -926,7 +954,52 @@ func weaponBuffExport(request Request, state *weaponState, client, folder string
 	if err = atomicWrite(path, raw); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": path, "manifest": manifest}, nil
+	return map[string]any{"path": path, "manifest": manifest, "dependencies": deps}, nil
+}
+
+// buffSelfMadeSet 找出 ustate.xml 里注释含「自建」的状态号集合。
+func buffSelfMadeSet(text string) map[string]bool {
+	result := map[string]bool{}
+	for _, span := range ustateSpans(text) {
+		if strings.Contains(ustateNameBefore(text, span.Start), "自建") {
+			result[span.Type] = true
+		}
+	}
+	return result
+}
+
+// buffDependencies 递归收集 root 状态（及其自建依赖）的 lua 里 AddUstate/DelUstate
+// 引用的自建状态号，返回按状态号排序的依赖列表（不含 root 自身）。原生状态只
+// 当「引用」，不递归也不导出——目标包应当已自带。
+func buffDependencies(root, luaText string, selfMade map[string]bool) []string {
+	seen := map[string]bool{}
+	found := map[string]bool{}
+	var walk func(key string)
+	walk = func(key string) {
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		body, ok := luaFunctionText(luaText, "OnGetUstate_"+key)
+		if !ok {
+			return
+		}
+		for _, m := range buffStateRefRe.FindAllStringSubmatch(body, -1) {
+			dep := m[1]
+			if dep == key || !selfMade[dep] {
+				continue
+			}
+			found[dep] = true
+			walk(dep)
+		}
+	}
+	walk(root)
+	out := make([]string, 0, len(found))
+	for k := range found {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return numericLess(out[i], out[j]) })
+	return out
 }
 
 // weaponBuffPackages 列出之前导出的 buff 合并包。
@@ -962,9 +1035,11 @@ func weaponBuffPackages(folder string) (any, error) {
 	return map[string]any{"directory": dir, "packages": packages}, nil
 }
 
-// weaponBuffMergeImport 把 buff 合并包里的状态与 lua 函数合并进当前客户端的
-// config.spf2。与武器合并同理：直接改客户端当前配置包，保留线上已有的其它改动。
-func weaponBuffMergeImport(request Request, client string) (any, error) {
+// weaponBuffMergeImport 把 buff 合并包里的状态与 lua 函数合并进当前客户端。
+// 走「合并到编辑集 → weaponBuffApply」的完整管线，而不是直接改客户端包——
+// 这样才会同步基线哈希，避免 GM 后续「基线备份已变化」死锁，也不会在下次
+// 应用时把导入的状态抹掉。
+func weaponBuffMergeImport(request Request, state *weaponState, client, folder, statePath string) (any, error) {
 	if strings.TrimSpace(request.SourcePath) == "" {
 		return nil, fmt.Errorf("缺少合并包路径")
 	}
@@ -972,15 +1047,14 @@ func weaponBuffMergeImport(request Request, client string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, err := loadArchive(configPath(client))
+
+	// 用「基线 + 编辑集」当前视图判断新增 / 覆盖。
+	a, err := buffSourceArchive(state, client, folder)
 	if err != nil {
 		return nil, err
 	}
-	if err = target.verify(); err != nil {
-		return nil, err
-	}
 	existing := map[string]bool{}
-	if text, err := target.text("ustate.xml"); err == nil {
+	if text, err := a.text("ustate.xml"); err == nil {
 		for _, span := range ustateSpans(text) {
 			existing[span.Type] = true
 		}
@@ -993,34 +1067,35 @@ func weaponBuffMergeImport(request Request, client string) (any, error) {
 			newStates = append(newStates, b.Type)
 		}
 	}
-	merged, err := applyBuffMerge(target, manifest)
+
+	// 合并进编辑集（upsert），随其它编辑集一起渲染、校验、落盘。
+	if state.UStates == nil {
+		state.UStates = map[string]UStateEdit{}
+	}
+	if state.LuaScripts == nil {
+		state.LuaScripts = map[string]map[string]string{}
+	}
+	if state.LuaScripts[buffLuaEntry] == nil {
+		state.LuaScripts[buffLuaEntry] = map[string]string{}
+	}
+	for _, b := range manifest.Buffs {
+		state.UStates[b.Type] = UStateEdit{Action: "upsert", Text: b.Node}
+		if strings.TrimSpace(b.Lua) != "" {
+			state.LuaScripts[buffLuaEntry]["OnGetUstate_"+b.Type] = b.Lua
+		}
+	}
+
+	result, err := weaponBuffApply(state, client, folder, statePath)
 	if err != nil {
 		return nil, err
 	}
-	data, err := compactArchive(merged.data)
-	if err != nil {
-		return nil, err
-	}
-	verified, err := parseArchive(data)
-	if err != nil {
-		return nil, err
-	}
-	if err = verified.verify(); err != nil {
-		return nil, err
-	}
-	current, err := os.ReadFile(configPath(client))
-	if err != nil {
-		return nil, err
-	}
-	backup := configPath(client) + ".pre-buff-merge-" + time.Now().Format("20060102-150405") + ".bak"
-	if err = atomicWrite(backup, current); err != nil {
-		return nil, err
-	}
-	if err = atomicWrite(configPath(client), data); err != nil {
-		return nil, err
+	if resultMap, ok := result.(map[string]any); ok {
+		resultMap["new"] = newStates
+		resultMap["modified"] = modified
+		resultMap["message"] = fmt.Sprintf("已合并 %d 个状态（新增 %d、覆盖 %d）到当前客户端", len(manifest.Buffs), len(newStates), len(modified))
+		return resultMap, nil
 	}
 	return map[string]any{
-		"backup":   backup,
 		"new":      newStates,
 		"modified": modified,
 		"message":  fmt.Sprintf("已合并 %d 个状态（新增 %d、覆盖 %d）到当前客户端", len(manifest.Buffs), len(newStates), len(modified)),

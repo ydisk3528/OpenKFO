@@ -368,7 +368,12 @@ end''';
           'lua': luaCtrl.text,
         }),
       );
-      setState(() => message = '已导出合并包：${r['path']}');
+      final manifest = r['manifest'] as Map?;
+      final buffs = manifest?['buffs'] as List? ?? [];
+      final types = buffs.map((b) => '${(b as Map)['type']}').join('、');
+      setState(
+        () => message = '已导出 ${buffs.length} 个状态（$types）：${r['path']}',
+      );
     });
   }
 

@@ -800,6 +800,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   String _comboText(dynamic value) => value == null ? '' : '$value';
 
+  /// level 展示：整数值不带小数点（2），小数原样（0.25）。
+  String _levelText(dynamic value) {
+    if (value == null) return '1';
+    final n = (value as num).toDouble();
+    return n == n.roundToDouble() ? '${n.round()}' : '$n';
+  }
+
   /// 把服务端返回的规则摊平进三份草稿。编辑自建武器时，官方已经写好的块
   /// 会作为起点（服务端只允许改写自建武器与未登记限制的武器）。
   void syncComboRuleDraft() {
@@ -4537,24 +4544,23 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 ),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: DropdownButtonFormField<int>(
-                    isExpanded: true,
-                    key: ValueKey(
-                      '${weapon!['id']}-${rule['stage']}-level-${rule['level']}',
-                    ),
-                    initialValue: rule['level'],
-                    decoration: const InputDecoration(labelText: '等级'),
-                    items: [1, 2, 3]
-                        .map(
-                          (v) => DropdownMenuItem(value: v, child: Text('$v')),
-                        )
-                        .toList(),
-                    onChanged: enabled && rule['buff'] != 0
-                        ? (v) => setState(() {
-                            rule['level'] = v;
-                            dirty = true;
-                          })
-                        : null,
+                  child: TextFormField(
+                    key: ValueKey('$editorVersion-${rule['stage']}-level'),
+                    initialValue: _levelText(rule['level']),
+                    enabled: enabled && rule['buff'] != 0,
+                    decoration: const InputDecoration(labelText: '等级/倍率'),
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    validator: (v) {
+                      final n = double.tryParse(v ?? '');
+                      return n == null || n < 0.1 || n > 999
+                          ? '请输入 0.1–999（如 0.25）'
+                          : null;
+                    },
+                    onChanged: (v) => setState(() {
+                      rule['level'] = double.tryParse(v) ?? 0;
+                      dirty = true;
+                    }),
                   ),
                 ),
                 const SizedBox(width: 12),
