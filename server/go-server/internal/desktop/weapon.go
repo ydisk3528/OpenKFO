@@ -1767,6 +1767,25 @@ const (
 	staleLockAge    = 2 * time.Minute
 )
 
+// readOnlyWeaponOperation 列出只读 statePath、不落盘的操作。这些不进写锁：
+// 它们并发执行安全，而 GM 界面上切一把武器就会同时拉起好几个，串行排队
+// 会让紧随其后的请求撞上锁等待上限。带 _set / _apply / _create / _save /
+// _rebase / import / publish 的操作一律是写，不走这里。
+func readOnlyWeaponOperation(operation string) bool {
+	switch operation {
+	case "weapon_catalog",
+		"weapon_combo_chain",
+		"weapon_combo_rule",
+		"weapon_stage_track",
+		"weapon_remap_options",
+		"weapon_template_resolve",
+		"weapon_effect_view",
+		"weapon_effects_preview":
+		return true
+	}
+	return false
+}
+
 func acquireWeaponLock(folder string) (func(), error) {
 	lockPath := filepath.Join(folder, "editing.lock")
 	deadline := time.Now().Add(weaponLockWait)
@@ -1802,11 +1821,17 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if err := os.MkdirAll(folder, 0700); err != nil {
 		return nil, err
 	}
-	release, err := acquireWeaponLock(folder)
-	if err != nil {
-		return nil, err
+	// 只读操作不抢写锁。整个 handler 原先全程持锁，而 GM 切武器时会并发发多个
+	// 请求（chain + rule），一个解析包要十几到几十秒，排在后面的必然撞上 30 秒
+	// 上限报「另一项武器配置操作正在进行」。这些操作只读 statePath、不落盘，
+	// 加了锁也保护不了什么。
+	if !readOnlyWeaponOperation(request.Operation) {
+		release, err := acquireWeaponLock(folder)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
-	defer release()
 	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" || request.Operation == "weapon_effect_view" {
 		return weaponEffects(request, client, items, folder)
 	}

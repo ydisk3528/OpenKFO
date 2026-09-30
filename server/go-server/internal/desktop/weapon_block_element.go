@@ -32,13 +32,18 @@ type BlockElement struct {
 }
 
 type blockElementSpec struct {
-	Tag      string
-	Group    string // guard / state
-	Label    string
-	Single   bool // 每块至多一条
-	Keys     map[string]bool
-	Required []string
-	Ranges   map[string][2]int
+	Tag   string
+	Group string // guard / state
+	// Placement 限定元素在动作块里必须出现的位置。全库实测三类分布完全不重叠：
+	//   ""          → <AnmDesc> 的直接子节点（霸体/无敌/穿人/AddBuff 等，施加给自己）
+	//   "hit"       → <LockedAttackHit>（命中判定点）内部，作用对象是被打中的人
+	//   "condition" → <Condition>（动作段的触发条件）内部，是判断而不是施加
+	Placement string
+	Label     string
+	Single    bool // 每块至多一条
+	Keys      map[string]bool
+	Required  []string
+	Ranges    map[string][2]int
 	// Frames 是需要校验「前 ≤ 后」的字段对（空字符串表示不需要）。
 	Frames [2]string
 	// 子元素（ForceField 的 <ScopeBox>）。空 Tag 表示叶子节点。
@@ -73,19 +78,19 @@ var blockElementSpecs = []blockElementSpec{
 		Frames:   [2]string{"startframe", "endframe"},
 	},
 	{
-		Tag: "UState", Group: "state", Label: "自身状态", Single: false,
+		Tag: "UState", Group: "state", Label: "命中给目标挂状态", Placement: "hit", Single: false,
 		Keys:     map[string]bool{"id": true, "level": true, "duration": true, "skillproid": true},
 		Required: []string{"id"},
 		Ranges:   map[string][2]int{"id": {1, 99999}, "level": {-999, 999}, "duration": {0, 9999999}},
 	},
 	{
-		Tag: "Ustate", Group: "state", Label: "自身状态（简写）", Single: false,
+		Tag: "Ustate", Group: "state", Label: "触发条件（需拥有该状态）", Placement: "condition", Single: false,
 		Keys:     map[string]bool{"id": true},
 		Required: []string{"id"},
 		Ranges:   map[string][2]int{"id": {1, 99999}},
 	},
 	{
-		Tag: "AddBuff", Group: "state", Label: "自身状态（带帧）", Single: false,
+		Tag: "AddBuff", Group: "state", Label: "施放时给自己挂状态", Single: false,
 		Keys: map[string]bool{"frame": true, "Scope": true, "UnNormalState": true,
 			"UStateLevel": true, "UStateLastCycle": true, "Param1": true, "skillproid": true},
 		Required: []string{"frame", "UnNormalState"},
@@ -147,7 +152,7 @@ func blockElementGroups() []map[string]any {
 		}
 		items := groups[at]["elements"].([]map[string]any)
 		groups[at]["elements"] = append(items, map[string]any{
-			"tag": spec.Tag, "label": spec.Label, "single": spec.Single,
+			"tag": spec.Tag, "label": spec.Label, "single": spec.Single, "placement": spec.Placement,
 		})
 	}
 	return groups
@@ -185,20 +190,92 @@ func blockElementText(element BlockElement) string {
 	return head + strings.Join(childParts, " ") + " /></" + element.Tag + ">"
 }
 
+// 动作块里的两种「容器」节点——全库实测三类标签的分布完全不重叠：
+//
+//	<UState> 只出现在 <LockedAttackHit>（命中判定点）内 → 命中时给被打中的人挂状态；
+//	<Ustate> 只出现在 <Condition>（触发条件）内 → 拥有该状态时这段动作才成立；
+//	<AddBuff> 与霸体/无敌/穿人等在 <AnmDesc> 直属层。
+//
+// 采集与写回都必须限定在各自的容器里，否则会把「条件」或「命中给目标」误当成自身状态。
+var lockedAttackHitPattern = regexp.MustCompile(`(?s)<LockedAttackHit\b[^>]*>.*?</LockedAttackHit\s*>`)
+var conditionPattern = regexp.MustCompile(`(?s)<Condition\b[^>]*>.*?</Condition\s*>`)
+var lockedAttackHitOpenPattern = regexp.MustCompile(`<LockedAttackHit\b[^>]*>`)
+var conditionOpenPattern = regexp.MustCompile(`<Condition\b[^>]*>`)
+
+// blockElementContainer 返回 placement 对应的容器名与成对正则（"" 表示 AnmDesc 直属层）。
+func blockElementContainer(placement string) (name string, whole, open *regexp.Regexp) {
+	switch placement {
+	case "hit":
+		return "LockedAttackHit", lockedAttackHitPattern, lockedAttackHitOpenPattern
+	case "condition":
+		return "Condition", conditionPattern, conditionOpenPattern
+	default:
+		return "", nil, nil
+	}
+}
+
+// blockElementContainers 列出块内所有容器（整体区间，用于排除直属层里的误匹配）。
+func blockElementContainers(block string) [][]int {
+	spans := append([][]int{}, lockedAttackHitPattern.FindAllStringIndex(block, -1)...)
+	spans = append(spans, conditionPattern.FindAllStringIndex(block, -1)...)
+	return spans
+}
+
+// inAnySpan reports whether offset falls inside any of the given [start,end) spans.
+func inAnySpan(spans [][]int, offset int) bool {
+	for _, span := range spans {
+		if offset >= span[0] && offset < span[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// blockElementWritable 报告块里有没有该 placement 需要的容器（直属层永远可以写）。
+func blockElementWritable(block string, spec blockElementSpec) bool {
+	name, whole, _ := blockElementContainer(spec.Placement)
+	if name == "" {
+		return true
+	}
+	return whole.FindStringIndex(block) != nil
+}
+
 // rewriteBlockElements replaces every live instance of a tag with the given
 // list, keeping the position of the first one. Commented-out instances are left
 // alone. An empty list deletes them all.
+//
+// 替换范围按标签的 Placement 限定：需要容器的标签（UState 在 <LockedAttackHit>、
+// Ustate 在 <Condition>）只动容器内的实例；直属层标签则跳过落在容器里的同名实例。
+// 块里没有需要的容器时一个字节都不动（调用方负责给出可读的错误）。
 func rewriteBlockElements(block string, tag string, fresh []BlockElement) (string, bool) {
 	pattern, ok := blockElementPatterns[tag]
 	if !ok {
 		return block, false
 	}
+	spec, _ := blockElementSpecFor(tag)
+	containerName, containerPattern, containerOpen := blockElementContainer(spec.Placement)
+	containers := [][]int{}
+	if containerName != "" {
+		containers = containerPattern.FindAllStringIndex(block, -1)
+		if len(containers) == 0 {
+			return block, false
+		}
+	}
+	excluded := blockElementContainers(block)
 	matches := pattern.FindAllStringIndex(block, -1)
 	locs := make([][]int, 0, len(matches))
 	for _, loc := range matches {
-		if !insideComment(block, loc[0]) {
-			locs = append(locs, loc)
+		if insideComment(block, loc[0]) {
+			continue
 		}
+		if containerName == "" {
+			if inAnySpan(excluded, loc[0]) {
+				continue
+			}
+		} else if !inAnySpan(containers, loc[0]) {
+			continue
+		}
+		locs = append(locs, loc)
 	}
 	if len(locs) == 0 && len(fresh) == 0 {
 		return block, false
@@ -209,11 +286,21 @@ func rewriteBlockElements(block string, tag string, fresh []BlockElement) (strin
 	}
 	joined := strings.Join(pieces, "\n\t")
 	if len(locs) == 0 {
-		end := strings.LastIndex(block, "</AnmDesc")
-		if end < 0 {
+		// 没有实例：直属层插到 </AnmDesc> 前，带容器的插进第一个容器内。
+		insert := -1
+		if containerName == "" {
+			insert = strings.LastIndex(block, "</AnmDesc")
+		} else if head := containerOpen.FindStringIndex(block); head != nil {
+			insert = head[1]
+		}
+		if insert < 0 {
 			return block, false
 		}
-		return block[:end] + joined + "\n\t" + block[end:], true
+		if containerName == "" {
+			return block[:insert] + joined + "\n\t" + block[insert:], true
+		}
+		// 容器内多缩进一层，跟数据里 <LockedAttackHit>/<Condition> 的写法一致。
+		return block[:insert] + "\n\t\t" + joined + "\n\t" + block[insert:], true
 	}
 	// 删除第一段时把它前面的缩进/换行一起收掉，避免留下空行。
 	start := locs[0][0]
@@ -463,8 +550,14 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 			}
 			sort.Strings(tags)
 			for _, tag := range tags {
-				if _, known := blockElementSpecFor(tag); !known {
+				spec, known := blockElementSpecFor(tag)
+				if !known {
 					return nil, fmt.Errorf("不支持的元素 %s", tag)
+				}
+				if len(edits[tag]) > 0 && !blockElementWritable(rewritten, spec) {
+					container, _, _ := blockElementContainer(spec.Placement)
+					return nil, fmt.Errorf("状态 %d 的动作块里没有 <%s>，写不了「%s」；命中给目标挂状态请用 AddBuff",
+						stage, container, spec.Label)
 				}
 				next, touched := rewriteBlockElements(rewritten, tag, edits[tag])
 				if touched {
@@ -590,7 +683,7 @@ func comboBlockElements(info *inspection, weaponID string) []map[string]any {
 			elements := []map[string]any{}
 			for _, spec := range blockElementSpecs {
 				for _, blk := range blocks {
-					for _, found := range blockElementsOf(blk.node, spec.Tag) {
+					for _, found := range blockElementsOf(blk.node, spec) {
 						entry := map[string]any{"tag": spec.Tag, "attrs": found.Attrs}
 						if len(found.Box) > 0 {
 							entry["box"] = found.Box
@@ -612,40 +705,55 @@ func comboBlockElements(info *inspection, weaponID string) []map[string]any {
 	return result
 }
 
-// blockElementsOf reads the raw ordered attributes of every live instance of a
-// tag under a block node, including the first child element's attributes when
-// the spec declares one (ForceField 的 <ScopeBox>).
-func blockElementsOf(node *xmlNode, tag string) []BlockElement {
-	spec, _ := blockElementSpecFor(tag)
+// blockElementsOf reads the raw ordered attributes of every live instance of the
+// spec's tag **inside the container the spec allows** —— UState 只认
+// <LockedAttackHit> 内的、Ustate 只认 <Condition> 内的，其余标签只认 <AnmDesc>
+// 直属子节点；也包括首个子元素的属性（ForceField 的 <ScopeBox>）。
+func blockElementsOf(node *xmlNode, spec blockElementSpec) []BlockElement {
 	found := []BlockElement{}
-	var walk func(*xmlNode)
-	walk = func(current *xmlNode) {
-		if current == nil || current.comment {
-			return
+	appendOne := func(current *xmlNode) {
+		element := BlockElement{Tag: spec.Tag}
+		for _, attr := range current.attrs {
+			element.Attrs = append(element.Attrs, FrameSwitchAttr{Key: attr.Name.Local, Value: attr.Value})
 		}
-		if current.tag == tag {
-			element := BlockElement{Tag: tag}
-			for _, attr := range current.attrs {
-				element.Attrs = append(element.Attrs, FrameSwitchAttr{Key: attr.Name.Local, Value: attr.Value})
+		if spec.ChildTag != "" {
+			for _, child := range current.children {
+				if child.tag != spec.ChildTag {
+					continue
+				}
+				for _, attr := range child.attrs {
+					element.Box = append(element.Box, FrameSwitchAttr{Key: attr.Name.Local, Value: attr.Value})
+				}
+				break
 			}
-			if spec.ChildTag != "" {
+		}
+		found = append(found, element)
+	}
+	if containerName, _, _ := blockElementContainer(spec.Placement); containerName != "" {
+		var walk func(*xmlNode)
+		walk = func(current *xmlNode) {
+			if current == nil || current.comment {
+				return
+			}
+			if current.tag == containerName {
 				for _, child := range current.children {
-					if child.tag != spec.ChildTag {
-						continue
+					if child != nil && !child.comment && child.tag == spec.Tag {
+						appendOne(child)
 					}
-					for _, attr := range child.attrs {
-						element.Box = append(element.Box, FrameSwitchAttr{Key: attr.Name.Local, Value: attr.Value})
-					}
-					break
 				}
 			}
-			found = append(found, element)
+			for _, child := range current.children {
+				walk(child)
+			}
 		}
-		for _, child := range current.children {
-			walk(child)
+		walk(node)
+		return found
+	}
+	for _, child := range node.children {
+		if child != nil && !child.comment && child.tag == spec.Tag {
+			appendOne(child)
 		}
 	}
-	walk(node)
 	return found
 }
 

@@ -18,10 +18,14 @@ func element(tag string, pairs ...string) BlockElement {
 // 改写规则：整组替换但保留第一处的位置；空列表 = 删除；本来没有就插到 </AnmDesc> 前；
 // 注释里的示例不算数。**没有实例 + 空列表 = 一点都不动**（不写空配置）。
 func TestRewriteBlockElementsReplaceDeleteInsert(t *testing.T) {
+	addBuff := func(state string) string {
+		return blockElementText(element("AddBuff", "frame", "1", "Scope", "1", "UnNormalState", state,
+			"UStateLevel", "1", "UStateLastCycle", "1500", "Param1", ""))
+	}
 	block := `<AnmDesc id="119">` + "\n\t" +
 		`<FakeUnAttack startframe="0" endframe="20" />` + "\n\t" +
-		`<UState id="192" level="1" duration="1500"/>` + "\n\t" +
-		`<UState id="406" level="1" duration="800"/>` + "\n\t" +
+		addBuff("192") + "\n\t" +
+		addBuff("406") + "\n\t" +
 		`<Audio frame="1" audioid="1" />` + "\n</AnmDesc>"
 
 	// 霸体：整条替换（单实例），位置不变。
@@ -33,23 +37,24 @@ func TestRewriteBlockElementsReplaceDeleteInsert(t *testing.T) {
 	if !strings.Contains(out, `endframe="30"`) || !strings.Contains(out, "<Audio") {
 		t.Fatalf("新值没写进去或兄弟节点被动了：%s", out)
 	}
-	if strings.Index(out, "<FakeUnAttack") > strings.Index(out, "<UState") {
+	if strings.Index(out, "<FakeUnAttack") > strings.Index(out, "<AddBuff") {
 		t.Fatalf("应当保留原位置：%s", out)
 	}
 
-	// 自身状态：列表整组替换（两条 → 一条），仍保留第一处位置。
-	out2, changed := rewriteBlockElements(out, "UState",
-		[]BlockElement{element("UState", "id", "354", "level", "2", "duration", "3000")})
-	if !changed || strings.Count(out2, "<UState") != 1 {
-		t.Fatalf("UState 应当只剩一条：%s", out2)
+	// 自身状态（AddBuff 位于 AnmDesc 直属层）：整组替换（两条 → 一条），保留第一处位置。
+	out2, changed := rewriteBlockElements(out, "AddBuff",
+		[]BlockElement{element("AddBuff", "frame", "3", "Scope", "1", "UnNormalState", "354",
+			"UStateLevel", "2", "UStateLastCycle", "3000", "Param1", "")})
+	if !changed || strings.Count(out2, "<AddBuff") != 1 {
+		t.Fatalf("AddBuff 应当只剩一条：%s", out2)
 	}
-	if strings.Contains(out2, `id="406"`) {
+	if strings.Contains(out2, `UnNormalState="406"`) {
 		t.Fatalf("旧的那条应当被替换掉：%s", out2)
 	}
 
 	// 空列表 = 删除，且不留空行。
-	out3, changed := rewriteBlockElements(out2, "UState", nil)
-	if !changed || strings.Contains(out3, "<UState") || strings.Contains(out3, "\n\n") {
+	out3, changed := rewriteBlockElements(out2, "AddBuff", nil)
+	if !changed || strings.Contains(out3, "<AddBuff") || strings.Contains(out3, "\n\n") {
 		t.Fatalf("空列表应当删干净且不留空行：%q", out3)
 	}
 
@@ -71,6 +76,68 @@ func TestRewriteBlockElementsReplaceDeleteInsert(t *testing.T) {
 	if _, changed := rewriteBlockElements(commented, "BodyGraze", nil); changed {
 		t.Fatal("注释里的元素不该被当成真数据")
 	}
+}
+
+// UState 只住在 <LockedAttackHit> 里（命中给目标）、Ustate 只住在 <Condition> 里（触发条件）。
+// 这条约束是本次修复的核心：以前两者会被当成「自身状态」采集和改写，语义全错。
+func TestBlockElementPlacementScopedToContainer(t *testing.T) {
+	block := `<AnmDesc id="7">` +
+		`<Condition><Ustate id="354" /></Condition>` +
+		`<LockedAttackHit frame="1" damage="3"><UState id="192" level="1" duration="1500"/></LockedAttackHit>` +
+		`<Audio frame="1" /></AnmDesc>`
+
+	// 换命中点里的 UState：只动 <LockedAttackHit> 内那一条。
+	out, changed := rewriteBlockElements(block, "UState",
+		[]BlockElement{element("UState", "id", "406", "level", "2", "duration", "800")})
+	if !changed || !strings.Contains(out, `id="406"`) || strings.Count(out, "<UState") != 1 {
+		t.Fatalf("命中点的 UState 应当被整组替换：%s", out)
+	}
+	if !strings.Contains(out, `<Ustate id="354" />`) || !strings.Contains(out, "<Condition>") {
+		t.Fatalf("Condition 里的 Ustate 不该被动：%s", out)
+	}
+
+	// 换条件里的 Ustate：只动 <Condition> 内那一条。
+	out2, changed := rewriteBlockElements(block, "Ustate",
+		[]BlockElement{element("Ustate", "id", "420")})
+	if !changed || !strings.Contains(out2, `id="420"`) {
+		t.Fatalf("条件的 Ustate 应当被替换：%s", out2)
+	}
+	if !strings.Contains(out2, `<UState id="192"`) {
+		t.Fatalf("命中点的 UState 不该被动：%s", out2)
+	}
+
+	// 块里没有对应容器 → 不写也不插（由调用方给出可读错误）。
+	noContainers := `<AnmDesc id="7"><Audio frame="1" /></AnmDesc>`
+	if _, changed := rewriteBlockElements(noContainers, "UState",
+		[]BlockElement{element("UState", "id", "192", "level", "1", "duration", "1500")}); changed {
+		t.Fatal("没有 <LockedAttackHit> 时不该写 UState")
+	}
+	if _, changed := rewriteBlockElements(noContainers, "Ustate",
+		[]BlockElement{element("Ustate", "id", "354")}); changed {
+		t.Fatal("没有 <Condition> 时不该写 Ustate")
+	}
+	if blockElementWritable(noContainers, blockElementSpecOf(t, "UState")) {
+		t.Fatal("没有 <LockedAttackHit> 时应当报告不可写，交给调用方报错")
+	}
+
+	// 有容器但里面空着 → 插进容器内，而不是 </AnmDesc> 前。
+	emptyHit := `<AnmDesc id="7"><LockedAttackHit frame="1" damage="3"></LockedAttackHit>` +
+		`<Audio frame="1" /></AnmDesc>`
+	out3, changed := rewriteBlockElements(emptyHit, "UState",
+		[]BlockElement{element("UState", "id", "192", "level", "1", "duration", "1500")})
+	if !changed || strings.Index(out3, "<UState") > strings.Index(out3, "</LockedAttackHit") {
+		t.Fatalf("UState 必须落在 <LockedAttackHit> 之内：%s", out3)
+	}
+}
+
+// blockElementSpecOf 取规格，取不到直接失败（测试用）。
+func blockElementSpecOf(t *testing.T, tag string) blockElementSpec {
+	t.Helper()
+	spec, ok := blockElementSpecFor(tag)
+	if !ok {
+		t.Fatalf("缺少规格：%s", tag)
+	}
+	return spec
 }
 
 // 校验：只检查编辑集里出现过的状态/标签；单实例标签不许重复；必填/范围/帧序都要过。
