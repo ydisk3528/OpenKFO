@@ -479,7 +479,7 @@ class _LauncherPageState extends State<LauncherPage> {
           ]),
         )),
         const SizedBox(height: 16),
-        if (ready && service.realms.isNotEmpty) ...[
+        if (ready && service.realms.length > 1) ...[
           DropdownButtonFormField<String>(value: service.realmId, isExpanded: true,
             decoration: const InputDecoration(labelText: '选择区服', floatingLabelBehavior: FloatingLabelBehavior.never, border: OutlineInputBorder(), isDense: true),
             items: service.realms.map((r) => DropdownMenuItem<String>(value: r['id'] as String, child: Text(r['name'] as String))).toList(),

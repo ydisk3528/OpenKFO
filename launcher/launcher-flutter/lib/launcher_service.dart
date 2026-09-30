@@ -80,7 +80,15 @@ class LauncherService {
     config = Map<String, dynamic>.from(_baseConfig)
       ..['url'] = r['url']
       ..['server_certificate'] = p.join('launcher-files', certificate);
-    if (r['id'] != realms.first['id']) config['credentials_scope'] = 'realm:${r['id']}:${r['url']}';
+    final updateUrl = r['launcher_update_version_url'];
+    if (updateUrl != null) {
+      final uri = Uri.tryParse(updateUrl as String);
+      if (uri == null || uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
+        throw Exception('区服更新地址无效，请重新下载完整启动器。');
+      }
+      config['launcher_update_version_url'] = updateUrl;
+    }
+    if (realms.length == 1 || r['id'] != realms.first['id']) config['credentials_scope'] = 'realm:${r['id']}:${r['url']}';
     realmId = r['id'];
     verifiedRelease = null;
   }
