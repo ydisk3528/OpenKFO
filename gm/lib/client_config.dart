@@ -138,24 +138,19 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
     if (value != 'package' && base.text.isNotEmpty) await task(loadCatalog);
   }
 
-  Future<void> chooseBase() async {
+  Future<void> chooseClient() async {
     if (!await confirmChanges() || !mounted) return;
-    final f = await openFile(
-      acceptedTypeGroups: [
-        const XTypeGroup(label: '客户端配置', extensions: ['spf2']),
-      ],
-    );
-    if (f == null || !mounted) return;
-    setState(() {
-      base.text = f.path;
-      revision = '';
-      record = null;
-      file = null;
-      files = [];
-      records = [];
-      invalidate();
+    final path = await getDirectoryPath(initialDirectory: resourceRoot.text);
+    if (path == null || !mounted) return;
+    await task(() async {
+      await widget.api({'operation': 'client_directory_set', 'directory': path});
+      await reloadSource();
     });
-    if (category != 'package') await task(loadCatalog);
+  }
+
+  Future<void> reloadSource() async {
+    await loadPlans();
+    if (base.text.isNotEmpty && category != 'package') await loadCatalog();
   }
 
   Future<void> leave() async {
@@ -173,7 +168,7 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
         builder: (_) => WeaponConfigPage(api: widget.api),
       ),
     );
-    if (mounted) await loadPlans();
+    if (mounted) await task(reloadSource);
   }
 
   Future<void> openWeaponMerge() async {
@@ -190,7 +185,7 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
         ),
       ),
     );
-    if (mounted) await loadPlans();
+    if (mounted) await task(reloadSource);
   }
 
   Map<String, dynamic> request() => {
@@ -232,9 +227,19 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
         setState(() {
           plans = r['plans'];
           folder = r['folder'];
-          if (base.text.isEmpty) {
-            base.text = r['base'] ?? '';
-            resourceRoot.text = r['resource_root'] ?? '';
+          final nextBase = r['base'] ?? '';
+          final nextRoot = r['resource_root'] ?? '';
+          if (base.text != nextBase || resourceRoot.text != nextRoot) {
+            base.text = nextBase;
+            resourceRoot.text = nextRoot;
+            revision = '';
+            files = [];
+            records = [];
+            file = null;
+            record = null;
+            dirty = false;
+            selected.clear();
+            invalidate();
           }
         });
     } catch (e) {
@@ -418,41 +423,16 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
       children: [
         Row(
           children: [
-            Expanded(child: input(base, '基础 config.spf2', enabled: false)),
+            Expanded(child: input(base, '当前游戏配置（跟随 GM 客户端目录）', enabled: false)),
             const SizedBox(width: 12),
             OutlinedButton.icon(
-              onPressed: busy ? null : chooseBase,
+              onPressed: busy ? null : chooseClient,
               icon: const Icon(Icons.file_open),
-              label: const Text('选择基础配置'),
+              label: const Text('更换客户端'),
             ),
           ],
         ),
-        Row(
-          children: [
-            Expanded(
-              child: input(
-                resourceRoot,
-                '资源目录（模型、贴图与音效）',
-                onChanged: (_) => setState(invalidate),
-              ),
-            ),
-            const SizedBox(width: 12),
-            OutlinedButton.icon(
-              onPressed: busy
-                  ? null
-                  : () async {
-                      final path = await getDirectoryPath();
-                      if (path != null && mounted)
-                        setState(() {
-                          resourceRoot.text = path;
-                          invalidate();
-                        });
-                    },
-              icon: const Icon(Icons.folder_open),
-              label: const Text('选择资源目录'),
-            ),
-          ],
-        ),
+        input(resourceRoot, '统一资源目录（模型、贴图与音效）', enabled: false),
         Align(
           alignment: Alignment.centerLeft,
           child: Text(
@@ -766,8 +746,10 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
         ),
         actions: [
           IconButton(
-            tooltip: '刷新方案',
-            onPressed: busy ? null : () => task(loadPlans),
+            tooltip: '重新读取',
+            onPressed: busy ? null : () async {
+              if (await confirmChanges() && mounted) await task(reloadSource);
+            },
             icon: const Icon(Icons.refresh),
           ),
         ],

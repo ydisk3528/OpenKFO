@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,6 +160,38 @@ func TestClientConfigBuiltArchiveIsolation(t *testing.T) {
 		b, e := output.raw(name)
 		if e != nil || !bytes.Equal(a, b) {
 			t.Fatalf("unselected entry changed: %s: %v", name, e)
+		}
+	}
+}
+
+func TestClientConfigUsesSharedDirectory(t *testing.T) {
+	root := t.TempDir()
+	settings := filepath.Join(root, "gm-settings.json")
+	directory := filepath.Join(root, "current-client")
+	raw, _ := json.Marshal(map[string]string{"client_directory": directory})
+	if err := os.WriteFile(settings, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	folder := filepath.Join(root, "runtime-local", "client-config-plans")
+	if err := os.MkdirAll(folder, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal(clientConfigRequest{Base: "old.spf2", ResourceRoot: "old-client"})
+	if err := os.WriteFile(filepath.Join(folder, "project.json"), stale, 0600); err != nil {
+		t.Fatal(err)
+	}
+	admin := Admin{Root: root, GMSettings: settings}
+	result, err := admin.clientConfig("client_config_plans", clientConfigRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.(map[string]any)
+	if got["base"] != filepath.Join(directory, "Data", "config.spf2") || got["resource_root"] != directory {
+		t.Fatalf("wrong source: %v", got)
+	}
+	for _, request := range []clientConfigRequest{{Base: "old.spf2"}, {ResourceRoot: "old-client"}} {
+		if _, err := admin.clientConfig("client_config_save", request); err == nil || !strings.Contains(err.Error(), "目录已变化") {
+			t.Fatalf("stale edit accepted: %v", err)
 		}
 	}
 }

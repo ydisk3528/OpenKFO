@@ -313,18 +313,20 @@ func (admin *Admin) clientConfig(operation string, r clientConfigRequest) (any, 
 	if err != nil {
 		return nil, err
 	}
+	directory := admin.clientDirectoryValue()
+	base := ""
+	if directory != "" {
+		base = filepath.Join(directory, "Data", "config.spf2")
+	}
 	if operation == "client_config_plans" {
-		project := clientConfigRequest{}
-		if raw, e := os.ReadFile(filepath.Join(folder, "project.json")); e == nil {
-			_ = json.Unmarshal(raw, &project)
+		return map[string]any{"plans": plans, "folder": folder, "base": base, "resource_root": directory}, nil
+	}
+	if directory != "" {
+		if (r.Base != "" && !strings.EqualFold(filepath.Clean(r.Base), base)) ||
+			(r.ResourceRoot != "" && !strings.EqualFold(filepath.Clean(r.ResourceRoot), directory)) {
+			return nil, fmt.Errorf("GM 客户端目录已变化，请重新读取配置；当前目录：%s", directory)
 		}
-		if project.Base == "" {
-			if directory := admin.clientDirectoryValue(); directory != "" {
-				project.ResourceRoot = directory
-				project.Base = filepath.Join(directory, "Data", "config.spf2")
-			}
-		}
-		return map[string]any{"plans": plans, "folder": folder, "base": project.Base, "resource_root": project.ResourceRoot}, nil
+		r.Base, r.ResourceRoot = base, directory
 	}
 	if r.Base == "" {
 		return nil, fmt.Errorf("请选择基础 config.spf2")
@@ -337,10 +339,6 @@ func (admin *Admin) clientConfig(operation string, r clientConfigRequest) (any, 
 		return nil, err
 	}
 	if operation == "client_config_catalog" {
-		raw, _ := json.Marshal(clientConfigRequest{Base: r.Base, ResourceRoot: r.ResourceRoot})
-		if e := atomicWrite(filepath.Join(folder, "project.json"), raw); e != nil {
-			return nil, e
-		}
 		files := []string{}
 		for f := range a.entries {
 			if configCategory(f) == r.Category {

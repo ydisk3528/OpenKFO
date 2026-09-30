@@ -53,4 +53,27 @@ void main() {
   expect(tester.takeException(),isNull);
  });
 
+
+ testWidgets('refresh follows shared client directory instead of retaining old source', (tester) async {
+  tester.view.physicalSize=const Size(1500,1800);tester.view.devicePixelRatio=1;
+  addTearDown(tester.view.resetPhysicalSize);addTearDown(tester.view.resetDevicePixelRatio);
+  var directory='client-a';
+  final loaded=<String>[];
+  Future<dynamic> api(Map<String,dynamic> req) async {
+   if(req['operation']=='client_config_plans') return {'plans':[],'folder':'plans','base':'$directory/Data/config.spf2','resource_root':directory};
+   if(req['operation']=='client_config_catalog') {
+    loaded.add(req['client_config']['base']);
+    return {'files':[],'revision':directory,'plans':[],'folder':'plans'};
+   }
+   throw StateError('unexpected request');
+  }
+  await tester.pumpWidget(MaterialApp(home:ClientConfigPage(api:api)));await tester.pumpAndSettle();
+  directory='client-b';
+  await tester.tap(find.byTooltip('重新读取'));await tester.pumpAndSettle();
+  expect(loaded,['client-a/Data/config.spf2','client-b/Data/config.spf2']);
+  expect(find.text('选择基础配置'),findsNothing);
+  expect(find.text('更换客户端'),findsOneWidget);
+  expect(tester.takeException(),isNull);
+ });
+
 }
