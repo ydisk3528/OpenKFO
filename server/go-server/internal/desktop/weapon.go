@@ -776,7 +776,7 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 type Rule struct {
 	Stage      int                           `json:"stage"`
 	Buff       int                           `json:"buff"`
-	Level      int                           `json:"level"`
+	Level      float64                       `json:"level"`
 	Duration   int                           `json:"duration"`
 	Properties map[string]map[string]float64 `json:"properties,omitempty"`
 }
@@ -805,7 +805,9 @@ func validateRules(rules []Rule, weapon Weapon) ([]Rule, error) {
 	}
 	for _, rule := range rules {
 		stage, ok := stages[rule.Stage]
-		if !ok || seen[rule.Stage] || !includes(weapon.BuffIDs, rule.Buff) || rule.Level < 1 || rule.Level > 3 || rule.Duration < 1 || rule.Duration > 60000 {
+		// level 走小数：自建 buff 拿它当倍率用（如 0.25/0.5/0.75/1.0），
+		// 原生状态则用 1~3 的等级。范围放宽到 0.1~999，只挡住 0、负数与 NaN。
+		if !ok || seen[rule.Stage] || !includes(weapon.BuffIDs, rule.Buff) || math.IsNaN(rule.Level) || math.IsInf(rule.Level, 0) || rule.Level < 0.1 || rule.Level > 999 || rule.Duration < 1 || rule.Duration > 60000 {
 			return nil, fmt.Errorf("效果参数超出范围")
 		}
 		seen[rule.Stage] = true
@@ -1178,7 +1180,9 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 						duration = 0
 					}
 					prop.set("UnNormalState", strconv.Itoa(buff))
-					prop.set("UStateLevel", strconv.Itoa(level))
+					// Level 是 float64：整数写 "2"（不带小数点），小数（如 0.25）
+					// 用 FormatFloat -1 精度原样写出，客户端按数值解析。
+					prop.set("UStateLevel", strconv.FormatFloat(level, 'f', -1, 64))
 					prop.set("UStateLastCycle", strconv.Itoa(duration))
 				}
 				for _, field := range propertyFields {

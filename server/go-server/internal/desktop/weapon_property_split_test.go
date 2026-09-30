@@ -3,6 +3,7 @@ package desktop
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -216,6 +217,110 @@ func TestSplitClonedPropertiesLeavesOtherStatesAlone(t *testing.T) {
 			t.Fatalf("非 2xxx 段 %s 被动过：%s -> %s", header[i], before[i], after[i])
 		}
 	}
+}
+
+// TestRepairOrphanedEntryProperties 确认「块已分身但出招属性丢失」能被补回。
+//
+// 实测背景：253400 克隆自 253043（缈音），早期版本分块时漏掉了出招属性，导致
+// 2071（2201993）/2081（2204994）按了键没反应。这里先用 splitClonedProperties
+// 正常分身，再人为删掉出招属性模拟脏数据，验证修复函数能按供体补回。
+func TestRepairOrphanedEntryProperties(t *testing.T) {
+	client := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")
+	if client == "" {
+		t.Skip("set OPENKFO_WEAPON_TEST_CLIENT")
+	}
+	source, err := loadArchive(filepath.Join(client, "Data", "config.spf2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := map[string]Blueprint{
+		"253999": {ID: 253999, Name: "修复测试", Type: "7", Donor: 253043},
+	}
+	state := &weaponState{Created: created}
+
+	// 先建武器行（applyBlueprints 复制供体动作行），再正常分身，
+	// 得到「块 + 出招属性」都齐全的结果。
+	blueprinted, err := applyBlueprints(source, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	split, err := splitClonedProperties(blueprinted, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 取分身后 253999 的 2071 动作号，它应当已独立于供体 2201033。
+	splitRow := weaponRow(t, split, "253999")
+	header := actionHeader(t, split)
+	action := ""
+	for i, st := range header {
+		if strings.TrimSpace(st) == "2071" && i < len(splitRow) {
+			action = strings.TrimSpace(splitRow[i])
+		}
+	}
+	if action == "" || action == "2201033" {
+		t.Skip("分身后 2071 动作号未独立，跳过")
+	}
+
+	// 模拟早期脏数据：把这条出招属性从 skillproperty.xml 里删掉。
+	broken := stripEntryProperty(t, split, action)
+
+	// 修复。
+	fixed, err := repairOrphanedEntryProperties(broken, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	props, err := newActionCloneProperties(fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props.properties[action]) != 1 {
+		t.Fatalf("修复后 %s 出招属性未补回", action)
+	}
+	if props.properties[action][0].get("SkillProId") != action {
+		t.Fatalf("修复后的出招属性 SkillProId 不对：%s", props.properties[action][0].get("SkillProId"))
+	}
+
+	// 幂等：再修一次不应再变。
+	again, err := repairOrphanedEntryProperties(fixed, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != fixed {
+		t.Fatal("修复应为幂等")
+	}
+}
+
+// stripEntryProperty 从 skillproperty.xml 里删除 SkillProId == action 的整条
+// PropertyItem，返回新归档。只删一条（出招属性本就唯一）。
+func stripEntryProperty(t *testing.T, a *archive, action string) *archive {
+	t.Helper()
+	text, err := a.text("skillproperty.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?s)\n?[ \t]*<PropertyItem\b[^>]*SkillProId\s*=\s*"` + regexp.QuoteMeta(action) + `"[^>]*?(/>|>.*?</PropertyItem\s*>)`)
+	if !re.MatchString(text) {
+		t.Fatalf("找不到出招属性 %s 可删除", action)
+	}
+	text = re.ReplaceAllString(text, "")
+	if _, err := parseXML(text); err != nil {
+		t.Fatalf("删除后 skillproperty.xml 不合法：%v", err)
+	}
+	replacements := map[string][]byte{}
+	if replacements["skillproperty.xml"], err = encodeText(text); err != nil {
+		t.Fatal(err)
+	}
+	data, err := a.replace(replacements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := parseArchive(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // ---- 测试辅助 ----

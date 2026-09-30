@@ -395,8 +395,15 @@ func splitClonedProperties(base *archive, state *weaponState) (*archive, error) 
 			// 供体的行保持不动。
 			newActionNumber := ""
 			if len(survey.blockUsers[action]) > 1 {
-				// actionCloneProperties 要的是完整动作号（前缀+3 位块号）。
-				cloneID := entryProperties.allocate(prefix+parts[1], reservedBlocks)
+				// actionCloneProperties 要的是完整动作号（前缀+3 位补零块号）。
+				// actionKey 会丢掉块号的前导零（"033" -> "33"），这里必须按
+				// itemact/出招属性的记法补回，否则 allocate 按错号查出招属性，
+				// 块分身就会漏掉出招属性（按了键没反应）。
+				blockNum, convErr := strconv.Atoi(parts[1])
+				if convErr != nil {
+					return nil, fmt.Errorf("动作键异常：%s", action)
+				}
+				cloneID := entryProperties.allocate(prefix+fmt.Sprintf("%03d", blockNum), reservedBlocks)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", prefix)
 				}
@@ -571,6 +578,117 @@ func splitClonedProperties(base *archive, state *weaponState) (*archive, error) 
 	// 交给 actionCloneProperties 落盘：它会先给块分身补上出招属性记录
 	// （skillproperty.xml 里 2201504 -> 2201996 这种），再写归档。
 	data, err := entryProperties.replace(base, replacements)
+	if err != nil {
+		return nil, err
+	}
+	return parseArchive(data)
+}
+
+// repairOrphanedEntryProperties 修复「块已分身但出招属性丢失」的历史脏数据。
+//
+// 背景：早期版本的分块逻辑（已废弃的 reserveBlockID 方案）只复制了动作块和块内
+// skillproid（命中属性），漏掉了出招属性 —— skillproperty.xml 里 SkillProId =
+// 完整动作号的那条 PropertyItem。客户端播动画前先按完整动作号查出招属性，查不到
+// 就直接取消出招（按了键没反应）。已分身的块会被主循环的 ownedExclusively 判真
+// 而跳过，所以这条补属性必须单独跑。
+//
+// 规则：自建武器 2xxx 段的当前动作号在 skillproperty.xml 里没有出招属性、而供体
+// 同状态的动作号恰好有一条出招属性时，克隆一份改号补回。幂等：补过后出招属性已
+// 存在，不会再补。
+func repairOrphanedEntryProperties(base *archive, state *weaponState) (*archive, error) {
+	if len(state.Created) == 0 {
+		return base, nil
+	}
+	entry, err := newActionCloneProperties(base)
+	if err != nil {
+		return nil, err
+	}
+	actionText, err := base.text("itemact.txt")
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(actionText, "\n")
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("动作表为空")
+	}
+	header := strings.Split(strings.TrimSuffix(lines[0], "\r"), "\t")
+	rows := map[string][]string{}
+	for _, line := range lines[1:] {
+		cols := strings.Split(strings.TrimSuffix(line, "\r"), "\t")
+		if len(cols) < 2 || cols[0] == "" {
+			continue
+		}
+		rows[cols[0]] = cols
+	}
+
+	added := []string{}
+	seen := map[string]bool{}
+	for _, blueprint := range state.Created {
+		weaponID := strconv.Itoa(blueprint.ID)
+		row := rows[weaponID]
+		if row == nil {
+			continue
+		}
+		donorRow := rows[strconv.Itoa(blueprint.Donor)]
+		if donorRow == nil {
+			continue
+		}
+		for j, stateNum := range header {
+			if j < 2 || j >= len(row) || !stageNeedsSplit(stateNum) {
+				continue
+			}
+			action := strings.TrimSpace(row[j])
+			if action == "" || action == "0" || len(action) <= 4 {
+				continue
+			}
+			// 出招属性已存在 → 幂等跳过。
+			if len(entry.properties[action]) != 0 {
+				continue
+			}
+			donorAction := ""
+			if j < len(donorRow) {
+				donorAction = strings.TrimSpace(donorRow[j])
+			}
+			if donorAction == "" || donorAction == "0" {
+				continue
+			}
+			// 供体同状态必须恰好一条出招属性，否则无处可克隆。
+			if len(entry.properties[donorAction]) != 1 {
+				continue
+			}
+			if seen[action] {
+				continue
+			}
+			seen[action] = true
+			node := entry.properties[donorAction][0].clone()
+			node.set("SkillProId", action)
+			encoded, err := node.serialize()
+			if err != nil {
+				return nil, err
+			}
+			added = append(added, encoded)
+		}
+	}
+	if len(added) == 0 {
+		return base, nil
+	}
+	sort.Strings(added)
+	text, err := base.text("skillproperty.xml")
+	if err != nil {
+		return nil, err
+	}
+	if strings.Count(text, "</SkillProperty>") != 1 {
+		return nil, fmt.Errorf("技能属性表结构错误")
+	}
+	text = strings.Replace(text, "</SkillProperty>", "\n"+strings.Join(added, "\n")+"\n</SkillProperty>", 1)
+	if _, err := parseXML(text); err != nil {
+		return nil, err
+	}
+	replacements := map[string][]byte{}
+	if replacements["skillproperty.xml"], err = encodeText(text); err != nil {
+		return nil, err
+	}
+	data, err := base.replace(replacements)
 	if err != nil {
 		return nil, err
 	}

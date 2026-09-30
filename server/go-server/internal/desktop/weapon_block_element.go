@@ -813,8 +813,9 @@ func ustateNameBefore(text string, offset int) string {
 		name = name[:at]
 	}
 	name = strings.TrimSpace(name)
-	if len(name) > 40 {
-		name = name[:40]
+	// 按字符（rune）截断，避免把中文字节拦腰切断产生乱码。
+	if runes := []rune(name); len(runes) > 40 {
+		name = string(runes[:40]) + "…"
 	}
 	return name
 }

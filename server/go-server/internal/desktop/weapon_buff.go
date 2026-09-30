@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -440,6 +441,7 @@ func buffSourceArchive(state *weaponState, client, folder string) (*archive, err
 
 type buffRow struct {
 	Type      string   `json:"type"`
+	Name      string   `json:"name"` // ustate.xml 里紧跟 <Data> 的策划注释（中文名/说明）
 	Icon      string   `json:"icon"`
 	Active    string   `json:"active_state"`
 	Transform string   `json:"transform_stop"`
@@ -464,7 +466,7 @@ func buffRows(state *weaponState, a *archive) ([]buffRow, error) {
 	rows := []buffRow{}
 	for _, span := range ustateSpans(text) {
 		attr := ustateAttrRe.FindStringSubmatch(span.Text)
-		row := buffRow{Type: span.Type}
+		row := buffRow{Type: span.Type, Name: ustateNameBefore(text, span.Start)}
 		if attr != nil {
 			if m := ustateIconRe.FindStringSubmatch(attr[1]); m != nil {
 				row.Icon = m[1]
@@ -653,6 +655,46 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 		}
 		sort.Strings(icons)
 		return map[string]any{"icons": icons, "directory": dir, "prefix": "Picture\\AbnormalState\\"}, nil
+
+	case "weapon_buff_image":
+		// 客户端把 PNG 的前 32 字节换成了自有标记 + 混淆 IHDR，直接读文件是
+		// 坏图。走 cachedTexture 还原头部后回传 base64，前端用 Image.memory 显示。
+		names := request.Keys
+		if len(names) == 0 && strings.TrimSpace(request.Key) != "" {
+			names = []string{request.Key}
+		}
+		if len(names) < 1 || len(names) > 24 {
+			return nil, fmt.Errorf("每次读取 1–24 个图标")
+		}
+		root, err := filepath.EvalSymlinks(filepath.Join(client, "Data", "UI", "Picture", "AbnormalState"))
+		if err != nil {
+			return nil, err
+		}
+		images := map[string]string{}
+		for _, name := range names {
+			// 只接受纯文件名，避免 ../ 之类的越界。
+			base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
+			if base == "" || base == "." || base == ".." || !strings.EqualFold(filepath.Ext(base), ".png") {
+				continue
+			}
+			path, err := filepath.EvalSymlinks(filepath.Join(root, base))
+			if err != nil {
+				continue
+			}
+			if rel, err := filepath.Rel(root, path); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			cached, err := cachedTexture(path)
+			if err != nil {
+				continue
+			}
+			data, err := os.ReadFile(cached)
+			if err != nil {
+				continue
+			}
+			images[base] = base64.StdEncoding.EncodeToString(data)
+		}
+		return map[string]any{"images": images}, nil
 
 	case "weapon_buff_api":
 		return map[string]any{"groups": buffPlayerAPI(), "events": buffEventHooks()}, nil

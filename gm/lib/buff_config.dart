@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 /// 状态/Buff 定制：可视化编辑 ustate.xml 的 <Data> 节点 + 对应
@@ -64,7 +67,9 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
     try {
       final r = Map<String, dynamic>.from(await _call('weapon_buff_icons'));
       if (!mounted) return;
-      setState(() => icons = (r['icons'] as List? ?? []).cast<String>());
+      setState(() {
+        icons = (r['icons'] as List? ?? []).cast<String>();
+      });
     } catch (e) {
       // 图标列表拉不到不致命
     }
@@ -159,6 +164,101 @@ end''';
     }
     nodeCtrl.text = t;
     setState(() {});
+  }
+
+  /// 图标缩略图：客户端的 PNG 前 32 字节被自有标记混淆，不能直接 Image.file，
+  /// 必须让后端走 cachedTexture 还原头部后回传解码好的字节。
+  Widget _iconThumb(String name) {
+    final image = _image(name, 32);
+    return Tooltip(
+      message: name,
+      child: InkWell(
+        onTap: busy ? null : () => _applyIcon(name),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: image,
+        ),
+      ),
+    );
+  }
+
+  /// 左侧列表缩略图：把节点里的 Icon 路径（如
+  /// `Picture\AbnormalState\abnormalstate8.png`）取文件名后交给后端解码。
+  Widget _listThumb(String icon, String type) {
+    final name = _iconName(icon);
+    final placeholder = Container(
+      width: 40,
+      height: 40,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        type.length > 3 ? type.substring(type.length - 3) : type,
+        style: const TextStyle(fontSize: 10),
+      ),
+    );
+    if (name == null) {
+      return Tooltip(message: '未绑定图标', child: placeholder);
+    }
+    return Tooltip(
+      message: icon,
+      child: SizedBox(width: 40, height: 40, child: _image(name, 40, fallback: placeholder)),
+    );
+  }
+
+  /// `Picture\AbnormalState\xxx.png` -> `xxx.png`；解析不到返回 null。
+  String? _iconName(String icon) {
+    if (icon.isEmpty) return null;
+    final name = icon.split(RegExp(r'[\\/]')).last.trim();
+    return name.isEmpty ? null : name;
+  }
+
+  /// 已解码图标的字节缓存（后端做过头部还原，可直接 Image.memory）。
+  final _images = <String, Future<Uint8List?>>{};
+
+  /// 取一张已解码的异常状态图标；拿不到时显示 [fallback] 或破图占位。
+  Widget _image(String name, double size, {Widget? fallback}) {
+    final future = _images.putIfAbsent(name, () async {
+      try {
+        final r = Map<String, dynamic>.from(
+          await _call('weapon_buff_image', {
+            'keys': [name],
+          }),
+        );
+        final data = (r['images'] as Map?)?[name];
+        if (data is String) return base64Decode(data);
+      } catch (_) {
+        // 单张图拉不到不致命
+      }
+      return null;
+    });
+    return FutureBuilder<Uint8List?>(
+      future: future,
+      builder: (c, s) {
+        if (s.connectionState != ConnectionState.done) {
+          return const Center(
+            child: SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          );
+        }
+        final bytes = s.data;
+        if (bytes == null) {
+          return fallback ??
+              const Center(child: Icon(Icons.broken_image_outlined, size: 16));
+        }
+        return Image.memory(bytes, fit: BoxFit.contain);
+      },
+    );
   }
 
   Future<void> _save() async {
@@ -382,18 +482,24 @@ end''';
                           itemBuilder: (c, i) {
                             final b = buffs[i] as Map;
                             final t = '${b['type']}';
+                            final name = '${b['name'] ?? ''}';
                             final edited = '${b['edited'] ?? ''}';
+                            final icon = '${b['icon'] ?? ''}';
                             return ListTile(
                               dense: true,
                               selected: selected == t,
-                              title: Text('状态 $t'),
+                              leading: _listThumb(icon, t),
+                              title: Text(
+                                name.isNotEmpty ? name : '状态 $t',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                               subtitle: Text(
                                 [
+                                  '状态 $t',
                                   if (edited.isNotEmpty) '[$edited]',
                                   if (b['lua_function'] == true) 'lua',
                                   if (b['created'] == true) '新增',
-                                  if ((b['icon'] ?? '').toString().isNotEmpty)
-                                    '${b['icon']}',
                                 ].where((e) => e.isNotEmpty).join(' · '),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -423,6 +529,14 @@ end''';
   }
 
   Widget _editor() {
+    String? selName;
+    for (final b in buffs) {
+      final m = b as Map;
+      if ('${m['type']}' == typeCtrl.text.trim()) {
+        final n = '${m['name'] ?? ''}';
+        if (n.isNotEmpty) selName = n;
+      }
+    }
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -439,22 +553,38 @@ end''';
               ),
             ),
             const SizedBox(width: 12),
-            Text('lua 函数：OnGetUstate_${typeCtrl.text.trim()}'),
-          ],
-        ),
-        const SizedBox(height: 8),
-        const Text('图标（点击替换节点里的 Icon）'),
-        Wrap(
-          spacing: 4,
-          runSpacing: 4,
-          children: [
-            for (final name in icons)
-              ActionChip(
-                label: Text(name),
-                onPressed: busy ? null : () => _applyIcon(name),
+            Expanded(
+              child: Text(
+                'lua 函数：OnGetUstate_${typeCtrl.text.trim()}',
+                overflow: TextOverflow.ellipsis,
               ),
+            ),
           ],
         ),
+        if (selName != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text('中文描述：$selName', style: const TextStyle(fontSize: 13)),
+          ),
+        const SizedBox(height: 8),
+        const Text('图标（点击缩略图替换节点里的 Icon）'),
+        const SizedBox(height: 4),
+        if (icons.isEmpty)
+          const Text('（未取到图标列表）', style: TextStyle(fontSize: 12))
+        else
+          SizedBox(
+            height: 168,
+            child: GridView.builder(
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 48,
+                mainAxisSpacing: 4,
+                crossAxisSpacing: 4,
+                childAspectRatio: 1,
+              ),
+              itemCount: icons.length,
+              itemBuilder: (c, i) => _iconThumb(icons[i]),
+            ),
+          ),
         const SizedBox(height: 12),
         Row(
           children: [

@@ -295,6 +295,11 @@ func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
 		if base, err = splitClonedProperties(base, state); err != nil {
 			return nil, err
 		}
+		// 历史脏数据兜底：块已分身但出招属性漏补时，按供体同状态补回，
+		// 否则该状态的大招按了键没反应。
+		if base, err = repairOrphanedEntryProperties(base, state); err != nil {
+			return nil, err
+		}
 	}
 	plan := comboPlanOf(state.Created, state.Combos)
 	for key := range plan {
