@@ -11,6 +11,7 @@ void main() {
     Map<String, dynamic>? saved;
     Future<dynamic> api(Map<String, dynamic> r) async {
       switch (r['operation']) {
+        case 'management_connection_get': return {'endpoint':'https://gm.example/gm/api'};
         case 'gm_version': return {'version':'1.1.0'};
         case 'catalog': return {'root':'X:/fixture','items':[{
           'key':'25:253002','kind':25,'id':253002,'name':'测试武器',
@@ -25,6 +26,8 @@ void main() {
       throw StateError('unexpected request');
     }
     await tester.pumpWidget(ItemManager(api:api));await tester.pumpAndSettle();
+    await tester.tap(find.text('选择玩家'));await tester.pumpAndSettle();
+    await tester.tap(find.text('测试 · test'));await tester.pumpAndSettle();
     await tester.tap(find.text('测试武器'));await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('修改服务器期限'));
     await tester.tap(find.text('修改服务器期限'));await tester.pumpAndSettle();

@@ -75,16 +75,21 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
                   decoration: const InputDecoration(labelText: '名称 / ID'),
                 ),
                 Expanded(
-                  child: ListView(
-                    children: catalog
-                        .where(
-                          (i) => '${i['name']} ${i['id']}'
-                              .toLowerCase()
-                              .contains(query.toLowerCase()),
-                        )
-                        .take(100)
-                        .map(
-                          (i) => ListTile(
+                  child: Builder(
+                    builder: (context) {
+                      final rows = catalog
+                          .where(
+                            (i) => '${i['name']} ${i['id']}'
+                                .toLowerCase()
+                                .contains(query.toLowerCase()),
+                          )
+                          .toList();
+                      return ListView.builder(
+                        itemCount: rows.length,
+                        itemBuilder: (_, index) {
+                          final i = rows[index];
+                          return ListTile(
+                            key: ValueKey(i['key']),
                             leading: pictures.preview(
                               Map<String, dynamic>.from(i),
                             ),
@@ -92,9 +97,10 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
                             subtitle: Text('${i['key']} · ${i['category']}'),
                             onTap: () =>
                                 Navigator.pop(c, Map<String, dynamic>.from(i)),
-                          ),
-                        )
-                        .toList(),
+                          );
+                        },
+                      );
+                    },
                   ),
                 ),
               ],
@@ -145,15 +151,22 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
                   ),
                 ),
                 Expanded(
-                  child: ListView(
-                    children: users
-                        .where(
-                          (u) => '${u['account']} ${u['nickname']} ${u['uid']}'
-                              .toLowerCase()
-                              .contains(query.toLowerCase()),
-                        )
-                        .map(
-                          (u) => CheckboxListTile(
+                  child: Builder(
+                    builder: (context) {
+                      final rows = users
+                          .where(
+                            (u) =>
+                                '${u['account']} ${u['nickname']} ${u['uid']}'
+                                    .toLowerCase()
+                                    .contains(query.toLowerCase()),
+                          )
+                          .toList();
+                      return ListView.builder(
+                        itemCount: rows.length,
+                        itemBuilder: (_, index) {
+                          final u = rows[index];
+                          return CheckboxListTile(
+                            key: ValueKey(u['uid']),
                             value: choice.contains(u['uid']),
                             title: Text('${u['account']} · ${u['nickname']}'),
                             subtitle: Text('UID ${u['uid']}'),
@@ -162,9 +175,10 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
                                   ? choice.add(u['uid'])
                                   : choice.remove(u['uid']);
                             }),
-                          ),
-                        )
-                        .toList(),
+                          );
+                        },
+                      );
+                    },
                   ),
                 ),
               ],
@@ -312,7 +326,9 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
       for (var offset = 0; offset < targets.length; offset += 20) {
         final group = targets.skip(offset).take(20).toList();
         if (stop || !mounted) break;
-        setState(() => current = '正在发放第 ${offset + 1}–${offset + group.length} 人');
+        setState(
+          () => current = '正在发放第 ${offset + 1}–${offset + group.length} 人',
+        );
         final result = await widget.api({
           'operation': 'grant_batch_send_many',
           'id': id,
@@ -433,62 +449,61 @@ class _BatchGrantPageState extends State<BatchGrantPage> {
                   ],
                 ),
                 Expanded(
-                  child: ListView(
-                    children: items
-                        .map(
-                          (i) => Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 6),
-                            child: Row(
-                              children: [
-                                i['key'] == 'currency:ticket'
-                                    ? const Icon(Icons.payments)
-                                    : pictures.preview(i),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text('${i['name']}\n${i['key']}'),
+                  child: ListView.builder(
+                    itemCount: items.length,
+                    itemBuilder: (_, index) {
+                      final i = items[index];
+                      return Padding(
+                        key: ValueKey(i['key']),
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          children: [
+                            i['key'] == 'currency:ticket'
+                                ? const Icon(Icons.payments)
+                                : pictures.preview(i),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text('${i['name']}\n${i['key']}')),
+                            SizedBox(
+                              width: 120,
+                              child: TextFormField(
+                                key: ValueKey('${i['key']}-quantity'),
+                                initialValue: '${i['quantity']}',
+                                enabled: !locked,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: '每人数量',
                                 ),
-                                SizedBox(
-                                  width: 120,
-                                  child: TextFormField(
-                                    key: ValueKey('${i['key']}-quantity'),
-                                    initialValue: '${i['quantity']}',
-                                    enabled: !locked,
-                                    keyboardType: TextInputType.number,
-                                    decoration: const InputDecoration(
-                                      labelText: '每人数量',
-                                    ),
-                                    onChanged: (v) =>
-                                        i['quantity'] = int.tryParse(v) ?? 0,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                SizedBox(
-                                  width: 145,
-                                  child: i['key'] == 'currency:ticket'
-                                      ? const Text('直接增加余额')
-                                      : TextFormField(
-                                          key: ValueKey('${i['key']}-days'),
-                                          initialValue: '${i['days']}',
-                                          enabled: !locked,
-                                          keyboardType: TextInputType.number,
-                                          decoration: const InputDecoration(
-                                            labelText: '期限（限时道具）',
-                                          ),
-                                          onChanged: (v) =>
-                                              i['days'] = int.tryParse(v) ?? 0,
-                                        ),
-                                ),
-                                IconButton(
-                                  onPressed: locked
-                                      ? null
-                                      : () => setState(() => items.remove(i)),
-                                  icon: const Icon(Icons.delete_outline),
-                                ),
-                              ],
+                                onChanged: (v) =>
+                                    i['quantity'] = int.tryParse(v) ?? 0,
+                              ),
                             ),
-                          ),
-                        )
-                        .toList(),
+                            const SizedBox(width: 12),
+                            SizedBox(
+                              width: 145,
+                              child: i['key'] == 'currency:ticket'
+                                  ? const Text('直接增加余额')
+                                  : TextFormField(
+                                      key: ValueKey('${i['key']}-days'),
+                                      initialValue: '${i['days']}',
+                                      enabled: !locked,
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(
+                                        labelText: '期限（限时道具）',
+                                      ),
+                                      onChanged: (v) =>
+                                          i['days'] = int.tryParse(v) ?? 0,
+                                    ),
+                            ),
+                            IconButton(
+                              onPressed: locked
+                                  ? null
+                                  : () => setState(() => items.remove(i)),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                 ),
                 FilledButton(

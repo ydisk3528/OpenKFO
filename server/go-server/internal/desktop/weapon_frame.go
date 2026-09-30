@@ -136,6 +136,8 @@ func rewriteFrameSwitches(block string, fresh []FrameSwitch) (string, bool) {
 
 // retitleBlock rewrites the id of an <AnmDesc> open tag, used when a shared
 // block is cloned into a private one.
+var anmTitleIDPattern = regexp.MustCompile(`\bid\s*=\s*(?:"[^"]*"|[^\s>]+)`)
+
 func retitleBlock(block string, id int) string {
 	end := strings.Index(block, ">")
 	if end < 0 {
@@ -145,7 +147,7 @@ func retitleBlock(block string, id int) string {
 	if !anmIDPattern.MatchString(head) {
 		return block
 	}
-	return anmIDPattern.ReplaceAllString(head, `id="`+strconv.Itoa(id)+`"`) + block[end+1:]
+	return anmTitleIDPattern.ReplaceAllString(head, `id="`+strconv.Itoa(id)+`"`) + block[end+1:]
 }
 
 // frameSwitchStageEdit is one stage's declared list. An empty list is

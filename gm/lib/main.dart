@@ -1,9 +1,9 @@
+import 'catalog_cache.dart';
 import 'config_inspect.dart';
 import 'client_config.dart';
 import 'notice_page.dart';
 import 'item_pictures.dart';
 import 'batch_grant.dart';
-import 'user_management.dart';
 import 'banned_words_config.dart';
 import 'gm_version.dart';
 import 'talisman_config.dart';
@@ -27,14 +27,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
-
-
 typedef Api = Future<dynamic> Function(Map<String, dynamic>);
 
 class Backend {
   Backend({this.root, this.localSettings});
   String? localSettings;
   String? root;
+  String _managementSession = "";
 
   /// Path of the gm-settings.json that supplied [root]. Handed to the backend so
   /// it can read and rewrite the client directory in the same file the GM is
@@ -84,7 +83,47 @@ class Backend {
     }
   }
 
-  Future<dynamic> call(Map<String, dynamic> input) async {
+  late final _catalogCache = CatalogCache(_callUncached, stamp: _catalogStamp);
+  Future<dynamic> call(Map<String, dynamic> input) {
+    resolvePaths();
+    return _catalogCache.call(input);
+  }
+
+  String _catalogStamp() {
+    final paths = <String>[
+      if (settingsPath != null) settingsPath!,
+      '$root/runtime-local/client-path.json',
+      '$root/runtime-local/weapon-config/settings.json',
+    ];
+    String? directory;
+    for (final name in paths.take(2)) {
+      try {
+        final file = File(name);
+        if (!file.existsSync()) continue;
+        final configured = jsonDecode(
+          file.readAsStringSync(),
+        )['client_directory'];
+        if (configured is String && configured.isNotEmpty) {
+          directory = Directory(configured).isAbsolute
+              ? configured
+              : '${name == settingsPath ? file.parent.path : root}/$configured';
+          break;
+        }
+      } catch (_) {
+        /* A damaged settings file must still reach the backend's error handling. */
+      }
+    }
+    directory ??= '$root/runtime-local/client';
+    paths.add('$directory/Data/config.spf2');
+    return paths
+        .map((path) {
+          final stat = File(path).statSync();
+          return '$path:${stat.size}:${stat.modified.microsecondsSinceEpoch}:${stat.changed.microsecondsSinceEpoch}';
+        })
+        .join('|');
+  }
+
+  Future<dynamic> _callUncached(Map<String, dynamic> input) async {
     resolvePaths();
     if (root == null) throw Exception('找不到服务器目录，请勿单独移动 EXE。');
     final executable = File(Platform.resolvedExecutable).parent;
@@ -103,12 +142,25 @@ class Backend {
     );
     final out = p.stdout.transform(utf8.decoder).join(),
         err = p.stderr.transform(utf8.decoder).join();
-    p.stdin.add(utf8.encode(jsonEncode({...input, 'gm_version': gmVersion})));
+    p.stdin.add(
+      utf8.encode(
+        jsonEncode({
+          ...input,
+          'gm_version': gmVersion,
+          'management_session_token': _managementSession,
+        }),
+      ),
+    );
     await p.stdin.close();
     final code = await p.exitCode, text = await out, error = await err;
     if (code != 0) throw Exception(error);
     final result = jsonDecode(text);
     if (result['ok'] != true) throw Exception(result['error']);
+    if (input['operation'] == 'management_connection_login') {
+      _managementSession = result['result']['token'] as String;
+    } else if (input['operation'] == 'management_connection_save') {
+      _managementSession = '';
+    }
     return result['result'];
   }
 }
@@ -171,14 +223,24 @@ class Manager extends StatefulWidget {
 
 class _ManagerState extends State<Manager> {
   late String environment;
-  String get environmentLabel => environment == 'local' ? '本地测试服' : '线上服务器';
+  String managementHost = '';
+  String get environmentLabel => environment == 'local'
+      ? '本地测试服'
+      : managementHost.isEmpty
+      ? '线上服务器'
+      : '线上 · $managementHost';
+  final _apis = <String, Api>{};
   Api get api {
     final target = environment;
-    return (request) => widget.api({
-      ...request,
-      'environment': target,
-      'gm_version': gmVersion,
-    });
+    return _apis.putIfAbsent(
+      target,
+      () =>
+          (request) => widget.api({
+            ...request,
+            'environment': target,
+            'gm_version': gmVersion,
+          }),
+    );
   }
 
   void switchEnvironment(String value) {
@@ -189,9 +251,6 @@ class _ManagerState extends State<Manager> {
       uid = null;
       accounts = [];
       inventory = [];
-      selected.clear();
-      pendingGrantId = null;
-      pendingGrantSignature = null;
       detail = null;
     });
     load();
@@ -199,19 +258,17 @@ class _ManagerState extends State<Manager> {
 
   List<Map<String, dynamic>> items = [], accounts = [], inventory = [];
   Map<String, dynamic>? detail;
-  final selected = <String>{},
-      search = TextEditingController(),
-      quantity = TextEditingController(text: '1'),
-      durationDays = TextEditingController(text: '365');
+  final search = TextEditingController();
   String group = '全部道具',
       gender = '全部性别',
       query = '',
       root = '',
       status = '正在读取完整物品表…';
   int? kind, uid;
+  bool loginPrompted = false;
   bool versionVerified = false;
   bool loading = true, busy = false, backpack = false, supportedOnly = false;
-  String? failure, pendingGrantSignature, pendingGrantId;
+  String? failure;
   @override
   void initState() {
     super.initState();
@@ -229,8 +286,6 @@ class _ManagerState extends State<Manager> {
   @override
   void dispose() {
     search.dispose();
-    quantity.dispose();
-    durationDays.dispose();
     super.dispose();
   }
 
@@ -243,27 +298,150 @@ class _ManagerState extends State<Manager> {
       versionVerified = false;
     });
     try {
+      if (!widget.onlineOnly) {
+        final connection = await api({
+          'operation': 'management_connection_get',
+        });
+        if (mounted)
+          setState(
+            () => managementHost =
+                '${connection['endpoint'] ?? connection['host'] ?? ''}',
+          );
+      }
       final version = await api({'operation': 'gm_version'});
       if (version['version'] != gmVersion) throw StateError(gmVersionError);
       if (mounted) setState(() => versionVerified = true);
-      final data = await api({'operation': 'catalog'}),
-          people = maps(await api({'operation': 'accounts'}));
+      final data = await api({'operation': 'catalog', '_refresh': true});
       if (!mounted) return;
       setState(() {
         items = maps(data['items']);
         root = data['root'];
-        accounts = people;
-        if (!accounts.any((a) => a['uid'] == uid)) {
-          uid = accounts.isEmpty ? null : accounts.first['uid'];
-        }
         status =
             '$environmentLabel · ${items.length} 件 / ${items.map((i) => i['kind']).toSet().length} 个细分类';
       });
-      await refreshInventory();
+      if (uid != null) await refreshInventory();
     } catch (e) {
       if (mounted) setState(() => failure = '$e');
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) {
+        setState(() => loading = false);
+        if (!loginPrompted && failure?.contains('GM 未登录') == true) {
+          loginPrompted = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) editManagementConnection();
+          });
+        }
+      }
+    }
+  }
+
+  Future<void> editManagementConnection() async {
+    final fields = <String, String>{};
+    try {
+      final data = await api({'operation': 'management_connection_get'});
+      for (final key in ['endpoint', 'account', 'password']) {
+        fields[key] = '${data[key] ?? ""}';
+      }
+      if (!mounted) return;
+      String? error;
+      var submitting = false;
+      final saved = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, update) => AlertDialog(
+            title: const Text('GM 服务器连接'),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('使用独立的 GM 管理账号登录；密码及登录会话不会保存到文件。'),
+                    for (final entry in {
+                      'endpoint': 'HTTPS 管理接口',
+                      'account': 'GM 账号',
+                      'password': '密码',
+                    }.entries)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 14),
+                        child: TextFormField(
+                          enabled: !submitting,
+                          initialValue: fields[entry.key],
+                          obscureText: entry.key == 'password',
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          onChanged: (value) => fields[entry.key] = value,
+                          decoration: InputDecoration(
+                            labelText: entry.value,
+                            border: const OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                    if (error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Text(
+                          error!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: submitting
+                    ? null
+                    : () => Navigator.pop(dialogContext, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: submitting
+                    ? null
+                    : () async {
+                        update(() {
+                          submitting = true;
+                          error = null;
+                        });
+                        try {
+                          await api({
+                            'operation': 'management_connection_login',
+                            'login_account': fields['account']!.trim(),
+                            'login_password': fields['password']!,
+                            'connection': {
+                              'endpoint': fields['endpoint']!.trim(),
+                            },
+                          });
+                          if (dialogContext.mounted)
+                            Navigator.pop(dialogContext, true);
+                        } catch (e) {
+                          if (dialogContext.mounted) update(() => error = '$e');
+                        } finally {
+                          if (dialogContext.mounted)
+                            update(() => submitting = false);
+                        }
+                      },
+                child: Text(submitting ? '正在登录…' : '登录'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (saved == true && mounted) {
+        setState(() {
+          uid = null;
+          accounts = [];
+          inventory = [];
+          detail = null;
+        });
+        await load();
+      }
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
     }
   }
 
@@ -384,87 +562,165 @@ class _ManagerState extends State<Manager> {
     );
   }
 
-  Future<void> grant() async {
-    if (busy || selected.isEmpty || uid == null) return;
-    final days = int.tryParse(durationDays.text);
-    if (days == null || days < 1 || days > 3650) {
-      message('装备期限须为 1–3650 天');
-      return;
+  Future<void> pickPlayer() async {
+    if (busy) return;
+    try {
+      if (accounts.isEmpty)
+        accounts = maps(await api({'operation': 'accounts'}));
+      if (!mounted) return;
+      var query = '';
+      final selected = await showDialog<int>(
+        context: context,
+        builder: (c) => StatefulBuilder(
+          builder: (c, update) {
+            final rows = accounts
+                .where(
+                  (a) => '${a['account']} ${a['nickname']} ${a['uid']}'
+                      .toLowerCase()
+                      .contains(query.toLowerCase()),
+                )
+                .toList();
+            return AlertDialog(
+              title: const Text('选择玩家'),
+              content: SizedBox(
+                width: 560,
+                height: 420,
+                child: Column(
+                  children: [
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: '账号 / 角色名 / UID',
+                      ),
+                      onChanged: (v) => update(() => query = v),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: rows.length,
+                        itemBuilder: (_, index) {
+                          final a = rows[index];
+                          return ListTile(
+                            title: Text('${a['nickname']} · ${a['account']}'),
+                            subtitle: Text('UID ${a['uid']}'),
+                            onTap: () => Navigator.pop(c, a['uid'] as int),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c),
+                  child: const Text('取消'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      if (selected == null || !mounted) return;
+      setState(() => uid = selected);
+      await refreshInventory();
+    } catch (e) {
+      message('$e');
     }
-    final count = int.tryParse(quantity.text);
-    if (count == null || count < 1 || count > 999) {
-      message('数量须为 1–999 的整数');
-      return;
-    }
-    final keys = selected.toList()..sort();
-    final target = uid!, account = accounts.firstWhere((a) => a['uid'] == uid);
-    final unready = items
-        .where((i) => selected.contains(i['key']) && i['supported'] != true)
-        .length;
-    final ok = await showDialog<bool>(
+  }
+
+  Future<void> showItem(Map<String, dynamic> item) async {
+    setState(() => detail = item);
+    await showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
-        title: Text('确认添加到$environmentLabel背包'),
-        content: Text(
-          '角色：${account['nickname']} (${account['account']})\n道具：${keys.length} 种\n武器、服装等装备各 $days 天；消耗道具各增加 $count 个。\n\n${unready > 0 ? '其中 $unready 种仅支持建档，使用效果待适配。\n\n' : ''}写入前保留事务快照。添加后请退出游戏并重新登录。',
+        title: const Text('道具详情'),
+        content: SizedBox(
+          width: 560,
+          height: 480,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                picture(detail!, 96),
+                const SizedBox(height: 16),
+                SelectableText(
+                  detail!['name'],
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  '编号 ${detail!['id']}\n${detail!['category']} · ${detail!['gender']}',
+                  style: const TextStyle(color: Colors.blueGrey, height: 1.7),
+                ),
+                const SizedBox(height: 12),
+                SelectableText(
+                  detail!['description'],
+                  style: const TextStyle(height: 1.7),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  detail!['supported']
+                      ? '已有基础背包支持，游戏实际效果以实测为准。'
+                      : '可添加到所选环境的背包；该类使用、开箱或活动效果尚未适配。',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.deepOrange,
+                    height: 1.6,
+                  ),
+                ),
+                ...inventory
+                    .where((r) => r['key'] == detail!['key'])
+                    .map(
+                      (r) => Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '已拥有 · ${expiryLabel(r)} · 数量 ${r['quantity']} · ${r['slot'] == 0 ? "未穿戴" : "已穿戴"}',
+                              style: const TextStyle(color: teal),
+                            ),
+                            TextButton(
+                              onPressed: busy || r['duration_state'] == 2
+                                  ? null
+                                  : () => editExpiry(r),
+                              child: const Text('修改服务器期限'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                Material(
+                  child: ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text('完整原始配置', style: TextStyle(fontSize: 13)),
+                    children: [
+                      SelectableText(
+                        (detail!['fields'] as List)
+                            .asMap()
+                            .entries
+                            .map((e) => '${e.key + 1}  ${e.value}')
+                            .join('\n'),
+                        style: const TextStyle(fontSize: 11, height: 1.6),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(c, false),
-            child: const Text('返回'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: const Text('确认添加'),
+            onPressed: () => Navigator.pop(c),
+            child: const Text('关闭'),
           ),
         ],
       ),
     );
-    if (ok != true || !mounted) return;
-    final signature = jsonEncode([target, keys, count, days]);
-    if (signature != pendingGrantSignature) {
-      pendingGrantSignature = signature;
-      pendingGrantId = '${DateTime.now().microsecondsSinceEpoch}-$target';
-    }
-    setState(() => busy = true);
-    try {
-      final r = await api({
-        'operation': 'grant',
-        'uid': target,
-        'keys': keys,
-        'quantity': count,
-        'days': days,
-        'id': pendingGrantId,
-      });
-      await refreshInventory();
-      if (!mounted) return;
-      setState(() {
-        selected.clear();
-        pendingGrantId = pendingGrantSignature = null;
-      });
-      message(
-        '添加 ${r['added']} 种，更新 ${r['updated']} 种，已有跳过 ${r['skipped']} 种。重新登录后生效。',
-      );
-      await showDialog<void>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: const Text('背包已更新'),
-          content: SelectableText(
-            '$environmentLabel背包已更新，请退出游戏并重新登录查看。\n\n操作审计：\n${r['backup']}',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      message('添加失败：$e');
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
   }
 
   Future<void> export() async {
@@ -533,7 +789,7 @@ class _ManagerState extends State<Manager> {
         child: Row(
           children: [
             SizedBox(
-              width: 196,
+              width: 224,
               child: Material(
                 color: ink,
                 child: ListView(
@@ -592,29 +848,6 @@ class _ManagerState extends State<Manager> {
                       ),
                       title: const Text('玩家管理'),
                       children: [
-                        ListTile(
-                          textColor: Colors.white, iconColor: Colors.white,
-                          leading: const Icon(Icons.campaign), title: const Text('普通通知'),
-                          onTap: busy ? null : () => Navigator.push(context, MaterialPageRoute<void>(
-                            builder: (_) => NoticePage(api: api, environment: environmentLabel))),
-                        ),
-                        ListTile(
-                          textColor: Colors.white,
-                          iconColor: Colors.white,
-                          leading: const Icon(Icons.manage_accounts),
-                          title: const Text('用户管理'),
-                          onTap: busy
-                              ? null
-                              : () => Navigator.push(
-                                  context,
-                                  MaterialPageRoute<void>(
-                                    builder: (_) => UserManagementPage(
-                                      api: api,
-                                      environment: environmentLabel,
-                                    ),
-                                  ),
-                                ),
-                        ),
                         ListTile(
                           textColor: Colors.white,
                           iconColor: Colors.white,
@@ -681,7 +914,7 @@ class _ManagerState extends State<Manager> {
                             textColor: Colors.white,
                             iconColor: Colors.white,
                             leading: const Icon(Icons.card_giftcard),
-                            title: const Text('点券设置与赠送'),
+                            title: const Text('点券余额设置'),
                             onTap: busy
                                 ? null
                                 : () => Navigator.push(
@@ -735,11 +968,21 @@ class _ManagerState extends State<Manager> {
                         ),
                         if (!widget.onlineOnly)
                           ListTile(
-                            textColor: Colors.white, iconColor: Colors.white,
+                            textColor: Colors.white,
+                            iconColor: Colors.white,
                             leading: const Icon(Icons.find_in_page),
                             title: const Text('配置解析'),
-                            onTap: busy ? null : () => Navigator.push(context,
-                              MaterialPageRoute<void>(builder: (_) => ConfigInspectPage(api: api, environment: environmentLabel))),
+                            onTap: busy
+                                ? null
+                                : () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => ConfigInspectPage(
+                                        api: api,
+                                        environment: environmentLabel,
+                                      ),
+                                    ),
+                                  ),
                           ),
                         ListTile(
                           textColor: Colors.white,
@@ -964,20 +1207,57 @@ class _ManagerState extends State<Manager> {
                       ],
                     ),
                     ExpansionTile(
-                      key: const PageStorageKey('管理设置'),
+                      key: const PageStorageKey('系统管理'),
                       textColor: Colors.white,
                       collapsedTextColor: Colors.white,
                       iconColor: Colors.white,
                       collapsedIconColor: Colors.white,
                       leading: const Icon(Icons.settings, color: Colors.white),
-                      title: const Text('管理设置'),
+                      title: const Text('系统管理'),
                       children: [
+                        if (!widget.onlineOnly)
+                          ListTile(
+                            textColor: Colors.white,
+                            iconColor: Colors.white,
+                            leading: const Icon(Icons.dns),
+                            title: const Text('GM 服务器连接'),
+                            onTap: busy || loading
+                                ? null
+                                : editManagementConnection,
+                          ),
+                        ListTile(
+                          textColor: Colors.white,
+                          iconColor: Colors.white,
+                          leading: const Icon(Icons.campaign),
+                          title: const Text('普通通知'),
+                          onTap: busy
+                              ? null
+                              : () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => NoticePage(
+                                      api: api,
+                                      environment: environmentLabel,
+                                    ),
+                                  ),
+                                ),
+                        ),
                         ListTile(
                           textColor: Colors.white,
                           iconColor: Colors.white,
                           leading: const Icon(Icons.error_outline),
                           title: const Text('登录错误提示'),
-                          onTap: busy ? null : () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => LoginErrorConfigPage(api: api, environment: environmentLabel))),
+                          onTap: busy
+                              ? null
+                              : () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => LoginErrorConfigPage(
+                                      api: api,
+                                      environment: environmentLabel,
+                                    ),
+                                  ),
+                                ),
                         ),
                         ListTile(
                           textColor: Colors.white,
@@ -1085,10 +1365,19 @@ class _ManagerState extends State<Manager> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '共 ${items.length} 件 · 已选 ${selected.length} 件',
+                                '共 ${items.length} 件 · 点击查看道具详情',
                                 style: const TextStyle(color: Colors.blueGrey),
                               ),
                             ],
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: busy ? null : pickPlayer,
+                          icon: const Icon(Icons.person_outline),
+                          label: Text(
+                            uid == null
+                                ? '选择玩家'
+                                : '${accounts.firstWhere((a) => a['uid'] == uid)['account']}',
                           ),
                         ),
                         SegmentedButton<bool>(
@@ -1160,20 +1449,6 @@ class _ManagerState extends State<Manager> {
                           selected: supportedOnly,
                           onSelected: (v) => setState(() => supportedOnly = v),
                         ),
-                        TextButton(
-                          onPressed: busy
-                              ? null
-                              : () => setState(
-                                  () => selected.addAll(
-                                    list.map((i) => i['key'] as String),
-                                  ),
-                                ),
-                          child: Text('选择当前 ${list.length} 件'),
-                        ),
-                        TextButton(
-                          onPressed: () => setState(() => selected.clear()),
-                          child: const Text('清空'),
-                        ),
                         IconButton(
                           tooltip: '导出当前结果和完整字段',
                           onPressed: widget.onlineOnly ? null : export,
@@ -1205,22 +1480,18 @@ class _ManagerState extends State<Manager> {
                                   mainAxisSpacing: 12,
                                 ),
                             itemBuilder: (context, index) {
-                              final i = list[index],
-                                  picked = selected.contains(i['key']);
+                              final i = list[index];
                               return Material(
                                 color: Colors.white,
                                 borderRadius: BorderRadius.circular(12),
                                 child: InkWell(
                                   borderRadius: BorderRadius.circular(12),
-                                  onTap: () => setState(() => detail = i),
+                                  onTap: () => showItem(i),
                                   child: Container(
                                     decoration: BoxDecoration(
                                       borderRadius: BorderRadius.circular(12),
                                       border: Border.all(
-                                        color: picked
-                                            ? teal
-                                            : const Color(0xFFE1E8ED),
-                                        width: picked ? 2 : 1,
+                                        color: const Color(0xFFE1E8ED),
                                       ),
                                     ),
                                     padding: const EdgeInsets.all(12),
@@ -1232,21 +1503,6 @@ class _ManagerState extends State<Manager> {
                                           children: [
                                             picture(i, 58),
                                             const Spacer(),
-                                            Checkbox(
-                                              value: picked,
-                                              onChanged: busy
-                                                  ? null
-                                                  : (v) => setState(() {
-                                                      if (v == true) {
-                                                        selected.add(i['key']);
-                                                      } else {
-                                                        selected.remove(
-                                                          i['key'],
-                                                        );
-                                                      }
-                                                      detail = i;
-                                                    }),
-                                            ),
                                           ],
                                         ),
                                         const SizedBox(height: 10),
@@ -1315,205 +1571,6 @@ class _ManagerState extends State<Manager> {
                       style: const TextStyle(
                         fontSize: 12,
                         color: Colors.blueGrey,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              width: 286,
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                border: Border(left: BorderSide(color: Color(0xFFE1E8ED))),
-              ),
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '发放到角色',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 14),
-                  DropdownButtonFormField<int>(
-                    initialValue: uid,
-                    key: ValueKey(uid),
-                    isExpanded: true,
-                    items: accounts
-                        .map(
-                          (a) => DropdownMenuItem<int>(
-                            value: a['uid'],
-                            child: Text(
-                              '${a['nickname']} · ${a['account']}',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: busy
-                        ? null
-                        : (v) async {
-                            setState(() => uid = v);
-                            try {
-                              await refreshInventory();
-                            } catch (e) {
-                              message('$e');
-                            }
-                          },
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'UID ${uid ?? "—"} · 背包 ${inventory.length} 条',
-                    style: const TextStyle(
-                      color: Colors.blueGrey,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const Divider(height: 28),
-                  Expanded(
-                    child: detail == null
-                        ? const Center(
-                            child: Text(
-                              '点击道具卡片查看详情',
-                              style: TextStyle(color: Colors.blueGrey),
-                            ),
-                          )
-                        : SingleChildScrollView(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                picture(detail!, 96),
-                                const SizedBox(height: 16),
-                                SelectableText(
-                                  detail!['name'],
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                SelectableText(
-                                  '编号 ${detail!['id']}\n${detail!['category']} · ${detail!['gender']}',
-                                  style: const TextStyle(
-                                    color: Colors.blueGrey,
-                                    height: 1.7,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                SelectableText(
-                                  detail!['description'],
-                                  style: const TextStyle(height: 1.7),
-                                ),
-                                const SizedBox(height: 12),
-                                Text(
-                                  detail!['supported']
-                                      ? '已有基础背包支持，游戏实际效果以实测为准。'
-                                      : '可添加到所选环境的背包；该类使用、开箱或活动效果尚未适配。',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.deepOrange,
-                                    height: 1.6,
-                                  ),
-                                ),
-                                ...inventory
-                                    .where((r) => r['key'] == detail!['key'])
-                                    .map(
-                                      (r) => Padding(
-                                        padding: const EdgeInsets.only(top: 8),
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              '已拥有 · ${expiryLabel(r)} · 数量 ${r['quantity']} · ${r['slot'] == 0 ? "未穿戴" : "已穿戴"}',
-                                              style: const TextStyle(
-                                                color: teal,
-                                              ),
-                                            ),
-                                            TextButton(
-                                              onPressed:
-                                                  busy ||
-                                                      r['duration_state'] == 2
-                                                  ? null
-                                                  : () => editExpiry(r),
-                                              child: const Text('修改服务器期限'),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                Material(
-                                  child: ExpansionTile(
-                                    tilePadding: EdgeInsets.zero,
-                                    title: const Text(
-                                      '完整原始配置',
-                                      style: TextStyle(fontSize: 13),
-                                    ),
-                                    children: [
-                                      SelectableText(
-                                        (detail!['fields'] as List)
-                                            .asMap()
-                                            .entries
-                                            .map(
-                                              (e) => '${e.key + 1}  ${e.value}',
-                                            )
-                                            .join('\n'),
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          height: 1.6,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                  ),
-                  const Divider(height: 24),
-                  TextField(
-                    controller: durationDays,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '装备期限（天）',
-                      helperText: '1–3650 天；365 天及以上显示 365+\n按未开始计时发放，扣时及到期待适配',
-                      helperMaxLines: 3,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: quantity,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: '消耗道具数量（个）',
-                      helperText: '1–999 个；药水、喇叭、武器切换卡',
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: FilledButton.icon(
-                      onPressed: busy || selected.isEmpty || uid == null
-                          ? null
-                          : grant,
-                      icon: Icon(
-                        busy
-                            ? Icons.hourglass_top
-                            : Icons.add_to_photos_outlined,
-                      ),
-                      label: Text(busy ? '正在添加…' : '添加已选 ${selected.length} 件'),
-                    ),
-                  ),
-                  const Padding(
-                    padding: EdgeInsets.only(top: 10),
-                    child: Text(
-                      '添加后重新登录游戏生效。\n重复装备跳过，已有穿戴不变。',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.blueGrey,
-                        height: 1.6,
                       ),
                     ),
                   ),

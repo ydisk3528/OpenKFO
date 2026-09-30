@@ -16,84 +16,95 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(calls, ['gm_version']);
+    expect(calls, ['management_connection_get', 'gm_version']);
     expect(find.textContaining('版本不符合'), findsOneWidget);
   });
-  testWidgets('catalog searches and adds to selected character', (
+  testWidgets('catalog is lazy and management entries have one destination', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    Map<String, dynamic>? grant;
-    Future<dynamic> api(Map<String, dynamic> r) async {
-      switch (r['operation']) {
-        case 'gm_version':
-          return {'version': '1.1.0'};
-        case 'catalog':
-          return {
-            'root': 'X:/fixture',
-            'items': [
-              {
-                'key': '12:121001',
-                'kind': 12,
-                'id': 121001,
-                'name': '测试上衣',
-                'group': '服装外观',
-                'category': '上衣',
-                'gender': '通用',
-                'icon': '',
-                'description': '测试物品',
-                'fields': ['12', '121001'],
-                'supported': true,
-                'stackable': false,
-              },
-            ],
-          };
-        case 'accounts':
-          return [
-            {'uid': 1002, 'account': 'localguest', 'nickname': '游客'},
-          ];
-        case 'inventory':
-          return [];
-        case 'grant':
-          grant = r;
-          return {
-            'added': 1,
-            'updated': 0,
-            'skipped': 0,
-            'backup': 'fixture-backup',
-          };
-      }
-    }
-
-    await tester.pumpWidget(ItemManager(api: api));
+    final calls = <String>[];
+    await tester.pumpWidget(
+      ItemManager(
+        api: (r) async {
+          calls.add(r['operation'] as String);
+          switch (r['operation']) {
+            case 'gm_version':
+              return {'version': '1.1.0'};
+            case 'catalog':
+              return {
+                'root': 'X:/fixture',
+                'items': List.generate(
+                  1000,
+                  (i) => {
+                    'key': '25:$i',
+                    'kind': 25,
+                    'id': i,
+                    'name': '测试武器$i',
+                    'group': '武器',
+                    'category': '武器',
+                    'gender': '通用',
+                    'description': '测试',
+                    'fields': ['25'],
+                    'supported': true,
+                  },
+                ),
+              };
+            case 'accounts':
+              return [
+                {'uid': 1, 'account': 'test001', 'nickname': '测试玩家'},
+              ];
+            case 'inventory':
+              return [];
+            case 'shop_images':
+              return {};
+          }
+          return {};
+        },
+      ),
+    );
     await tester.pumpAndSettle();
-    expect(find.text('测试上衣'), findsOneWidget);
-    await tester.enterText(find.byType(TextField).first, 'missing');
-    await tester.pumpAndSettle();
-    expect(find.text('没有匹配的道具'), findsOneWidget);
-    await tester.enterText(find.byType(TextField).first, '121001');
-    await tester.pumpAndSettle();
-    await tester.tap(find.byType(Checkbox).first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('添加已选 1 件'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('确认添加'));
-    await tester.pumpAndSettle();
-    expect(grant?['days'], 365);
-    expect(grant?['quantity'], 1);
-    expect(grant?['uid'], 1002);
-    expect(grant?['environment'], 'online');
-    expect(grant?['gm_version'], '1.1.0');
-    expect(grant?['keys'], ['12:121001']);
-    expect(find.text('背包已更新'), findsOneWidget);
-    await tester.tap(find.text('知道了'));
-    await tester.pumpAndSettle();
+    expect(calls.contains('accounts'), isFalse);
+    expect(calls.contains('inventory'), isFalse);
+    expect(find.text('发放到角色'), findsNothing);
+    expect(find.text('用户管理'), findsNothing);
+    expect(find.text('点券设置与赠送'), findsNothing);
+    expect(find.textContaining('测试武器').evaluate().length, lessThan(60));
     await tester.tap(find.text('玩家管理'));
     await tester.pumpAndSettle();
-    expect(find.text('VIP管理').hitTestable(), findsOneWidget);
+    expect(find.text('批量发道具 / 点券').hitTestable(), findsOneWidget);
+    expect(find.text('点券余额设置').hitTestable(), findsOneWidget);
+    expect(find.text('普通通知').hitTestable(), findsNothing);
+    await tester.tap(find.text('玩家管理'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('系统管理'));
+    await tester.tap(find.text('系统管理'));
+    await tester.pumpAndSettle();
+    expect(find.text('普通通知').hitTestable(), findsOneWidget);
+    expect(find.text('GM 服务器连接').hitTestable(), findsOneWidget);
+    await tester.tap(find.text('GM 服务器连接'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'HTTPS 管理接口'),
+      'https://vxziouwkf.top/gm/api',
+    );
+    await tester.enterText(find.widgetWithText(TextFormField, 'GM 账号'), 'root');
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '密码'),
+      'test-password',
+    );
+    await tester.tap(find.text('登录'));
+    await tester.pumpAndSettle();
+    expect(calls.contains('management_connection_login'), isTrue);
+    await tester.tap(find.text('选择玩家'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('测试玩家 · test001'));
+    await tester.pumpAndSettle();
+    expect(calls.where((x) => x == 'accounts').length, 1);
+    expect(calls.where((x) => x == 'inventory').length, 1);
     expect(tester.takeException(), isNull);
   });
 }

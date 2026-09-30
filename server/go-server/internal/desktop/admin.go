@@ -18,6 +18,10 @@ import (
 )
 
 type Request struct {
+	ManagementSessionToken string                               `json:"management_session_token,omitempty"`
+	LoginAccount           string                               `json:"login_account,omitempty"`
+	LoginPassword          string                               `json:"login_password,omitempty"`
+	Connection             *connection                          `json:"connection,omitempty"`
 	LoginErrors            *persistence.LoginErrorSettings      `json:"login_errors,omitempty"`
 	Treasure               *persistence.TreasureSettings        `json:"treasure,omitempty"`
 	ClientConfig           *clientConfigRequest                 `json:"client_config,omitempty"`
@@ -69,6 +73,8 @@ type Request struct {
 	PropertyID             string                               `json:"property_id"`
 	Label                  string                               `json:"label,omitempty"`
 	SourcePath             string                               `json:"source_path,omitempty"`
+	MergeWorkspace         string                               `json:"merge_workspace,omitempty"`
+	MergeWeapons           []int                                `json:"merge_weapons,omitempty"`
 	Template               string                               `json:"template"`
 	TemplateWeapon         int                                  `json:"template_weapon"`
 	TemplateStage          int                                  `json:"template_stage"`
@@ -102,29 +108,24 @@ type Admin struct {
 func New(root string) *Admin { admin := &Admin{Root: root}; admin.Remote = admin.remote; return admin }
 
 type connection struct {
-	Host string `json:"host"`
-	User string `json:"user"`
-	Key  string `json:"key"`
-	Port int    `json:"port"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Host     string `json:"host"`
+	User     string `json:"user"`
+	Key      string `json:"key"`
+	Port     int    `json:"port"`
 }
 
 func (admin *Admin) remote(request persistence.AdminRequest) (json.RawMessage, error) {
-	data, err := os.ReadFile(filepath.Join(admin.Root, "runtime-local", "online-admin.json"))
+	config, err := admin.managementConnection()
 	if err != nil {
 		return nil, err
 	}
-	var config connection
-	if err = json.Unmarshal(bytes.TrimPrefix(data, []byte{239, 187, 191}), &config); err != nil {
+	if config.Endpoint != "" {
+		return nil, fmt.Errorf("HTTPS 管理请求未正确路由，已拒绝使用 SSH")
+	}
+	if err = config.validate(); err != nil {
 		return nil, err
-	}
-	if config.Host == "" || config.User == "" || strings.HasPrefix(config.Host, "-") || strings.HasPrefix(config.User, "-") {
-		return nil, fmt.Errorf("SSH 配置无效")
-	}
-	if config.Port == 0 {
-		config.Port = 22
-	}
-	if config.Port < 1 || config.Port > 65535 {
-		return nil, fmt.Errorf("SSH 端口无效")
 	}
 	if _, err = os.Stat(config.Key); err != nil {
 		return nil, fmt.Errorf("找不到 SSH 密钥；未操作本地数据库")
@@ -221,6 +222,20 @@ func offer(item Item, request Request) (persistence.AdminOffer, error) {
 	return persistence.AdminOffer{Offer: persistence.Offer{Key: key, Category: 10, Variant: item.Kind, Record: record, Grant: grant}, Enabled: *request.Enabled, Recommended: request.Recommended, ServerExpiryDays: request.ServerExpiryDays}, nil
 }
 func (admin *Admin) Call(request Request) (any, error) {
+	if request.Operation == "management_connection_get" || request.Operation == "management_connection_save" || request.Operation == "management_connection_login" {
+		return admin.connectionSettings(request)
+	}
+	if request.Environment == "online" && !localManagementOperation(request.Operation) && (DefaultManagementEndpoint != "" || admin.GMSettings != "") {
+		c, err := admin.managementConnection()
+		if err != nil {
+			return nil, err
+		}
+		if c.Endpoint != "" {
+			c.Token = request.ManagementSessionToken
+			request.ManagementSessionToken = ""
+			return admin.httpManagement(request, c)
+		}
+	}
 	if strings.HasPrefix(request.Operation, "client_config_") {
 		if request.ClientConfig == nil {
 			request.ClientConfig = &clientConfigRequest{}
@@ -317,6 +332,9 @@ func (admin *Admin) Call(request Request) (any, error) {
 		} else if !os.IsNotExist(readErr) {
 			return nil, readErr
 		}
+	}
+	if request.Operation == "weapon_merge_stage" || request.Operation == "weapon_merge_save" || request.Operation == "weapon_merge_apply" || request.Operation == "weapon_merge_compare" {
+		return admin.weaponMergeWorkspace(request, client)
 	}
 	if request.Operation == "task_extended_templates" {
 		catalogues, hash, err := readExtendedTaskCatalogues(filepath.Join(client, "Data", "config.spf2"))

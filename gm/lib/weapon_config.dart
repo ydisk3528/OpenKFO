@@ -1,4 +1,5 @@
 import 'item_pictures.dart';
+import 'weapon_merge_page.dart';
 
 import 'dart:convert';
 
@@ -46,13 +47,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   @override
   void initState() {
     super.initState();
-    load();
+    load(refresh: false);
   }
 
-  Future<void> load({int? prefer}) async {
+  Future<void> load({int? prefer, bool refresh = true}) async {
     try {
       final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_catalog'}),
+        await widget.api({'operation': 'weapon_catalog', '_refresh': refresh}),
       );
       Map<String, dynamic> client = {};
       try {
@@ -401,7 +402,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = Map<String, dynamic>.from(
         await widget.api({'operation': 'weapon_combo_chain', 'weapon': weaponId}),
       );
-      if (!mounted) return;
+      if (!mounted || weapon?['id'] != weaponId) return;
       setState(() {
         comboChain = [
           for (final e in (result['chain'] as List? ?? []))
@@ -461,7 +462,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         scopeSaved = {};
       });
     } catch (_) {
-      if (mounted) {
+      if (mounted && weapon?['id'] == weaponId) {
         setState(() => comboChain = []);
         setState(() => comboDeadEnds = []);
         setState(() => frameSwitches = []);
@@ -776,7 +777,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = Map<String, dynamic>.from(
         await widget.api({'operation': 'weapon_combo_rule', 'weapon': weaponId}),
       );
-      if (!mounted) return;
+      if (!mounted || weapon?['id'] != weaponId) return;
       setState(() {
         comboRuleInfo = result;
         comboRuleFailure = '';
@@ -786,7 +787,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     } catch (error) {
       // 读不出来时不再静默隐藏：把原因显示在卡片上。否则「后端是旧二进制」
       // 和「这把武器本来就没有限制」在界面上完全一样，只能靠猜。
-      if (mounted) {
+      if (mounted && weapon?['id'] == weaponId) {
         setState(() {
           comboRuleInfo = {};
           comboRuleFailure = '$error';
@@ -2792,26 +2793,24 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     refreshComboRule(value['id']);
   }
 
-  Future<bool> discard() async =>
-      !dirty ||
-      await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('有未保存的修改'),
-              content: const Text('离开后会丢弃当前修改。'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('继续编辑'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('丢弃修改'),
-                ),
-              ],
-            ),
-          ) ==
-          true;
+  Future<bool> discard() async {
+    if (!dirty) return true;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('有未保存的修改'),
+        content: const Text('先保存方案可以保留当前修改；保存方案不会直接修改游戏。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('继续编辑')),
+          TextButton(onPressed: () => Navigator.pop(context, 'discard'), child: const Text('丢弃修改')),
+          FilledButton(onPressed: () => Navigator.pop(context, 'save'), child: const Text('保存后继续')),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return false;
+    if (action == 'save') { await execute('weapon_save'); return !dirty; }
+    return true;
+  }
 
   /// 特效视图（含缩略图 data URI）缓存：编号 → 图。
   Map<String, String> _effectThumbs = {};
@@ -3206,87 +3205,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 导入武器包：选一个合并包 zip，只合并包里武器的配置条目，其余条目不动。
   Future<void> importMergePackage() async {
-    final source = await showDialog<String>(
-      context: context,
-      builder: (_) => _MergeImportDialog(
-        loadPackages: () async => Map<String, dynamic>.from(
-          await widget.api({'operation': 'weapon_merge_packages'}) as Map,
-        ),
-      ),
-    );
-    if (source == null || !mounted) return;
-    // 先预览：以所选客户端的 config.spf2 为参照，列出包里哪些是新增、哪些是
-    // 已存在会被覆盖的武器，用户确认后才真正写盘。
-    setState(() {
-      busy = true;
-      failed = false;
-      mergeImportResult = {};
-      message = '正在分析合并包…';
-    });
-    Map<String, dynamic> preview;
-    try {
-      preview = Map<String, dynamic>.from(
-        await widget.api({
-          'operation': 'weapon_merge_preview',
-          'source_path': source,
-        }) as Map,
-      );
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '读取合并包失败：$e';
-        });
-      }
-      return;
-    }
-    if (!mounted) return;
-    setState(() {
-      busy = false;
-      message = '';
-    });
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => _MergePreviewDialog(preview: preview),
-    );
-    if (confirmed != true || !mounted) return;
-    setState(() {
-      busy = true;
-      failed = false;
-      message = '正在合并武器包…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(
-        await widget.api({
-          'operation': 'weapon_merge_import',
-          'source_path': source,
-        }) as Map,
-      );
-      if (!mounted) return;
-      setState(() {
-        mergeImportResult = result;
-        busy = false;
-        final added = (result['new'] as List? ?? []).length;
-        final changed = (result['modified'] as List? ?? []).length;
-        final parts = <String>[];
-        if (added > 0) parts.add('新增 $added 把');
-        if (changed > 0) parts.add('覆盖已有 $changed 把');
-        message = '导入完成：${parts.isEmpty ? '没有变化' : parts.join('、')}。'
-            '共处理 ${(result['entries'] as List? ?? []).length} 个配置条目、'
-            '解压 ${result['assets']} 个素材。'
-            '目标客户端其他配置未被改动；改动前的备份见下方卡片。';
-      });
-      await load();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '导入失败：$e';
-        });
-      }
-    }
+    if (!await discard() || !mounted) return;
+    final applied = await Navigator.push<bool>(context, MaterialPageRoute(
+      builder: (_) => WeaponMergePage(api: widget.api),
+    ));
+    if (applied == true && mounted) await load();
   }
 
   /// 发版包导出结果卡片：路径、分组统计、配置改动、文件清单。
@@ -4963,7 +4886,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                     child: Text(
                       '编辑集里有 ${undeployedIDs.length} 把武器本客户端还没有'
                       '（列表里标「未部署」）；它们只是编辑集里的记录，'
-                      '点「应用到游戏」或导入合并包之后才会真正写进这个客户端。',
+                      '点「应用到游戏」才会写入客户端；武器包导入先进入临时配置。',
                       style: TextStyle(
                         fontSize: 11,
                         color: Colors.orange.shade900,
@@ -8899,268 +8822,6 @@ class _MergeExportDialog extends StatelessWidget {
   }
 }
 
-/// 合并包导入预览：以所选客户端的 Data/config.spf2 为参照，列出包里哪些武器是
-/// 新增、哪些编号已存在会被覆盖。用户点「确定导入」后才真正写盘。
-class _MergePreviewDialog extends StatelessWidget {
-  const _MergePreviewDialog({required this.preview});
-  final Map<String, dynamic> preview;
-
-  @override
-  Widget build(BuildContext context) {
-    final reference = '${preview['reference'] ?? ''}';
-    final newWeapons = [
-      for (final w in (preview['new'] as List? ?? []))
-        Map<String, dynamic>.from(w as Map),
-    ];
-    final modified = [
-      for (final w in (preview['modified'] as List? ?? []))
-        Map<String, dynamic>.from(w as Map),
-    ];
-    final total = (preview['weapons'] as List? ?? []).length;
-    String label(Map<String, dynamic> w) => '${w['name']}（${w['id']}）';
-    return AlertDialog(
-      title: const Text('确认导入合并包'),
-      content: SizedBox(
-        width: 560,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '下面是这个合并包导入到当前客户端后的变化。确认无误后点「确定导入」，'
-                '导入前会自动备份 config.spf2，目标客户端的其他配置不会被改动。',
-              ),
-              const SizedBox(height: 10),
-              Text(
-                '参照配置：$reference',
-                style: const TextStyle(fontSize: 11, color: Colors.black54),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '包里共 $total 把武器。',
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-              ),
-              if (newWeapons.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text(
-                  '新增武器 ${newWeapons.length} 把：',
-                  style: const TextStyle(fontSize: 12, color: Colors.green),
-                ),
-                const SizedBox(height: 2),
-                for (final w in newWeapons)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 8, bottom: 1),
-                    child: Text(
-                      '  · ${label(w)}',
-                      style: const TextStyle(fontSize: 12, color: Colors.green),
-                    ),
-                  ),
-              ],
-              if (modified.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text(
-                  '已存在、导入后会覆盖的武器 ${modified.length} 把：',
-                  style: const TextStyle(fontSize: 12, color: Colors.deepOrange),
-                ),
-                const SizedBox(height: 2),
-                for (final w in modified)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 8, bottom: 1),
-                    child: Text(
-                      '  · ${label(w)}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.deepOrange,
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: 4),
-                const Text(
-                  '这些编号在当前客户端已存在，合并包会按自己的配置覆盖它们的'
-                  '武器行、动作行、连招、特效与动作块。',
-                  style: TextStyle(fontSize: 11, color: Colors.deepOrange),
-                ),
-              ],
-              if (newWeapons.isEmpty && modified.isEmpty) ...[
-                const SizedBox(height: 10),
-                const Text(
-                  '包里没有可导入的武器。',
-                  style: TextStyle(fontSize: 12, color: Colors.deepOrange),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: (newWeapons.isEmpty && modified.isEmpty)
-              ? null
-              : () => Navigator.pop(context, true),
-          child: const Text('确定导入'),
-        ),
-      ],
-    );
-  }
-}
-
-/// 合并包导入：列出最近导出的合并包供点选，也允许手填 zip 路径。
-class _MergeImportDialog extends StatefulWidget {
-  const _MergeImportDialog({required this.loadPackages});
-
-  final Future<Map<String, dynamic>> Function() loadPackages;
-
-  @override
-  State<_MergeImportDialog> createState() => _MergeImportDialogState();
-}
-
-class _MergeImportDialogState extends State<_MergeImportDialog> {
-  final path = TextEditingController();
-  List<Map<String, dynamic>> packages = [];
-  String directory = '';
-  String note = '';
-  bool loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    // 监听而不是 onChanged：粘贴、程序填值也要让「预览变更」跟着亮起来。
-    path.addListener(() => setState(() {}));
-    loadPackages();
-  }
-
-  @override
-  void dispose() {
-    path.dispose();
-    super.dispose();
-  }
-
-  Future<void> loadPackages() async {
-    try {
-      final result = await widget.loadPackages();
-      if (!mounted) return;
-      setState(() {
-        directory = '${result['directory'] ?? ''}';
-        packages = [
-          for (final p in (result['packages'] as List? ?? []))
-            Map<String, dynamic>.from(p as Map),
-        ];
-        loading = false;
-        note = packages.isEmpty ? '这个目录里还没有合并包；先在武器页点「导出合并包」。' : '';
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        loading = false;
-        note = '读取合并包列表失败：$e';
-      });
-    }
-  }
-
-  static String sizeText(dynamic bytes) {
-    final value = (bytes is num) ? bytes.toDouble() : 0.0;
-    if (value >= 1024 * 1024) return '${(value / 1024 / 1024).toStringAsFixed(2)} MB';
-    if (value >= 1024) return '${(value / 1024).toStringAsFixed(1)} KB';
-    return '${value.toStringAsFixed(0)} B';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('导入武器包'),
-      content: SizedBox(
-        width: 620,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '导入会先以当前客户端的 Data/config.spf2 为参照，列出包里哪些武器是'
-              '新增、哪些编号已存在会被覆盖，确认后再合并。只合并包里武器自己的配置'
-              '条目，目标客户端的其他配置不会被改动；写入前会自动备份。',
-            ),
-            const SizedBox(height: 10),
-            if (loading) const LinearProgressIndicator(),
-            if (packages.isNotEmpty) ...[
-              const Text('最近导出的合并包（点一下即选中）：', style: TextStyle(fontSize: 12)),
-              const SizedBox(height: 4),
-              SizedBox(
-                height: 168,
-                child: ListView.builder(
-                  itemCount: packages.length,
-                  itemBuilder: (context, index) {
-                    final item = packages[index];
-                    final value = '${item['path']}';
-                    final selected = path.text.trim() == value;
-                    return ListTile(
-                      dense: true,
-                      selected: selected,
-                      leading: Icon(
-                        selected
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_unchecked,
-                        size: 18,
-                      ),
-                      title: Text(
-                        '${item['name']}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      subtitle: Text(
-                        '${item['modified']} · ${sizeText(item['size'])}',
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      onTap: () => setState(() => path.text = value),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            TextField(
-              controller: path,
-              decoration: const InputDecoration(
-                labelText: '合并包路径',
-                hintText: r'例如 D:\OpenKFO\server\dist\weapon-packages\weapon-merge-253300-*.zip',
-                prefixIcon: Icon(Icons.file_upload_outlined),
-              ),
-            ),
-            if (note.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                note,
-                style: const TextStyle(fontSize: 11, color: Colors.deepOrange),
-              ),
-            ],
-            if (directory.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                '合并包目录：$directory',
-                style: const TextStyle(fontSize: 11, color: Colors.black54),
-              ),
-            ],
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: path.text.trim().isEmpty
-              ? null
-              : () => Navigator.pop(context, path.text.trim()),
-          child: const Text('预览变更'),
-        ),
-      ],
-    );
-  }
-}
 
 /// 每个状态的可编辑重映射：动作 / 命中属性 / 说明三个输入框；复用模板把结果
 /// 填进输入框，用户可再改，然后提交或取消。

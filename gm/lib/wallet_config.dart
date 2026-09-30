@@ -15,7 +15,7 @@ class WalletConfigPage extends StatefulWidget {
 class _WalletConfigPageState extends State<WalletConfigPage> {
   List<dynamic> accounts = [];
   int? uid;
-  String mode = 'gift', message = '';
+  String mode = 'set', message = '';
   bool busy = true;
   final amount = TextEditingController(text: '1000');
   final form = GlobalKey<FormState>();
@@ -110,7 +110,7 @@ class _WalletConfigPageState extends State<WalletConfigPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text('${widget.environment} · 点券设置与赠送')),
+    appBar: AppBar(title: Text('${widget.environment} · 点券余额设置')),
     body: SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: SizedBox(
@@ -121,28 +121,41 @@ class _WalletConfigPageState extends State<WalletConfigPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (busy) const LinearProgressIndicator(),
-              DropdownButtonFormField<int>(
-                initialValue: uid,
-                decoration: const InputDecoration(labelText: '角色'),
-                items: [
-                  for (final a in accounts)
-                    DropdownMenuItem(
-                      value: a['uid'] as int,
-                      child: Text('${a['account']} · ${a['tickets']} 点券'),
+              Autocomplete<Map<String, dynamic>>(
+                initialValue: TextEditingValue(
+                  text: uid == null
+                      ? ''
+                      : '${accounts.firstWhere((a) => a['uid'] == uid)['account']}',
+                ),
+                displayStringForOption: (a) => '${a['account']}',
+                optionsBuilder: (text) => accounts
+                    .where(
+                      (a) => '${a['account']} ${a['uid']}'
+                          .toLowerCase()
+                          .contains(text.text.toLowerCase()),
+                    )
+                    .map((a) => Map<String, dynamic>.from(a)),
+                onSelected: (a) => setState(() => uid = a['uid'] as int),
+                fieldViewBuilder: (context, controller, focus, submit) =>
+                    TextFormField(
+                      controller: controller,
+                      focusNode: focus,
+                      enabled: !busy,
+                      decoration: const InputDecoration(
+                        labelText: '搜索角色账号 / UID',
+                      ),
+                      onFieldSubmitted: (_) => submit(),
+                      onChanged: (text) {
+                        final matches = accounts.where(
+                          (a) => '${a['account']}' == text,
+                        );
+                        setState(
+                          () => uid = matches.length == 1
+                              ? matches.first['uid']
+                              : null,
+                        );
+                      },
                     ),
-                ],
-                onChanged: busy ? null : (value) => setState(() => uid = value),
-              ),
-              const SizedBox(height: 24),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'gift', label: Text('追加赠送')),
-                  ButtonSegment(value: 'set', label: Text('设置总余额')),
-                ],
-                selected: {mode},
-                onSelectionChanged: busy
-                    ? null
-                    : (value) => setState(() => mode = value.first),
               ),
               const SizedBox(height: 24),
               TextFormField(
@@ -167,7 +180,7 @@ class _WalletConfigPageState extends State<WalletConfigPage> {
                 child: const Text('确认操作…'),
               ),
               const SizedBox(height: 16),
-              const Text('赠送会增加现有余额；设置会替换总余额。当前环境操作保留余额审计记录，重新登录游戏后刷新。'),
+              const Text('设置会替换当前总余额并保留审计记录；赠送请到“批量发道具 / 点券”，支持单个玩家与批次进度。'),
               const SizedBox(height: 16),
               SelectableText(message),
             ],
