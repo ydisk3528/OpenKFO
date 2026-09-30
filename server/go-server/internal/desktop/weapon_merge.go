@@ -197,7 +197,11 @@ func planMergePropertyIDs(existingText string, manifest *mergeManifest) (map[str
 		}
 	}
 	remap := map[string]string{}
+	entries := mergeEntryActions(manifest)
 	for id, tag := range incoming {
+		if entries[id] {
+			continue // Entry property IDs must move together with the action, not independently.
+		}
 		current, present := existing[id]
 		if present && current == tag {
 			continue // 同一件事，保持原号（重复导入幂等）
@@ -380,9 +384,11 @@ func weaponMergeExport(request Request, client string, folder string, base *arch
 			prefix := action[:4]
 			weapon.AnimationBlocks[prefix] = append(weapon.AnimationBlocks[prefix], blocks[0].original)
 			// 命中属性节点：动作块引用的全部 skillproid。
-			for _, id := range propertyIDsOfAction(renderedInfo, action) {
+			for _, id := range mergePropertyIDs(renderedInfo, action) {
 				if node, ok := propertyNodeText(propertyText, id); ok {
 					weapon.SkillProperties = append(weapon.SkillProperties, node)
+				} else {
+					return nil, fmt.Errorf("动作 %s 缺少技能属性 %s，未导出", action, id)
 				}
 			}
 		}
@@ -729,6 +735,9 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	if err = planMergeActions(target, manifest, propertyRemap); err != nil {
+		return nil, err
+	}
 	importable := []mergeWeapon{}
 	newWeapons := []map[string]any{}
 	modified := []map[string]any{}
@@ -988,8 +997,8 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 	}, nil
 }
 
-// mergeAnimationBlock 把一个动作块合并进动画文件：同 id 已存在则按内容替换
-// （内容一致时不动，保持字节稳定），不存在则插到 </AnmInfo> 前。
+// mergeAnimationBlock only inserts missing blocks or reuses identical ones.
+// Conflicting IDs must be isolated by planMergeActions before any write.
 func mergeAnimationBlock(animation, blockText string) (string, int, int, error) {
 	node, err := parseXML(blockText)
 	if err != nil {
@@ -1018,10 +1027,10 @@ func mergeAnimationBlock(animation, blockText string) (string, int, int, error) 
 		if found != id {
 			continue
 		}
-		if piece == blockText {
+		if sameMergeBlock(piece, blockText) {
 			return animation, 0, 0, nil
 		}
-		return strings.Replace(animation, piece, blockText, 1), 1, 0, nil
+		return "", 0, 0, fmt.Errorf("动作 %s 内容冲突且未完成独立编号分配，未覆盖", id)
 	}
 	idx := strings.LastIndex(animation, "</AnmInfo>")
 	if idx < 0 {

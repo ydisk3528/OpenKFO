@@ -29,6 +29,8 @@ void main() {
           home: TalismanConfigPage(
             environment: '线上服务器',
             api: (r) async {
+              if (r['operation'] == 'catalog') return {'items': [{'id': 303002, 'key': '30:303002', 'name': '测试法宝'}]};
+              if (r['operation'] == 'shop_images') return {};
               if (r['operation'] == 'talisman_settings_save') {
                 saved = r;
                 throw Exception('version conflict');
@@ -42,7 +44,7 @@ void main() {
       expect(find.text('宠物／法宝 · 线上服务器'), findsOneWidget);
       await t.tap(find.text('材料修理'));
       await t.pumpAndSettle();
-      await t.tap(find.text('物品 303002'));
+      await t.tap(find.text('测试法宝 · 303002'));
       await t.pumpAndSettle();
       await t.enterText(find.byKey(const ValueKey('material')), '303002');
       await t.tap(find.text('确定'));

@@ -86,6 +86,9 @@ func configUnits(file, text string) ([]configUnit, *xmlNode, error) {
 	seen := map[string]bool{}
 	add := func(u configUnit) error {
 		if seen[u.Key] {
+			if file != "skillproperty.xml" || u.node == nil || u.node.tag != "PropertyItem" {
+				return fmt.Errorf("配置 %s 含重复编号：%s", file, u.Key)
+			}
 			// 原生表允许相同编号的冗余节点（skillproperty.xml 里重复的
 			// PropertyItem SkillProId 就是这种，客户端按文档位置区分）。
 			// 编辑器保留第一个、跳过后续同键项，避免把原生数据当错误。

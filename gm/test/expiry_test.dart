@@ -11,6 +11,7 @@ void main() {
     Map<String, dynamic>? saved;
     Future<dynamic> api(Map<String, dynamic> r) async {
       switch (r['operation']) {
+        case 'gm_version': return {'version':'1.1.0'};
         case 'catalog': return {'root':'X:/fixture','items':[{
           'key':'25:253002','kind':25,'id':253002,'name':'测试武器',
           'group':'武器','category':'武器','gender':'通用','icon':'',

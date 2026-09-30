@@ -1081,6 +1081,10 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 	actionLines := strings.Split(actionTable, "\n")
 	header := strings.Split(strings.TrimSuffix(actionLines[0], "\r"), "\t")
 	tableChanged := false
+	entryProperties, err := newActionCloneProperties(a)
+	if err != nil {
+		return nil, err
+	}
 	reserved := map[string]bool{}
 	for key := range info.blocks {
 		reserved[key] = true
@@ -1129,15 +1133,7 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 			changed := source.node.clone()
 			shared := len(info.owners[stage.Action]) > 1
 			if shared {
-				cloneID := 0
-				for id := 999; id >= 1; id-- {
-					key := stage.Action[:4] + "/" + strconv.Itoa(id)
-					if !reserved[key] {
-						cloneID = id
-						reserved[key] = true
-						break
-					}
-				}
+				cloneID := entryProperties.allocate(stage.Action, reserved)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足，未修改配置", file)
 				}
@@ -1273,7 +1269,7 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 		}
 		replacements["itemact.txt"] = encoded
 	}
-	return a.replace(replacements)
+	return entryProperties.replace(a, replacements)
 }
 func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 func atomicWrite(path string, data []byte) error {

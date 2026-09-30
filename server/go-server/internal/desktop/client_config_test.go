@@ -29,6 +29,20 @@ func TestClientConfigRecordIsolation(t *testing.T) {
 		t.Fatal("duplicate ID accepted")
 	}
 }
+func TestClientConfigNativeDuplicateScope(t *testing.T) {
+	text := `<R><PropertyItem SkillProId="1" SkillDamage="9"/><PropertyItem SkillProId="1" SkillDamage="10"/></R>`
+	units, _, err := configUnits("skillproperty.xml", text)
+	if err != nil || len(units) != 1 {
+		t.Fatalf("native duplicate: %v, %d", err, len(units))
+	}
+	changed, err := configReplace("skillproperty.xml", text, units[0].Key, `<PropertyItem SkillProId="1" SkillDamage="11"/>`)
+	if err != nil || !strings.Contains(changed, `SkillDamage="10"`) {
+		t.Fatalf("duplicate sibling lost: %v, %s", err, changed)
+	}
+	if _, _, err := configUnits("mapmgr.xml", text); err == nil {
+		t.Fatal("duplicate allowed outside skillproperty")
+	}
+}
 func TestClientConfigResourceBoundary(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "config.spf2"), []byte("private"), 0600); err != nil {

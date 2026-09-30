@@ -385,6 +385,10 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 			rowIndex[cols[0]] = index + 1
 		}
 	}
+	entryProperties, err := newActionCloneProperties(a)
+	if err != nil {
+		return nil, err
+	}
 	reserved := map[string]bool{}
 	for key := range info.blocks {
 		reserved[key] = true
@@ -472,15 +476,7 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 				continue
 			}
 			if len(info.owners[action]) > 1 {
-				cloneID := 0
-				for id := 999; id >= 1; id-- {
-					key := action[:4] + "/" + strconv.Itoa(id)
-					if !reserved[key] {
-						cloneID = id
-						reserved[key] = true
-						break
-					}
-				}
+				cloneID := entryProperties.allocate(action, reserved)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
@@ -522,7 +518,7 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 		}
 		replacements[file] = encoded
 	}
-	data, err := a.replace(replacements)
+	data, err := entryProperties.replace(a, replacements)
 	if err != nil {
 		return nil, err
 	}

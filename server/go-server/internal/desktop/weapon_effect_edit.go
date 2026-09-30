@@ -298,6 +298,10 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 			lineIndex[cols[0]] = index + 1
 		}
 	}
+	entryProperties, err := newActionCloneProperties(a)
+	if err != nil {
+		return nil, err
+	}
 	reserved := map[string]bool{}
 	for key := range blockIndex {
 		reserved[key] = true
@@ -364,15 +368,7 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 			}
 			if len(actionOwners[action]) > 1 {
 				// 共用块：分配一个空闲动作编号，克隆后单独改这一份。
-				cloneID := 0
-				for id := 999; id >= 1; id-- {
-					key := action[:4] + "/" + strconv.Itoa(id)
-					if !reserved[key] {
-						cloneID = id
-						reserved[key] = true
-						break
-					}
-				}
+				cloneID := entryProperties.allocate(action, reserved)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
@@ -410,7 +406,7 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 		}
 		replacements["itemact.txt"] = encoded
 	}
-	data, err := a.replace(replacements)
+	data, err := entryProperties.replace(a, replacements)
 	if err != nil {
 		return nil, err
 	}

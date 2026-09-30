@@ -123,11 +123,8 @@ func TestMergeAnimationBlockIdempotent(t *testing.T) {
 	zero := `<AnmDesc id = "007" ><Line lineid="2"/></AnmDesc>`
 	withZero := "<?xml version=\"1.0\"?>\n<AnmInfo>\n" + zero + "\n</AnmInfo>\n"
 	out, replaced, inserted, err = mergeAnimationBlock(withZero, `<AnmDesc id = "7" ><Line lineid="9"/></AnmDesc>`)
-	if err != nil || replaced != 1 || inserted != 0 {
-		t.Fatalf("前导零块应按 id 命中：%v %v %v", replaced, inserted, err)
-	}
-	if out == withZero {
-		t.Fatal("块内容不同应当被替换")
+	if err == nil {
+		t.Fatal("同编号不同内容必须拒绝覆盖")
 	}
 	// 新块：插入。
 	_, _, inserted, err = mergeAnimationBlock(base, `<AnmDesc id = "99" ><Line lineid="3"/></AnmDesc>`)
@@ -209,7 +206,7 @@ func mergeWeaponFixture(t *testing.T, a *archive, info *inspection, number strin
 			continue
 		}
 		weapon.AnimationBlocks[action[:4]] = append(weapon.AnimationBlocks[action[:4]], blocks[0].original)
-		for _, pid := range propertyIDsOfAction(info, action) {
+		for _, pid := range mergePropertyIDs(info, action) {
 			if node, ok := propertyNodeText(propertyText, pid); ok {
 				weapon.SkillProperties = append(weapon.SkillProperties, node)
 			}
