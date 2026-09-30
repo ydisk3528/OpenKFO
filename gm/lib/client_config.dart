@@ -378,6 +378,7 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
   );
   static const descriptions = {
     'weapons': '武器定义、动作绑定及独立修改方案',
+    'buffs': '状态效果、属性及 Buff 定制',
     'effects': '特效资源和武器加载绑定',
     'maps': '场景、音乐、封面及地图校验',
     'items': '头饰、背饰、套装、称号与道具定义',
@@ -385,6 +386,7 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
   };
   static const icons = {
     'weapons': Icons.sports_martial_arts,
+    'buffs': Icons.bolt_outlined,
     'effects': Icons.auto_awesome,
     'maps': Icons.landscape_outlined,
     'items': Icons.inventory_2_outlined,
@@ -806,10 +808,10 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
                             selectedTileColor: Theme.of(context)
                                 .colorScheme
                                 .primaryContainer,
-                            leading: Icon(icons[e.key]),
+                            leading: Icon(icons[e.key] ?? Icons.settings_outlined),
                             title: Text(e.value),
                             subtitle: Text(
-                              descriptions[e.key]!,
+                              descriptions[e.key] ?? e.value,
                               style: const TextStyle(fontSize: 11),
                             ),
                             onTap: busy ? null : () => selectCategory(e.key),

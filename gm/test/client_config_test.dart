@@ -14,6 +14,9 @@ void main() {
    throw StateError('unexpected request');
   }
   await tester.pumpWidget(MaterialApp(home:ClientConfigPage(api:api)));await tester.pumpAndSettle();
+  expect(tester.takeException(),isNull);
+  expect(find.text('状态/Buff'),findsOneWidget);
+  expect(find.text('状态效果、属性及 Buff 定制'),findsOneWidget);
   await tester.tap(find.text('打包发布'));await tester.pumpAndSettle();
   expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton,'生成 OSS 更新包')).onPressed,isNull);
   await tester.tap(find.text('双梯方案'));await tester.tap(find.text('预览合并并检查'));await tester.pumpAndSettle();
