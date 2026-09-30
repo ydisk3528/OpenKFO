@@ -63,11 +63,6 @@ void main() {
           ],
         };
       }
-      if (request['operation'] == 'weapon_publish') {
-        expect(request['environment'], 'online');
-        expect(request['notes'], '骤足秘笈：第一段调整');
-        return {'message': '已发布测试版本'};
-      }
       expect(request['operation'], 'weapon_save');
       expect(request['weapon'], 253013);
       expect(request['revision'], 'test-revision');
@@ -115,21 +110,10 @@ void main() {
     expect(draft[2]['buff'], 0);
     expect(calls, isNot(contains('weapon_apply')));
     expect(find.text('方案已保存，尚未应用到游戏'), findsOneWidget);
-    await tester.tap(find.text('更新到线上'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    expect(find.text('更新到线上'), findsNothing);
+    expect(find.text('发布到线上'), findsNothing);
+    expect(find.text('导出发版包'), findsOneWidget);
     expect(calls, isNot(contains('weapon_publish')));
-    await tester.tap(find.text('更新到线上'));
-    await tester.pumpAndSettle();
-    await tester.enterText(
-      find.widgetWithText(TextFormField, '给玩家看的更新说明（武器名称、改动内容）'),
-      '骤足秘笈：第一段调整',
-    );
-    await tester.tap(find.text('发布到线上'));
-    await tester.pumpAndSettle();
-    expect(calls, contains('weapon_publish'));
-    expect(find.text('已发布测试版本'), findsOneWidget);
     await tester.tap(find.text('动作说明（3）'));
     await tester.pumpAndSettle();
     expect(find.text('跑动普通攻击（动画说明，非按键）'), findsNWidgets(3));

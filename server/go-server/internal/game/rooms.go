@@ -880,8 +880,12 @@ func (hub *Hub) roomMessage(session *Session, channel *Channel, message protocol
 		hub.normalizePVETeams(room)
 		hub.clearRoomReady(room)
 	case protocol.MsgReady, protocol.MsgCancelReady:
-		if len(payload) != 0 || room == nil {
+		if len(payload) != 0 {
 			return true, protocol.ErrFrame
+		}
+		// Ready requests can arrive after a kick/leave moved the player to the lobby.
+		if room == nil {
+			return true, nil
 		}
 		// Once start detection begins, ready/cancel packets cannot change its roster.
 		if !room.canConfigure(session) || room.NetworkProbe != nil {

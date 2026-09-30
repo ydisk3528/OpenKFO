@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Go = 'go',
-    [string]$Flutter = 'flutter'
+    [string]$Flutter = 'flutter',
+    [string]$ManagementEndpoint = 'https://vxziouwkf.top/gm/api'
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -18,7 +19,7 @@ try {
         New-Item -ItemType Directory -Force "$dist/server" | Out-Null
         & $Go build -o "$dist/server/latency-probe.exe" ./cmd/latency
         if ($LASTEXITCODE) { throw 'Transport probe build failed' }
-        & $Go build -ldflags "-H windowsgui" -o "$manager/kungfu-desktop-admin.exe" ./cmd/desktop-admin
+        & $Go build -ldflags "-H windowsgui -X kungfu.local/server/internal/desktop.DefaultManagementEndpoint=$ManagementEndpoint" -o "$manager/kungfu-desktop-admin.exe" ./cmd/desktop-admin
         if ($LASTEXITCODE) { throw 'Go administration build failed' }
     } finally { Pop-Location }
     & '.\launcher\client-adapter\build-login-skin.cmd'

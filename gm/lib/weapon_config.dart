@@ -3013,90 +3013,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     }
   }
 
-  Future<void> publish() async {
-    if (!(form.currentState?.validate() ?? false)) return;
-    var notes = '${weapon!['name']}：';
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('更新到线上'),
-        content: SizedBox(
-          width: 560,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                '发布全部已保存的武器方案及当前编辑内容。将重启线上服务器，在线玩家会断开；玩家下次启动游戏时下载更新。不会覆盖本地客户端。',
-              ),
-              const SizedBox(height: 14),
-              TextFormField(
-                initialValue: notes,
-                onChanged: (value) => notes = value,
-                minLines: 4,
-                maxLines: 8,
-                maxLength: 2000,
-                decoration: const InputDecoration(
-                  labelText: '给玩家看的更新说明（武器名称、改动内容）',
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              if (notes.trim().isNotEmpty) Navigator.pop(context, true);
-            },
-            child: const Text('发布到线上'),
-          ),
-        ],
-      ),
-    );
-    final text = notes.trim();
-    if (confirmed != true || !mounted) return;
-    setState(() {
-      busy = true;
-      failed = false;
-      message = '正在生成、上传并启用线上配置，请勿重复发布…';
-    });
-    try {
-      final result = await widget.api({
-        'operation': 'weapon_publish',
-        'environment': 'online',
-        'weapon': weapon!['id'],
-        'rules': rules,
-        'revision': data!['revision'],
-        'notes': text,
-      });
-      if (!mounted) return;
-      setState(() {
-        message = result['message'];
-        dirty = false;
-      });
-      await load();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
-  }
-
   /// 导出发版包。
   ///
   /// 产出的 zip 里路径就是客户端根目录下的相对路径（Data/config.spf2、
   /// Data/Weapon/Model/...），交给运维后**整包解压、覆盖到客户端根目录**即可，
   /// 不用挑文件、也不用知道哪个素材该放哪。
   ///
-  /// 和「更新到线上」的区别：那个只把 Data/config.spf2 传上去，自制武器一旦
-  /// 带自己的模型/贴图/动作，玩家端就会缺文件 —— 这个包解决的就是这件事。
+  /// 同时包含配置与自制武器的模型、贴图、动作资源。
   Future<void> exportPackage() async {
     if (!(form.currentState?.validate() ?? false)) return;
     final options = await showDialog<Map<String, dynamic>>(
@@ -4417,7 +4340,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 列表退回未映射前的结构，需要先修好或取消该映射。
   /// 招架提示：某个状态的 `<Counter>` 指向本武器不存在的状态 —— 架住之后切不到
   /// 任何动作（"白架"）。**只提示、不拦截**：这一招没反应而已，不影响其它招式，
-  /// 也不阻止「应用到游戏 / 更新到线上」。
+  /// 也不阻止「应用到游戏」。
   Widget counterWarningBanner() {
     final warnings = [
       for (final w in (data?['counter_warnings'] as List? ?? [])) '$w',
@@ -5586,13 +5509,6 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                         onPressed: busy ? null : forget,
                                         child: const Text('移除自建武器'),
                                       ),
-                                    FilledButton.tonalIcon(
-                                      onPressed: busy ? null : publish,
-                                      icon: const Icon(
-                                        Icons.cloud_upload_outlined,
-                                      ),
-                                      label: const Text('更新到线上'),
-                                    ),
                                     OutlinedButton.icon(
                                       onPressed: busy ? null : exportPackage,
                                       icon: const Icon(
@@ -6826,7 +6742,7 @@ class _ExportDialogState extends State<_ExportDialog> {
                 controlAffinity: ListTileControlAffinity.leading,
                 title: const Text('只包含已应用到客户端的方案'),
                 subtitle: const Text(
-                  '默认和「更新到线上」一致：草稿也进包。勾上则只发本机客户端里'
+                  '默认包含草稿。勾上则只包含本机客户端里'
                   '已经验证过的那部分，未应用的编辑不带走。',
                   style: TextStyle(fontSize: 11),
                 ),

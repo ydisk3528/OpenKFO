@@ -329,7 +329,7 @@ def retain_previous_client(release, store, previous, notify):
             notify('log', f'{label}：{path}')
 
 
-def publish(release, store, notify, cancel, backup_dir):
+def publish(release, store, notify, cancel, backup_dir, before_commit=None):
     previous = store.get(POINTER)
     backup_dir = Path(backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -364,6 +364,10 @@ def publish(release, store, notify, cancel, backup_dir):
         notify('progress', (expected[0], expected[0]))
     if cancel.is_set():
         raise InterruptedError('已取消，未发布版本入口')
+    if before_commit is not None:
+        before_commit(release, store)
+    if cancel.is_set():
+        raise InterruptedError('已取消，版本入口未发布')
     if store.get(POINTER) != previous:
         raise ValueError('上传期间线上版本已改变，停止发布；请检查是否有其他发布者')
     notify('committing', '资源校验完成，正在发布版本入口（此阶段不可取消）')

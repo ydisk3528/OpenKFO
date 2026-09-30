@@ -11,7 +11,7 @@ $interpreter = Join-Path $environment 'Scripts\python.exe'
 if ($LASTEXITCODE -ne 0) { throw '安装构建依赖失败' }
 Push-Location (Join-Path $repository 'tools\oss-publisher')
 try {
-    & $interpreter -m unittest -v test_publisher
+    & $interpreter -m unittest -v test_publisher test_realm_sync
     if ($LASTEXITCODE -ne 0) { throw '发布工具测试失败' }
     & $interpreter -m PyInstaller --noconfirm --clean --onefile --windowed --name 'OSS发布工具' --collect-all alibabacloud_oss_v2 --distpath (Join-Path $repository 'dist\oss-publisher') --workpath (Join-Path $repository 'build\oss-publisher') --specpath (Join-Path $repository 'build\oss-publisher') app.py
     if ($LASTEXITCODE -ne 0) { throw '发布工具构建失败' }

@@ -1,4 +1,4 @@
-"""Windows operator UI. Credentials never enter config files or release packages."""
+"""Windows operator UI. Credentials live only in the local DPAPI vault."""
 import json
 import os
 import queue
@@ -9,13 +9,16 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+import credentials
+from realm_sync import FIXED, DEFAULT_KEY, RealmSync
+
 from publisher import OssStore, announcement_bytes, inspect_zip, publish, error_message, set_release_notes, retain_previous_client, POINTER
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('OSS 发布工具 1.0.5')
+        root.title('OSS 发布工具 1.1.0 · 二区同步')
         root.geometry('980x830')
         root.minsize(850, 740)
         self.events = queue.Queue()
@@ -29,10 +32,14 @@ class App:
             pass
         if not isinstance(saved, dict):
             saved = {}
-        self.variables = {name: tk.StringVar(value=saved.get(name, default)) for name, default in [
-            ('bucket', 'openkfo'), ('region', 'cn-hangzhou'), ('base', 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/')]}
+        self.variables = {name: tk.StringVar(value=value) for name, value in FIXED.items()}
+        try:
+            secrets = credentials.load(self.folder)
+        except (OSError, ValueError):
+            secrets = {}
         for name, env in [('access_id', 'OSS_ACCESS_KEY_ID'), ('secret', 'OSS_ACCESS_KEY_SECRET'), ('token', 'OSS_SESSION_TOKEN')]:
-            self.variables[name] = tk.StringVar(value=os.environ.get(env, ''))
+            self.variables[name] = tk.StringVar(value=os.environ.get(env, secrets.get(name, '')))
+        self.variables['sync_key'] = tk.StringVar(value=saved.get('sync_key', DEFAULT_KEY))
         self.zip_path = tk.StringVar()
         self.notice_title = tk.StringVar(value='更新公告')
         self.status = tk.StringVar(value='选择 OSS 更新包 ZIP，先检查，再上传发布。')
@@ -42,12 +49,12 @@ class App:
         frame = ttk.Frame(root, padding=16)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='OSS 更新发布', font=('Microsoft YaHei UI', 19, 'bold')).pack(anchor='w')
-        ttk.Label(frame, text='上传工具仅供发布者使用 · 不会启动游戏或修改服务器').pack(anchor='w', pady=(3, 10))
+        ttk.Label(frame, text='固定发布到原 OSS · 自动同步二区 · 配置变化时先停止服务再同步启动').pack(anchor='w', pady=(3, 10))
         settings = ttk.LabelFrame(frame, text='OSS 连接配置', padding=10)
         settings.pack(fill='x')
         settings.columnconfigure(1, weight=1)
         settings.columnconfigure(3, weight=1)
-        self.inputs, self.buttons = [], []
+        self.inputs, self.buttons, self.readonly = [], [], []
         for index, (label, name) in enumerate([('Bucket', 'bucket'), ('地域', 'region'),
                 ('AccessKey ID', 'access_id'), ('AccessKey Secret', 'secret'), ('下载根地址', 'base'), ('STS Token（可选）', 'token')]):
             row, col = divmod(index, 2)
@@ -55,7 +62,15 @@ class App:
             entry = ttk.Entry(settings, textvariable=self.variables[name], show='*' if name in ('secret', 'token') else '')
             entry.grid(row=row, column=col * 2 + 1, sticky='ew', padx=(0, 12), pady=4)
             self.inputs.append(entry)
-        ttk.Label(settings, text='密钥不保存；下次可重新填写，或通过环境变量提供。').grid(row=3, column=0, columnspan=4, sticky='w', pady=(5, 0))
+            if name in FIXED:
+                entry.configure(state='readonly')
+                self.readonly.append(entry)
+        ttk.Label(settings, text='密钥仅加密保存在本机 Windows 用户下；EXE 不内置密钥。').grid(row=3, column=0, columnspan=4, sticky='w', pady=(5, 0))
+        ttk.Label(settings, text='二区 SSH 私钥').grid(row=4, column=0, sticky='w')
+        key_entry = ttk.Entry(settings, textvariable=self.variables['sync_key'])
+        key_entry.grid(row=4, column=1, columnspan=2, sticky='ew')
+        self.inputs.append(key_entry)
+        self.button(settings, '选择私钥…', self.choose_key).grid(row=4, column=3, sticky='w')
         tabs = ttk.Notebook(frame)
         tabs.pack(fill='x', pady=12)
         release = ttk.Frame(tabs, padding=12)
@@ -81,8 +96,9 @@ class App:
         actions.pack(fill='x')
         self.button(actions, '仅检查压缩包', lambda: self.start('inspect')).pack(side='left', padx=(0, 8))
         self.button(actions, '预览合并清单', lambda: self.start('preview')).pack(side='left', padx=(0, 8))
-        self.button(actions, '解压并上传发布', lambda: self.start('publish')).pack(side='left', padx=(0, 8))
+        self.button(actions, '一键发布并同步二区', lambda: self.start('publish')).pack(side='left', padx=(0, 8))
         self.button(actions, '读取线上版本', lambda: self.start('version')).pack(side='left')
+        self.button(actions, '重试同步当前版本', lambda: self.start('sync')).pack(side='left', padx=8)
         ttk.Label(release, text='资源全部上传并回读校验后，最后发布 version/version.json。更新包不会覆盖独立公告。').pack(anchor='w', pady=(10, 0))
         title = ttk.Entry(notice, textvariable=self.notice_title)
         title.pack(fill='x')
@@ -114,6 +130,11 @@ class App:
         button = ttk.Button(parent, text=text, command=command)
         self.buttons.append(button)
         return button
+
+    def choose_key(self):
+        path = filedialog.askopenfilename(title='选择二区 SSH 私钥')
+        if path:
+            self.variables['sync_key'].set(path)
 
     def choose(self):
         path = filedialog.askopenfilename(filetypes=[('OSS 更新包', '*.zip')])
@@ -149,13 +170,24 @@ class App:
         if self.busy:
             return
         config = {key: value.get().strip() for key, value in self.variables.items()}
+        config.update(FIXED)
         path, title, content = self.zip_path.get(), self.notice_title.get(), self.notice.get('1.0', 'end-1c')
         if action in ('inspect', 'preview', 'publish') and not Path(path).is_file():
             messagebox.showerror('请选择压缩包', '请先选择已有的 OSS 更新包 ZIP。')
             return
+        allow_restart = False
+        if action in ('publish', 'sync'):
+            if not messagebox.askyesno('发布并同步二区', '将核验 OSS 配置并同步二区。若 config.spf2 哈希变化，将先停止二区服务、同步哈希及关卡绑定、再启动，当前玩家会断线。哈希不变则不重启。\n\n是否继续？'):
+                return
+            allow_restart = True
+            try:
+                credentials.save(self.folder, {k: config[k] for k in ('access_id', 'secret', 'token')})
+            except OSError:
+                messagebox.showerror('保存密钥失败', '无法保存本机加密凭据，未开始发布。')
+                return
         override_notes = self.release_notes.get('1.0', 'end-1c') if self.edit_notes.get() else None
         self.folder.mkdir(parents=True, exist_ok=True)
-        (self.folder / 'settings.json').write_text(json.dumps({k: config[k] for k in ('bucket', 'region', 'base')}, ensure_ascii=False, indent=2), encoding='utf-8')
+        (self.folder / 'settings.json').write_text(json.dumps({k: config[k] for k in ('sync_key',)}, ensure_ascii=False, indent=2), encoding='utf-8')
         self.busy = True
         self.cancel.clear()
         for widget in self.inputs + self.buttons:
@@ -165,13 +197,16 @@ class App:
         self.stop.configure(state='normal' if action in ('inspect', 'publish') else 'disabled')
         self.file_progress['value'] = self.total_progress['value'] = 0
         self.status.set('正在处理…')
-        self.append({'inspect': '检查本地 ZIP（不连接 OSS）', 'preview': '读取线上清单并预览合并（不上传）', 'publish': '开始上传发布', 'notice': '上传独立公告', 'read_notice': '读取独立公告', 'version': '读取版本'}[action])
+        self.append({'inspect': '检查本地 ZIP（不连接 OSS）', 'preview': '读取线上清单并预览合并（不上传）', 'publish': '开始上传发布', 'notice': '上传独立公告', 'read_notice': '读取独立公告', 'version': '读取版本', 'sync': '重试同步当前 OSS 版本'}[action])
 
         def notify(kind, value):
             self.events.put((kind, value))
 
         def work():
             try:
+                sync = RealmSync(config['sync_key'], notify, allow_restart)
+                if action in ('publish', 'sync'):
+                    sync.status()
                 if action in ('inspect', 'preview', 'publish'):
                     with tempfile.TemporaryDirectory(prefix='OpenKFO-oss-') as temporary:
                         release = inspect_zip(path, temporary, config['base'], self.cancel)
@@ -182,14 +217,18 @@ class App:
                         notify('package', f'版本：{release.version} · {len(release.keys)} 个资源/清单文件\n{release.notes}')
                         if action == 'publish':
                             store = OssStore(config['bucket'], config['region'], config['access_id'], config['secret'], config['token'])
-                            publish(release, store, notify, self.cancel, self.folder / 'backups')
+                            publish(release, store, notify, self.cancel, self.folder / 'backups', before_commit=sync.prepare)
+                            sync.activate()
                         elif action == 'preview':
                             store = OssStore(config['bucket'], config['region'], config['access_id'], config['secret'], config['token'])
                             retain_previous_client(release, store, store.get(POINTER), notify)
-                        notify('done', {'publish': '发布完成，版本入口已回读确认。', 'preview': '合并预览完成，没有上传。正式发布会重新读取最新线上清单，并校验历史资源。', 'inspect': '压缩包检查通过，未连接 OSS。'}[action])
+                        notify('done', {'publish': '完成：OSS 版本入口已确认，二区哈希同步成功。', 'preview': '合并预览完成，没有上传。正式发布会重新读取最新线上清单，并校验历史资源。', 'inspect': '压缩包检查通过，未连接 OSS。'}[action])
                 else:
                     store = OssStore(config['bucket'], config['region'], config['access_id'], config['secret'], config['token'])
-                    if action == 'notice':
+                    if action == 'sync':
+                        sync.retry(store)
+                        notify('done', '当前 OSS 版本已同步到二区。')
+                    elif action == 'notice':
                         data = announcement_bytes(title, content)
                         store.put('announcement.json', data)
                         if store.get('announcement.json') != data:
@@ -255,7 +294,7 @@ class App:
                 self.release_notes.configure(state='normal')
                 self.busy = False
                 for widget in self.inputs + self.buttons:
-                    widget.configure(state='normal')
+                    widget.configure(state='readonly' if widget in self.readonly else 'normal')
                 self.notice.configure(state='normal')
                 self.stop.configure(state='disabled')
         self.root.after(100, self.poll)
