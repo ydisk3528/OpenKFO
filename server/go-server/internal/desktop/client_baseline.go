@@ -195,6 +195,11 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if err != nil {
 		return nil, err
 	}
+	// 状态/Buff 编辑集（ustate.xml 节点 + ustateeventproc.lua 函数体）与武器编辑
+	// 相互独立，叠在同一份基线上。
+	if base, err = applyBuffEdits(base, state); err != nil {
+		return nil, fmt.Errorf("状态/Buff 配置：%w", err)
+	}
 	itemText, err := base.text("item.txt")
 	if err != nil {
 		return nil, fmt.Errorf("武器表缺失：%w", err)
@@ -320,6 +325,17 @@ func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
 // archive entry it has no business changing.
 func checkAllowedWrites(source, verified *archive, state *weaponState, info *inspection) error {
 	allowed := map[string]bool{"itemact.txt": true, "skillproperty.xml": true}
+	if len(state.UStates) > 0 {
+		allowed["ustate.xml"] = true
+	}
+	// 状态/Buff 定制只允许改写这一个脚本条目，且必须已经存在于包里
+	// （归档不能新增条目）。
+	for name := range state.LuaScripts {
+		if name != buffLuaEntry {
+			return fmt.Errorf("不允许改写脚本 %s", name)
+		}
+		allowed[name] = true
+	}
 	if len(state.Created) > 0 {
 		allowed["item.txt"] = true
 	}

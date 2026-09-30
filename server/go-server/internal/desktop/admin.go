@@ -86,6 +86,8 @@ type Request struct {
 	Blueprint              *Blueprint                           `json:"blueprint,omitempty"`
 	Include                []string                             `json:"include,omitempty"`
 	AppliedOnly            bool                                 `json:"applied_only,omitempty"`
+	UState                 *UStateEdit                          `json:"ustate,omitempty"`
+	LuaText                string                               `json:"lua,omitempty"`
 }
 type Admin struct {
 	Root          string

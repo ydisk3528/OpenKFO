@@ -1750,6 +1750,14 @@ type weaponState struct {
 	// EffectRows is the weapon's own acteffect.xml ledger. A weapon present here
 	// keeps exactly these rows instead of the ones derived from its actions.
 	EffectRows map[string][]EffectRow `json:"effect_rows,omitempty"`
+	// UStates holds author-authored ustate.xml nodes, keyed by state number.
+	// "upsert" replaces or appends a <Data type="N"> node, "delete" removes it.
+	// Unlike the weapon edit sets these are not per-weapon: ustate.xml is global.
+	UStates map[string]UStateEdit `json:"ustates,omitempty"`
+	// LuaScripts holds author-authored lua function bodies, keyed by archive
+	// entry then function name. Only script/playereventproc/ustateeventproc.lua
+	// is accepted.
+	LuaScripts map[string]map[string]string `json:"lua_scripts,omitempty"`
 }
 
 // 武器配置操作的独占锁。两个细节缺一不可：
@@ -1780,7 +1788,14 @@ func readOnlyWeaponOperation(operation string) bool {
 		"weapon_remap_options",
 		"weapon_template_resolve",
 		"weapon_effect_view",
-		"weapon_effects_preview":
+		"weapon_effects_preview",
+		"weapon_buff_catalog",
+		"weapon_buff_detail",
+		"weapon_buff_icons",
+		"weapon_buff_api",
+		"weapon_buff_preview",
+		"weapon_buff_export",
+		"weapon_buff_packages":
 		return true
 	}
 	return false
@@ -1878,6 +1893,21 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	if state.EffectRows == nil {
 		state.EffectRows = map[string][]EffectRow{}
+	}
+	if state.UStates == nil {
+		state.UStates = map[string]UStateEdit{}
+	}
+	if state.LuaScripts == nil {
+		state.LuaScripts = map[string]map[string]string{}
+	}
+	// 状态/Buff 定制：除「应用」外都只改 settings.json 的编辑集，不重渲染整个包。
+	// 应用单独走 weaponBuffApply（内部仍复用 prepareClient 的完整守卫链），
+	// 这样就不必经过下面按武器编号解析的那一大段逻辑。
+	if strings.HasPrefix(request.Operation, "weapon_buff_") {
+		if request.Operation == "weapon_buff_apply" {
+			return weaponBuffApply(&state, client, folder, statePath)
+		}
+		return weaponBuff(request, client, folder, &state, statePath)
 	}
 	// 合并式导入不碰编辑集、也不依赖基线：直接读目标客户端的 config.spf2，
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过

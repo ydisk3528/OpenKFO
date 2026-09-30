@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'weapon_config.dart';
+import 'buff_config.dart';
 
 import 'package:file_selector/file_selector.dart';
 
@@ -39,6 +40,7 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
     'effects': '特效',
     'maps': '地图',
     'items': '装备与道具',
+    'buffs': '状态/Buff',
     'package': '打包发布',
   };
   static const labels = {
@@ -381,6 +383,22 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
                                   await loadPlans();
                                 },
                           child: const Text('招式、伤害、受击与 BUFF 编辑'),
+                        ),
+                      if (category == 'buffs')
+                        OutlinedButton(
+                          onPressed: busy
+                              ? null
+                              : () async {
+                                  await Navigator.push(
+                                    context,
+                                    MaterialPageRoute<void>(
+                                      builder: (_) =>
+                                          BuffConfigPage(api: widget.api),
+                                    ),
+                                  );
+                                  await loadPlans();
+                                },
+                          child: const Text('打开状态/Buff 定制'),
                         ),
                       if (category == 'weapons')
                         OutlinedButton(
