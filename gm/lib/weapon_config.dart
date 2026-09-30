@@ -2045,9 +2045,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   int blockElementOrder(String tag) {
-    for (var i = 0; i < blockElementGroups.length; i++) {
-      for (final e in (blockElementGroups[i]['elements'] as List? ?? [])) {
-        if ('${(e as Map)['tag']}' == tag) return i * 100 + (e['single'] == true ? 0 : 1);
+    // 按后端声明的顺序排（同一组里的多个元素以前会撞成同一个序号，顺序不稳定）。
+    var index = 0;
+    for (final g in blockElementGroups) {
+      for (final e in (g['elements'] as List? ?? [])) {
+        if ('${(e as Map)['tag']}' == tag) return index;
+        index++;
       }
     }
     return 9999;
@@ -2132,10 +2135,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         return '第 ${attrs['startframe'] ?? '?'}–${attrs['endframe'] ?? '?'} 帧'
             '（±${attrs['anglehalfrange'] ?? '?'}°，朝向 ${attrs['angleoffset'] ?? '0'}°）';
       case 'UState':
-        return '状态 ${ustateLabel(attrs['id'] ?? '')}'
+        // 只在 <LockedAttackHit>（命中判定点）里：命中这一击时给被打中的人挂状态。
+        return '命中 → 状态 ${ustateLabel(attrs['id'] ?? '')}'
             ' · 等级 ${attrs['level'] ?? '-'} · ${attrs['duration'] ?? '-'} ms';
       case 'Ustate':
-        return '状态 ${ustateLabel(attrs['id'] ?? '')}';
+        // 只在 <Condition> 里：这是「拥有该状态时这段动作才成立」的判断，不是施加。
+        return '需拥有 ${ustateLabel(attrs['id'] ?? '')}';
       case 'AddBuff':
         return '第 ${attrs['frame'] ?? '0'} 帧 → 状态 ${ustateLabel(attrs['UnNormalState'] ?? '')}'
             ' · 等级 ${attrs['UStateLevel'] ?? '-'} · ${attrs['UStateLastCycle'] ?? '-'} ms';
@@ -2184,9 +2189,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final options = <Map<String, String>>[];
     for (final g in blockElementGroups) {
       for (final e in (g['elements'] as List? ?? [])) {
+        final placement = '${(e as Map)['placement'] ?? ''}';
+        var hint = '';
+        if (placement == 'hit') {
+          hint = '（写进命中判定点，仅当块里已有）';
+        } else if (placement == 'condition') {
+          hint = '（写进触发条件，仅当块里已有）';
+        }
         options.add({
-          'value': '${(e as Map)['tag']}',
-          'label': '${e['label']}（${e['tag']}）',
+          'value': '${e['tag']}',
+          'label': '${e['label']}（${e['tag']}）$hint',
         });
       }
     }
@@ -2350,9 +2362,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               const SizedBox(height: 2),
               Text(
                 blockElementEditing
-                    ? '点下面「给某个状态添加」：霸体/无敌/穿人，或给自己挂一个状态。'
-                    : '动作块里没有额外防护，也没有自身状态。霸体/无敌/穿人是按帧生效的，'
-                        '状态则是用这一招时给自己上的 buff。',
+                    ? '点下面「给某个状态添加」：霸体/无敌/穿人，或给这一招挂状态。'
+                    : '动作块里没有额外防护，也没有状态元素。霸体/无敌/穿人是按帧生效的；'
+                        '给自己挂状态用的是 AddBuff。命中给目标、触发条件只在块里本来就有对应结构时可改。',
                 style: const TextStyle(fontSize: 12, color: Colors.black54),
               ),
             ],

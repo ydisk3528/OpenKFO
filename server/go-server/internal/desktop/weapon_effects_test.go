@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -51,8 +52,23 @@ func TestWeaponEffectsPreviewApplyPreservesOtherEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := preview.(map[string]any)
-	if len(p["additions"].([]effectRegistration)) != 19 {
-		t.Fatalf("unexpected additions: %v", p)
+	additions := p["additions"].([]effectRegistration)
+	// 这里不写死条数：可补登记的特效数随客户端数据变化（招式引用的 effectid 增删、
+	// Data/effect/effect 里资源文件有无都会影响它）。写死就会在数据变化后误报。
+	// 真正要守住的是行为：能把缺登记的补上、补上的一定有资源文件、拿不准的走 issues。
+	if len(additions) == 0 {
+		t.Fatalf("no additions detected: %v", p)
+	}
+	for _, add := range additions {
+		if add.ID == "" || add.File == "" {
+			t.Fatalf("addition without id/file: %+v", add)
+		}
+		// 没有资源文件的引用必须走 issues，绝不能进 additions——否则会写进
+		// aeteffect.xml 一条永远加载不出来的空登记。
+		resource := filepath.Join(client, "Data", "effect", "effect", filepath.FromSlash(strings.ReplaceAll(add.File, "\\", "/")))
+		if stat, statErr := os.Stat(resource); statErr != nil || !stat.Mode().IsRegular() {
+			t.Fatalf("addition %+v has no resource file at %s", add, resource)
+		}
 	}
 	if len(p["issues"].([]string)) == 0 {
 		t.Fatal("missing unresolved effect diagnostic")

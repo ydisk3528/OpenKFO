@@ -285,6 +285,11 @@ func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
 		if base, err = applyBlueprints(source, state.Created); err != nil {
 			return nil, err
 		}
+		// 自建武器从供体逐字复制了 2xxx 段，于是与供体共用 skillproid：改一个
+		// 命中效果两把武器一起变。这里给它们分配独立号，隔离掉这种耦合。
+		if base, err = splitClonedProperties(base, state); err != nil {
+			return nil, err
+		}
 	}
 	plan := comboPlanOf(state.Created, state.Combos)
 	for key := range plan {
@@ -346,6 +351,22 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 	}
 	for name := range stageEffectFiles(verified, state) {
 		allowed[name] = true
+	}
+	// splitClonedProperties 给自建武器的 2xxx 段做整段分身，会改写这些段引用
+	// 到的动画文件（块分身 + skillproid 换号）。白名单按同一套规则推导：自建
+	// 武器在 itemact 里 2xxx 列用到的动作，其文件必须可写。
+	if len(state.Created) > 0 && info != nil {
+		for _, weapon := range info.weapons {
+			if _, selfMade := state.Created[fmt.Sprint(weapon.ID)]; !selfMade {
+				continue
+			}
+			for _, stage := range weapon.Stages {
+				if !stageNeedsSplit(stage.State) || len(stage.Action) < 4 {
+					continue
+				}
+				allowed["animation/"+stage.Action[:4]+".xml"] = true
+			}
+		}
 	}
 	if info != nil {
 		for _, weapon := range info.weapons {

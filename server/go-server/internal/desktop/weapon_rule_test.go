@@ -35,6 +35,46 @@ func TestWeaponLockQueuesInsteadOfFailing(t *testing.T) {
 	}
 }
 
+// 只读操作必须全部走免锁路径。GM 选择一把武器时同时发 weapon_combo_chain 和
+// weapon_combo_rule，每个请求都要重新解析整个 config.spf2（十几到几十秒）。
+// 如果它们排同一条锁，第二个就必然等到 30 秒上限报错——界面上显示成「连招
+// 限制读不到」，和历史遗留的编辑锁冲突报错长得一模一样。
+func TestReadOnlyOperationsBypassTheLock(t *testing.T) {
+	readOnly := []string{
+		"weapon_catalog",
+		"weapon_combo_chain",
+		"weapon_combo_rule",
+		"weapon_stage_track",
+		"weapon_remap_options",
+		"weapon_template_resolve",
+		"weapon_effect_view",
+		"weapon_effects_preview",
+	}
+	for _, op := range readOnly {
+		if !readOnlyWeaponOperation(op) {
+			t.Errorf("%s 是只读操作，必须免锁", op)
+		}
+	}
+	// 会改 settings.json 或写客户端的操作绝不能走免锁路径。
+	writes := []string{
+		"weapon_create", "weapon_forget", "weapon_save", "weapon_apply",
+		"weapon_restore", "weapon_publish",
+		"weapon_blueprint_update", "weapon_effect_stage_set",
+		"weapon_effect_ledger_set", "weapon_effects_apply", "weapon_combo",
+		"weapon_frame_switch_set", "weapon_counter_set",
+		"weapon_block_elements_set", "weapon_combo_chain_set",
+		"weapon_scope_set", "weapon_combo_rule_set", "weapon_client_rebase",
+		"weapon_remap", "weapon_property_add", "weapon_state_clear",
+		"weapon_package", "weapon_merge_export", "weapon_merge_import",
+		"weapon_clients", "weapon_merge_packages",
+	}
+	for _, op := range writes {
+		if readOnlyWeaponOperation(op) {
+			t.Errorf("%s 会写盘，不能免锁", op)
+		}
+	}
+}
+
 // taskkill /F skips the deferred release, so the lock file survives the process.
 // An old lock must be taken over, otherwise every later operation fails forever.
 func TestWeaponLockTakesOverStaleLock(t *testing.T) {
