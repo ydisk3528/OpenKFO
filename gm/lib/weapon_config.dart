@@ -335,6 +335,18 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   List<Map<String, String>> ustateOptions = [];
   bool blockElementEditing = false;
   bool frameEditing = false;
+  /// 「动作分支」：同一招在**持有某个状态时**换成另一套动作（多段 / 换伤害 / 换 Buff）。
+  /// 机制是同名 <AnmDesc> 注册两条块，第二条头部带 <Condition><Ustate id="N"/>。
+  /// 这份是**渲染后的现状**：状态号 → 该状态下已有的条件分支。
+  Map<String, List<Map<String, dynamic>>> variants = {};
+  /// 后端已保存的分支定义：状态号 → 分支列表（与渲染后现状可能不同，是作者态）。
+  Map<String, List<Map<String, dynamic>>> variantsSaved = {};
+  /// 本次编辑的**增量**：状态号 → 要写/要删的分支（出现即生效；不再出现=不碰）。
+  /// 已有分支被改 = 覆盖同 condition；被删 = {condition, remove:true}；新增 = 完整定义。
+  Map<String, List<Map<String, dynamic>>> variantsEdit = {};
+  bool variantEditing = false;
+  /// 各状态**无条件块**的动作段（照抄本招 / 回填参考）：状态号 → 段列表。
+  Map<String, List<Map<String, dynamic>>> variantBases = {};
   /// 帧轨道（weapon_stage_track 的结果）：状态 → 该招式的片断/标记/真实帧数。
   /// 打开某个招式的「帧轨道与攻击范围」弹窗时按武器一次性拉取，然后按状态缓存。
   Map<String, Map<String, dynamic>> stageTracks = {};
@@ -451,6 +463,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           for (final g in (result['block_element_groups'] as List? ?? []))
             Map<String, dynamic>.from(g as Map),
         ];
+        variants = _decodeVariants(result['variants'] as Map? ?? {});
+        variantsSaved = _decodeVariants(result['variants_saved'] as Map? ?? {});
+        variantBases = _decodeBases(result['variant_bases'] as Map? ?? {});
+        variantsEdit = {};
+        variantEditing = false;
         frameEdits = {};
         frameEditing = false;
         comboKeys = [
@@ -474,6 +491,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           counterEditing = false;
           frameEdits = {};
           frameEditing = false;
+          variants = {};
+          variantsSaved = {};
+          variantBases = {};
+          variantsEdit = {};
+          variantEditing = false;
         });
       }
     }
@@ -2026,6 +2048,500 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       out['$state'] = tags;
     });
     return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // 动作分支（按状态切换招式形态）
+  // -------------------------------------------------------------------------
+
+  /// 一份动作段的归一化（name/start/end[/damage/skillproid/buff]）。
+  static List<Map<String, dynamic>> _decodeSegments(List? list) => [
+    for (final s in (list ?? const []))
+      {
+        'name': '${(s as Map)['name'] ?? ''}',
+        'start': int.tryParse('${s['start'] ?? 0}') ?? 0,
+        'end': int.tryParse('${s['end'] ?? 0}') ?? 0,
+        if (s['damage'] != null) 'damage': s['damage'],
+        if (s['skillproid'] != null) 'skillproid': '${s['skillproid']}',
+        if (s['buff'] != null) 'buff': '${s['buff']}',
+      },
+  ];
+
+  /// 解码后端的 variants / variants_saved：状态号 → 分支列表。
+  /// 分支：condition（触发状态号）+ segments（段：name/start/end[/damage/skillproid/buff]）。
+  static Map<String, List<Map<String, dynamic>>> _decodeVariants(Map raw) {
+    final out = <String, List<Map<String, dynamic>>>{};
+    raw.forEach((state, list) {
+      out['$state'] = [
+        for (final e in (list as List? ?? []))
+          {
+            'condition': '${(e as Map)['condition'] ?? ''}',
+            'remove': (e['remove'] as bool?) ?? false,
+            'segments': _decodeSegments(e['segments'] as List?),
+          },
+      ];
+    });
+    return out;
+  }
+
+  /// 解码 variant_bases：状态号 → 无条件块的动作段。
+  static Map<String, List<Map<String, dynamic>>> _decodeBases(Map raw) {
+    final out = <String, List<Map<String, dynamic>>>{};
+    raw.forEach((state, list) {
+      out['$state'] = _decodeSegments(list as List?);
+    });
+    return out;
+  }
+
+  /// 有动作分支（或本次改过）的状态号，按数字排序。
+  List<String> get variantStates {
+    final states = <String>{
+      ...variantsEdit.keys,
+      ...variants.keys,
+      ...variantsSaved.keys,
+    }.toList();
+    states.sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+    return states;
+  }
+
+  /// 某状态本次编辑里「要删掉」的 condition 集合。
+  Set<String> variantRemovedConditions(String state) => {
+    for (final v in variantsEdit[state] ?? const [])
+      if ((v['remove'] as bool?) == true) '${v['condition']}',
+  };
+
+  /// 某状态本次编辑里「新增/覆盖」的分支。
+  List<Map<String, dynamic>> variantPendingFor(String state) => [
+    for (final v in variantsEdit[state] ?? const [])
+      if ((v['remove'] as bool?) != true) v,
+  ];
+
+  /// 编辑器里要显示的分支行：合并「渲染现状」与「本次编辑」，同 condition 以本次编辑为准。
+  /// origin：current=块里已有，edit=改过，new=本次新增。
+  List<Map<String, dynamic>> variantRowsFor(String state) {
+    final removed = variantRemovedConditions(state);
+    final edits = <String, Map<String, dynamic>>{
+      for (final v in variantPendingFor(state)) '${v['condition']}': v,
+    };
+    final rows = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final v in variants[state] ?? const []) {
+      final cond = '${v['condition']}';
+      if (removed.contains(cond)) continue;
+      final replaced = edits[cond];
+      rows.add({
+        'condition': cond,
+        'segments': replaced != null ? replaced['segments'] : v['segments'],
+        'origin': replaced != null ? 'edit' : 'current',
+      });
+      seen.add(cond);
+    }
+    for (final v in variantPendingFor(state)) {
+      final cond = '${v['condition']}';
+      if (seen.contains(cond)) continue;
+      rows.add({'condition': cond, 'segments': v['segments'], 'origin': 'new'});
+    }
+    return rows;
+  }
+
+  void variantPut(String state, int condition, List<Map<String, dynamic>> segments) {
+    setState(() {
+      final list = [...(variantsEdit[state] ?? const <Map<String, dynamic>>[])];
+      list.removeWhere((v) => '${v['condition']}' == '$condition');
+      list.add({
+        'condition': '$condition',
+        'segments': segments,
+        if (segments.isEmpty) 'copy_base': true,
+      });
+      variantsEdit[state] = list;
+    });
+  }
+
+  void variantRemove(String state, String condition) {
+    setState(() {
+      final list = [...(variantsEdit[state] ?? const <Map<String, dynamic>>[])];
+      list.removeWhere((v) => '${v['condition']}' == condition);
+      final exists =
+          (variants[state] ?? const []).any((v) => '${v['condition']}' == condition) ||
+              (variantsSaved[state] ?? const [])
+                  .any((v) => '${v['condition']}' == condition);
+      if (exists) {
+        list.add({'condition': condition, 'remove': true, 'segments': const []});
+      }
+      variantsEdit[state] = list;
+    });
+  }
+
+  void startVariantEdit() {
+    setState(() {
+      variantsEdit = {};
+      variantEditing = true;
+    });
+  }
+
+  void cancelVariantEdit() {
+    setState(() {
+      variantsEdit = {};
+      variantEditing = false;
+    });
+  }
+
+  /// 一条分支的可读描述。
+  String variantBranchSummary(Map<String, dynamic> branch) {
+    final cond = '${branch['condition'] ?? ''}';
+    final segs = (branch['segments'] as List? ?? [])
+        .map((s) => Map<String, dynamic>.from(s as Map))
+        .toList();
+    if ((branch['remove'] as bool?) == true) {
+      return '删掉 ${ustateLabel(cond)} 的分支';
+    }
+    final head = '持有 ${ustateLabel(cond)} 时';
+    if (segs.isEmpty) return '$head → 照抄本招动作段（只换命中编号）';
+    return '$head → ${segs.length} 段：'
+        '${segs.map((s) {
+          final dmg = s['damage'];
+          return '${s['name'] ?? '?'}[${s['start'] ?? '?'}–${s['end'] ?? '?'}]'
+              '${dmg != null && '$dmg'.isNotEmpty ? ' 伤害$dmg' : ''}';
+        }).join('，')}';
+  }
+
+  /// 给某状态添加/修改一条分支：先选状态，再编辑条件与段。
+  Future<void> variantAddFor(String state) async {
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _VariantBranchDialog(
+        ustates: ustateOptions,
+        stateLabel: chainStateLabel(state),
+        initial: null,
+        baseSegments: variantBaseSegments(state),
+      ),
+    );
+    if (result == null || !mounted) return;
+    final condition = int.tryParse('${result['condition']}') ?? 0;
+    if (condition <= 0) return;
+    variantPut(
+      state,
+      condition,
+      (result['segments'] as List? ?? [])
+          .map((s) => Map<String, dynamic>.from(s as Map))
+          .toList(),
+    );
+  }
+
+  /// 编辑已有的某条分支（current / new / edit 都走这里，先回填现值）。
+  Future<void> variantEditRow(String state, Map<String, dynamic> row) async {
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _VariantBranchDialog(
+        ustates: ustateOptions,
+        stateLabel: chainStateLabel(state),
+        initial: row,
+        baseSegments: variantBaseSegments(state),
+      ),
+    );
+    if (result == null || !mounted) return;
+    final condition = int.tryParse('${result['condition']}') ?? 0;
+    if (condition <= 0) return;
+    variantPut(
+      state,
+      condition,
+      (result['segments'] as List? ?? [])
+          .map((s) => Map<String, dynamic>.from(s as Map))
+          .toList(),
+    );
+  }
+
+  /// 某招无条件块的动作段（供「照抄」回填参考）。
+  List<Map<String, dynamic>> variantBaseSegments(String state) =>
+      variantBases[state] ?? const [];
+
+  /// 挑一个状态来加分支。
+  Future<void> variantPickStateAndAdd() async {
+    final all = [for (final s in (data?['states'] as List? ?? [])) '$s'];
+    if (all.isEmpty) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => _SimplePickDialog(
+        title: '为哪个状态添加动作分支',
+        hint: '搜索状态号',
+        options: [
+          for (final s in all) {'value': s, 'label': chainStateLabel(s)},
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await variantAddFor(picked);
+  }
+
+  /// 保存：只发本次改过的状态（后端整把替换该状态列表）。
+  Future<void> saveVariants() async {
+    if (variantsEdit.isEmpty) {
+      setState(() => message = '没有改动，无需保存');
+      return;
+    }
+    final payload = <String, dynamic>{};
+    variantsEdit.forEach((state, edits) {
+      final list = <Map<String, dynamic>>[];
+      for (final e in edits) {
+        final cond = int.tryParse('${e['condition']}') ?? 0;
+        if (cond <= 0) continue;
+        if ((e['remove'] as bool?) == true) {
+          list.add({'condition': cond, 'remove': true});
+          continue;
+        }
+        list.add({
+          'condition': cond,
+          'segments': [
+            for (final s in (e['segments'] as List? ?? []))
+              {
+                'name': '${(s as Map)['name']}',
+                'start': s['start'],
+                'end': s['end'],
+                if (s['damage'] != null) 'damage': s['damage'],
+              },
+          ],
+        });
+      }
+      if (list.isNotEmpty) payload[state] = list;
+    });
+    if (payload.isEmpty) {
+      setState(() => message = '没有有效的分支改动');
+      return;
+    }
+    final prefer = weapon!['id'] as int?;
+    setState(() {
+      busy = true;
+      failed = false;
+      message = '正在保存动作分支…';
+    });
+    try {
+      final result = Map<String, dynamic>.from(await widget.api({
+        'operation': 'weapon_variant_set',
+        'weapon': weapon!['id'],
+        'variants': payload,
+      }));
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+        variantEditing = false;
+        variantsEdit = {};
+        message = '${result['message'] ?? '已保存'}';
+      });
+      await load(prefer: prefer);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          failed = true;
+          message = '$e';
+        });
+      }
+    }
+  }
+
+  Future<void> clearVariants() async {
+    if (!await confirmDestructive(
+      '清除动作分支定制？',
+      '这会删掉该武器已保存的「按状态切换招式形态」编辑，动作块回到原样。此操作不可撤销（会留一份快照备份）。',
+    )) {
+      return;
+    }
+    final prefer = weapon!['id'] as int?;
+    setState(() {
+      busy = true;
+      failed = false;
+      message = '正在清除动作分支定制…';
+    });
+    try {
+      final result = Map<String, dynamic>.from(await widget.api({
+        'operation': 'weapon_variant_set',
+        'weapon': weapon!['id'],
+        'variants': <String, dynamic>{},
+      }));
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+        variantEditing = false;
+        variantsEdit = {};
+        message = '${result['message'] ?? '已清除'}';
+      });
+      await load(prefer: prefer);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          failed = true;
+          message = '$e';
+        });
+      }
+    }
+  }
+
+  /// 「动作分支」编辑卡：同一招在持有某状态时改成另一套动作段。
+  Widget variantCard() {
+    final states = variantStates;
+    final hasEdit = variantsSaved.isNotEmpty || variants.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.amber.shade50,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.call_split, size: 16, color: Colors.amber.shade800),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    variantEditing
+                        ? '动作分支 · 编辑中'
+                            '${variantsEdit.isEmpty ? '' : '（改过 ${variantsEdit.length} 个状态）'}'
+                        : '动作分支 · ${states.length} 个状态',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.amber.shade900,
+                    ),
+                  ),
+                ),
+                if (variantEditing) ...[
+                  TextButton(
+                    onPressed: busy ? null : cancelVariantEdit,
+                    child: const Text('取消'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: busy ? null : saveVariants,
+                    icon: const Icon(Icons.check, size: 16),
+                    label: const Text('保存'),
+                  ),
+                ] else
+                  TextButton.icon(
+                    onPressed: busy ? null : startVariantEdit,
+                    icon: const Icon(Icons.edit, size: 15),
+                    label: Text(states.isEmpty ? '添加' : '编辑'),
+                  ),
+              ],
+            ),
+            if (states.isEmpty) ...[
+              const SizedBox(height: 2),
+              Text(
+                variantEditing
+                    ? '点下面「给某个状态添加」：该状态生效时这一招换成另一套动作段。'
+                    : '没有按状态切换形态的招式。持有指定状态时，同一招可换成另一套'
+                        '动作段（多打几下 / 改伤害 / 挂别的 Buff）。',
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+            ],
+            for (final state in states) variantStateGroup(state),
+            if (variantEditing) ...[
+              const SizedBox(height: 2),
+              TextButton.icon(
+                onPressed: busy ? null : variantPickStateAndAdd,
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('给某个状态添加', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+            if (!variantEditing && hasEdit)
+              TextButton(
+                onPressed: busy ? null : clearVariants,
+                child: const Text(
+                  '清除本武器的动作分支定制（动作块回到原样）',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget variantStateGroup(String state) {
+    final rows = variantRowsFor(state);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                chainStateLabel(state),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.amber.shade900,
+                ),
+              ),
+              if (variantEditing) ...[
+                const Spacer(),
+                GestureDetector(
+                  onTap: busy ? null : () => variantAddFor(state),
+                  child: const Padding(
+                    padding: EdgeInsets.only(right: 2),
+                    child: Icon(Icons.add_circle_outline,
+                        size: 15, color: Colors.teal),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          if (rows.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(left: 10, top: 2),
+              child: Text(
+                '（保存后这个状态不再有分支）',
+                style: TextStyle(fontSize: 11, color: Colors.deepOrange),
+              ),
+            ),
+          for (final row in rows)
+            Padding(
+              padding: const EdgeInsets.only(left: 10, top: 1),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      variantBranchSummary(row),
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: row['origin'] == 'current'
+                            ? Colors.brown.shade800
+                            : Colors.amber.shade900,
+                      ),
+                    ),
+                  ),
+                  if (variantEditing) ...[
+                    GestureDetector(
+                      onTap: busy ? null : () => variantRemove(state, '${row['condition']}'),
+                      child: const Padding(
+                        padding: EdgeInsets.only(left: 6),
+                        child:
+                            Icon(Icons.close, size: 13, color: Colors.deepOrange),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: busy ? null : () => variantEditRow(state, row),
+                      child: const Padding(
+                        padding: EdgeInsets.only(left: 8, right: 2),
+                        child:
+                            Icon(Icons.edit, size: 13, color: Colors.blueGrey),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   List<String> get blockElementStates {
@@ -5306,6 +5822,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                               frameSwitchCard(),
                                               counterCard(),
                                               blockElementCard(),
+                                              variantCard(),
                                               comboRuleCard(),
                                             ],
                                           ),
@@ -5660,6 +6177,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           stage: stage,
           track: track,
           saved: saved[state] ?? const {},
+          ustates: ustateOptions,
         ),
       );
       if (changed == true && mounted) {
@@ -5695,6 +6213,7 @@ class _StageTrackDialog extends StatefulWidget {
     required this.stage,
     required this.track,
     required this.saved,
+    required this.ustates,
   });
 
   final Future<dynamic> Function(Map<String, dynamic>) api;
@@ -5702,6 +6221,9 @@ class _StageTrackDialog extends StatefulWidget {
   final Map<String, dynamic> stage;
   final Map<String, dynamic> track;
   final Map<String, List<Map<String, dynamic>>> saved;
+
+  /// 状态号 → 名称（用于把片断的触发条件显示成「406（黑暗武器）」）。
+  final List<Map<String, String>> ustates;
 
   @override
   State<_StageTrackDialog> createState() => _StageTrackDialogState();
@@ -5735,6 +6257,15 @@ String? scopeValueOf(List? attrs, String key) {
   return null;
 }
 
+/// 片断在「同一招式」里的唯一键。同一份 AnmDesc id 允许注册多条（一条无条件 +
+/// 若干带 <Condition>），两块里的 <Anm id> 各自独立编号、必然冲突，所以光用 id
+/// 会在列表/轨道里串行。带条件的片断用 `id#cond<状态号>` 区分。
+String stageSegmentKey(Map segment) {
+  final id = '${segment['id']}';
+  final cond = '${segment['condition'] ?? ''}';
+  return cond.isEmpty ? id : '$id#cond$cond';
+}
+
 class _StageTrackDialogState extends State<_StageTrackDialog> {
   late List<Map<String, dynamic>> segments;
   late List<Map<String, dynamic>> markers;
@@ -5762,27 +6293,47 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
     ];
     frames = (widget.track['frames'] as num?)?.toInt() ?? 0;
     for (final segment in segments) {
-      final id = '${segment['id']}';
+      final key = stageSegmentKey(segment);
+      final cond = '${segment['condition'] ?? ''}';
       final block = segment['scope'] as List? ?? const [];
-      final savedAttrs = widget.saved[id];
-      defaults[id] = {
-        for (final key in scopeFields.keys)
-          key: scopeValueOf(block, key) ?? scopeDefaults[key]!,
+      // 已保存的攻击范围只有「无条件」那一条能写回（后端只改动作块的第一份），
+      // 条件分支的攻击范围目前不可保存，所以不给它套用已保存值。
+      final savedAttrs = cond.isEmpty ? widget.saved['${segment['id']}'] : null;
+      defaults[key] = {
+        for (final field in scopeFields.keys)
+          field: scopeValueOf(block, field) ?? scopeDefaults[field]!,
       };
-      edits[id] = {
-        for (final key in scopeFields.keys)
-          key: scopeValueOf(savedAttrs, key) ?? defaults[id]![key]!,
+      edits[key] = {
+        for (final field in scopeFields.keys)
+          field: scopeValueOf(savedAttrs, field) ?? defaults[key]![field]!,
       };
-      if (savedAttrs != null && savedAttrs.isNotEmpty) touched.add(id);
+      if (savedAttrs != null && savedAttrs.isNotEmpty) touched.add(key);
     }
     selected = _firstWithScope();
   }
 
+  /// 某个片断是否属于条件分支（`<Condition>` 分流出来的那几条）。条件分支的
+  /// 攻击范围目前只能看、不能保存，所以编辑器要区别对待。
+  bool segmentConditional(Map segment) =>
+      '${segment['condition'] ?? ''}'.isNotEmpty;
+
+  /// 条件号 → 「406（黑暗武器）」，没收录就只显示编号。
+  String conditionLabel(String id) {
+    for (final u in widget.ustates) {
+      if (u['id'] == id && (u['name'] ?? '').isNotEmpty) {
+        return '$id（${u['name']}）';
+      }
+    }
+    return id;
+  }
+
   String? _firstWithScope() {
     for (final segment in segments) {
-      if ((segment['scope'] as List? ?? []).isNotEmpty) return '${segment['id']}';
+      if ((segment['scope'] as List? ?? []).isNotEmpty) {
+        return stageSegmentKey(segment);
+      }
     }
-    return segments.isEmpty ? null : '${segments.first['id']}';
+    return segments.isEmpty ? null : stageSegmentKey(segments.first);
   }
 
   /// 本招式里"不属于某个动画片断"的盒子：力场盒（`<ForceField><ScopeBox>`）、
@@ -5850,7 +6401,7 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
     final id = selected;
     if (id != null) {
       for (final segment in segments) {
-        if ('${segment['id']}' != id) continue;
+        if (stageSegmentKey(segment) != id) continue;
         final box = segment['char_scope'] as List? ?? const [];
         if (box.isEmpty) break;
         final merged = Map<String, String>.from(defaultCharBox);
@@ -5868,12 +6419,24 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
     return defaultCharBox;
   }
 
+  Map<String, dynamic>? _segmentByKey(String key) {
+    for (final segment in segments) {
+      if (stageSegmentKey(segment) == key) return segment;
+    }
+    return null;
+  }
+
   Future<void> save() async {
     final payload = <String, dynamic>{};
-    for (final id in touched) {
-      payload[id] = [
+    for (final key in touched) {
+      final segment = _segmentByKey(key);
+      if (segment == null) continue;
+      // 条件分支的攻击范围不可保存：后端只改写动作块的第一份（无条件块），
+      // 强行回写会串到无条件片上。界面已把它做成只读，这里是第二道保险。
+      if (segmentConditional(segment)) continue;
+      payload['${segment['id']}'] = [
         for (final entry in scopeFields.entries)
-          {'key': entry.key, 'value': edits[id]![entry.key]!},
+          {'key': entry.key, 'value': edits[key]![entry.key]!},
       ];
     }
     if (payload.isEmpty) {
@@ -6056,9 +6619,14 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
 
   Widget segmentTile(Map<String, dynamic> segment) {
     final id = '${segment['id']}';
+    final key = stageSegmentKey(segment);
+    final cond = '${segment['condition'] ?? ''}';
+    final conditional = cond.isNotEmpty;
     final clip = (segment['clip_frames'] as num?)?.toInt() ?? 0;
-    final isSelected = id == selected;
+    final isSelected = key == selected;
+    final hasScope = (segment['scope'] as List? ?? []).isNotEmpty;
     return Container(
+      key: ValueKey('stage-seg-$key'),
       margin: const EdgeInsets.only(bottom: 4),
       decoration: BoxDecoration(
         color: isSelected ? const Color(0xFFE3F1F2) : null,
@@ -6068,29 +6636,51 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
         dense: true,
         selected: isSelected,
         leading: Icon(
-          (segment['scope'] as List? ?? []).isNotEmpty
-              ? Icons.crop_free
-              : Icons.crop_free_outlined,
+          conditional
+              ? Icons.alt_route
+              : (hasScope ? Icons.crop_free : Icons.crop_free_outlined),
           size: 18,
-          color: (segment['scope'] as List? ?? []).isNotEmpty
-              ? const Color(0xFF087E83)
-              : Colors.grey,
+          color: conditional
+              ? const Color(0xFFB26A00)
+              : (hasScope ? const Color(0xFF087E83) : Colors.grey),
         ),
-        title: Text(
-          '片断 $id · ${segment['name'] ?? ''}',
-          style: const TextStyle(fontSize: 13),
+        title: Row(
+          children: [
+            Flexible(
+              child: Text(
+                '片断 $id · ${segment['name'] ?? ''}',
+                style: const TextStyle(fontSize: 13),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (conditional) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF1DC),
+                  border: Border.all(color: const Color(0xFFE0A850)),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  '条件 · ${conditionLabel(cond)}',
+                  style: const TextStyle(fontSize: 10, color: Color(0xFF8A5A00)),
+                ),
+              ),
+            ],
+          ],
         ),
         subtitle: Text(
           '时间轴 ${segment['start']}–${segment['end']}'
           '${clip == 0 ? '' : ' · 动画 $clip 帧'}'
           '${(segment['skillproid'] ?? '').toString().isEmpty ? '' : ' · 命中属性 ${segment['skillproid']}'}'
-          '${(segment['scope'] as List? ?? []).isEmpty ? ' · 原块无攻击范围' : ''}',
+          '${hasScope ? '' : ' · 原块无攻击范围'}',
           style: const TextStyle(fontSize: 11),
         ),
-        trailing: touched.contains(id)
+        trailing: touched.contains(key)
             ? const Icon(Icons.edit, size: 16, color: Color(0xFF087E83))
             : null,
-        onTap: () => setState(() => selected = id),
+        onTap: () => setState(() => selected = key),
       ),
     );
   }
@@ -6102,6 +6692,9 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
     if (id == null) {
       return const Center(child: Text('这一招没有可编辑的动作片断。'));
     }
+    final segment = _segmentByKey(id);
+    final cond = '${segment?['condition'] ?? ''}';
+    final conditional = cond.isNotEmpty;
     final attrs = edits[id]!;
     final scope = <String, String>{
       for (final entry in attrs.entries) entry.key: entry.value,
@@ -6111,10 +6704,29 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '攻击范围 · 片断 $id',
+            '攻击范围 · 片断 ${segment?['id'] ?? id}'
+            '${conditional ? '（条件 ${conditionLabel(cond)}）' : ''}',
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 6),
+          if (conditional) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF1DC),
+                border: Border.all(color: const Color(0xFFE0A850)),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '这段动作只在玩家拥有状态 ${conditionLabel(cond)} 时才成立（动作块头部的 '
+                '<Condition>）。它的攻击范围目前只能查看、不能保存 —— 同名的无条件片断'
+                '共用同一个 <Anm id>，直接回写会改到无条件片上。',
+                style: const TextStyle(fontSize: 11, color: Color(0xFF8A5A00)),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
           const Text(
             '六个属性就是动作块里的 <AttackScope>：x 左右、y 上下、z 前方，'
             '长/宽/高是盒子的三边。0 表示这条边不占位。',
@@ -6127,6 +6739,7 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
               child: TextFormField(
                 key: ValueKey('scope-$id-${entry.key}'),
                 initialValue: attrs[entry.key],
+                readOnly: conditional,
                 keyboardType: const TextInputType.numberWithOptions(
                   signed: true,
                 ),
@@ -6134,12 +6747,14 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
                   labelText: '${entry.value}（${entry.key}）',
                   isDense: true,
                 ),
-                onChanged: (value) => setState(() {
-                  attrs[entry.key] = value.trim().isEmpty
-                      ? '0'
-                      : value.trim();
-                  touched.add(id);
-                }),
+                onChanged: conditional
+                    ? null
+                    : (value) => setState(() {
+                        attrs[entry.key] = value.trim().isEmpty
+                            ? '0'
+                            : value.trim();
+                        touched.add(id);
+                      }),
               ),
             ),
           const SizedBox(height: 4),
@@ -6367,8 +6982,8 @@ class _FrameTrackPainter extends CustomPainter {
     for (final segment in segments) {
       final start = (segment['start'] as num?)?.toInt() ?? 0;
       final end = (segment['end'] as num?)?.toInt() ?? start;
-      final id = '${segment['id']}';
-      final isSelected = id == selected;
+      final isSelected = stageSegmentKey(segment) == selected;
+      final conditional = '${segment['condition'] ?? ''}'.isNotEmpty;
       final hasScope = (segment['scope'] as List? ?? []).isNotEmpty;
       final clip = (segment['clip_frames'] as num?)?.toInt() ?? 0;
       final x0 = at(start);
@@ -6379,11 +6994,14 @@ class _FrameTrackPainter extends CustomPainter {
         Paint()
           ..color = isSelected
               ? const Color(0xFF087E83)
+              : conditional
+              ? const Color(0xFFEBC98A)
               : hasScope
               ? const Color(0xFF9CC7CA)
               : const Color(0xFFD8E0E6),
       );
       final text = '${segment['name'] ?? ''}'
+          '${conditional ? ' · 条件${segment['condition']}' : ''}'
           '${clip == 0 ? '' : ' · $clip帧'}'
           '${hasScope ? ' · 有攻击范围' : ''}';
       _label(
@@ -7396,15 +8014,19 @@ class _FrameSwitchDialogState extends State<_FrameSwitchDialog> {
     if (!(form.currentState?.validate() ?? false)) return;
     final codes = <String, String>{};
     final resolved = keyCodeValue();
-    if (resolved != null && resolved.isNotEmpty) codes['keycode'] = resolved;
+    // 空 keycode = 「自动」：不写 keycode 属性，也不该带输入窗口（输入窗口是用来
+    // 判定按键时机的，没有按键就没有窗口）。旧数据里两者可能并存，这里以「有键
+    // 才写窗口」为准，避免产出一个既不按键又要求按键时机的矛盾条目。
+    final hasKey = resolved != null && resolved.isNotEmpty;
+    if (hasKey) codes['keycode'] = resolved;
     final startIn = inputStart.text.trim();
     final endIn = inputEnd.text.trim();
-    if (startIn.isNotEmpty && endIn.isNotEmpty) {
+    if (hasKey && startIn.isNotEmpty && endIn.isNotEmpty) {
       codes['inputstartframe'] = startIn;
       codes['inputendframe'] = endIn;
     }
     final gap = interval.text.trim();
-    if (gap.isNotEmpty) codes['keyintervalframe'] = gap;
+    if (hasKey && gap.isNotEmpty) codes['keyintervalframe'] = gap;
     codes['switchstartframe'] = switchStart.text.trim();
     codes['switchendframe'] = switchEnd.text.trim();
     codes['nextstate'] = next;
@@ -7456,9 +8078,15 @@ class _FrameSwitchDialogState extends State<_FrameSwitchDialog> {
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
-                  initialValue: customKey ? '__custom__' : key,
+                  initialValue: customKey
+                      ? '__custom__'
+                      : (key.isEmpty ? '__auto__' : key),
                   decoration: const InputDecoration(labelText: '按键'),
                   items: [
+                    const DropdownMenuItem(
+                      value: '__auto__',
+                      child: Text('（自动）不按键，播到生效窗口直接切换'),
+                    ),
                     for (final k in widget.keys)
                       DropdownMenuItem(
                         value: '${k['v']}',
@@ -7471,7 +8099,11 @@ class _FrameSwitchDialogState extends State<_FrameSwitchDialog> {
                   ],
                   onChanged: (value) => setState(() {
                     customKey = value == '__custom__';
-                    if (!customKey && value != null) key = value;
+                    if (value == '__auto__') {
+                      key = '';
+                    } else if (!customKey && value != null) {
+                      key = value;
+                    }
                   }),
                 ),
                 if (customKey) ...[
@@ -7586,6 +8218,267 @@ class _FrameSwitchDialogState extends State<_FrameSwitchDialog> {
 }
 
 /// 通用单选对话框：下拉太长时的搜索式挑选。
+/// 「动作分支」里的一段动作（动画名 + 帧区间 + 可选伤害）。
+class _VariantRow {
+  _VariantRow({
+    String name = '',
+    String start = '0',
+    String end = '0',
+    String damage = '',
+  })  : nameCtrl = TextEditingController(text: name),
+        startCtrl = TextEditingController(text: start),
+        endCtrl = TextEditingController(text: end),
+        damageCtrl = TextEditingController(text: damage);
+
+  final TextEditingController nameCtrl;
+  final TextEditingController startCtrl;
+  final TextEditingController endCtrl;
+  final TextEditingController damageCtrl;
+
+  void dispose() {
+    nameCtrl.dispose();
+    startCtrl.dispose();
+    endCtrl.dispose();
+    damageCtrl.dispose();
+  }
+}
+
+/// 编辑某状态的一条动作分支：选触发状态 + 定义动作段。
+/// 段列表留空 = 交给后端照抄无条件块，只换命中编号（skillproid）。
+class _VariantBranchDialog extends StatefulWidget {
+  const _VariantBranchDialog({
+    required this.ustates,
+    required this.stateLabel,
+    required this.initial,
+    required this.baseSegments,
+  });
+
+  final List<Map<String, String>> ustates;
+  final String stateLabel;
+  final Map<String, dynamic>? initial;
+  final List<Map<String, dynamic>> baseSegments;
+
+  @override
+  State<_VariantBranchDialog> createState() => _VariantBranchDialogState();
+}
+
+class _VariantBranchDialogState extends State<_VariantBranchDialog> {
+  String condition = '';
+  final rows = <_VariantRow>[];
+  final dropped = <_VariantRow>[];
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initial;
+    if (initial != null) {
+      condition = '${initial['condition'] ?? ''}';
+      for (final s in (initial['segments'] as List? ?? [])) {
+        final map = Map<String, dynamic>.from(s as Map);
+        rows.add(_VariantRow(
+          name: '${map['name'] ?? ''}',
+          start: '${map['start'] ?? 0}',
+          end: '${map['end'] ?? 0}',
+          damage: map['damage'] == null ? '' : '${map['damage']}',
+        ));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final r in [...rows, ...dropped]) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  void copyBase() {
+    setState(() {
+      dropped.addAll(rows);
+      rows.clear();
+      for (final s in widget.baseSegments) {
+        rows.add(_VariantRow(
+          name: '${s['name'] ?? ''}',
+          start: '${s['start'] ?? 0}',
+          end: '${s['end'] ?? 0}',
+          damage: s['damage'] == null ? '' : '${s['damage']}',
+        ));
+      }
+      error = '';
+    });
+  }
+
+  void submit() {
+    final cond = int.tryParse(condition.trim());
+    if (cond == null || cond <= 0) {
+      setState(() => error = '请选择触发状态（必须是 ustate 编号）');
+      return;
+    }
+    final segments = <Map<String, dynamic>>[];
+    for (var i = 0; i < rows.length; i++) {
+      final r = rows[i];
+      final name = r.nameCtrl.text.trim();
+      if (name.isEmpty) {
+        setState(() => error = '第 ${i + 1} 段缺少动画名');
+        return;
+      }
+      final start = int.tryParse(r.startCtrl.text.trim());
+      final end = int.tryParse(r.endCtrl.text.trim());
+      if (start == null || end == null || end < start) {
+        setState(() => error = '第 ${i + 1} 段的帧区间不合法（结束帧需 ≥ 开始帧）');
+        return;
+      }
+      final damageText = r.damageCtrl.text.trim();
+      double? damage;
+      if (damageText.isNotEmpty) {
+        damage = double.tryParse(damageText);
+        if (damage == null) {
+          setState(() => error = '第 ${i + 1} 段的伤害不是数字');
+          return;
+        }
+      }
+      segments.add({
+        'name': name,
+        'start': start,
+        'end': end,
+        if (damage != null) 'damage': damage,
+      });
+    }
+    Navigator.pop(context, {'condition': cond, 'segments': segments});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final known = widget.ustates.any((u) => u['id'] == condition);
+    return AlertDialog(
+      title: Text('动作分支 · ${widget.stateLabel}'),
+      content: SizedBox(
+        width: 480,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                value: known ? condition : null,
+                decoration: const InputDecoration(
+                  labelText: '触发条件（持有该状态时换成这套动作）',
+                  isDense: true,
+                ),
+                items: [
+                  for (final u in widget.ustates)
+                    DropdownMenuItem(
+                      value: u['id'],
+                      child: Text('${u['id']}（${u['name']}）'),
+                    ),
+                ],
+                onChanged: (v) => setState(() => condition = v ?? ''),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text('动作段（留空 = 照抄本招动作段，只换命中编号）',
+                        style: TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600)),
+                  ),
+                  if (widget.baseSegments.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: copyBase,
+                      icon: const Icon(Icons.copy_all, size: 15),
+                      label:
+                          const Text('照抄本招', style: TextStyle(fontSize: 12)),
+                    ),
+                ],
+              ),
+              for (var i = 0; i < rows.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        flex: 3,
+                        child: TextFormField(
+                          controller: rows[i].nameCtrl,
+                          decoration: const InputDecoration(
+                              labelText: '动画名', isDense: true),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 60,
+                        child: TextFormField(
+                          controller: rows[i].startCtrl,
+                          decoration:
+                              const InputDecoration(labelText: '起', isDense: true),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 60,
+                        child: TextFormField(
+                          controller: rows[i].endCtrl,
+                          decoration:
+                              const InputDecoration(labelText: '止', isDense: true),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 72,
+                        child: TextFormField(
+                          controller: rows[i].damageCtrl,
+                          decoration: const InputDecoration(
+                              labelText: '伤害', isDense: true),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () => setState(() {
+                          dropped.add(rows.removeAt(i));
+                        }),
+                        child: const Padding(
+                          padding: EdgeInsets.only(left: 6, top: 10),
+                          child: Icon(Icons.close,
+                              size: 16, color: Colors.deepOrange),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              TextButton.icon(
+                onPressed: () => setState(() => rows.add(_VariantRow())),
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('添加一段', style: TextStyle(fontSize: 12)),
+              ),
+              if (error.isNotEmpty)
+                Text(error,
+                    style: const TextStyle(fontSize: 12, color: Colors.red)),
+              const SizedBox(height: 4),
+              const Text(
+                '保存后还要点「应用到游戏」才会写进配置包；分支块会新分一份命中编号（skillproid）'
+                '并克隆命中属性，不影响原本的无条件动作。',
+                style: TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: submit, child: const Text('确定')),
+      ],
+    );
+  }
+}
+
 class _SimplePickDialog extends StatefulWidget {
   const _SimplePickDialog({
     required this.title,

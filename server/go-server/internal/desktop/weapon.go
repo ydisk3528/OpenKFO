@@ -371,6 +371,26 @@ type Weapon struct {
 type block struct {
 	original string
 	node     *xmlNode
+	// condition 是这段 <AnmDesc> 的触发条件（头部 <Condition><Ustate id="N"/>，
+	// 空 = 无条件生效）。同一份 AnmDesc id 允许注册多条 —— 一条无条件 + 若干带
+	// 条件，引擎按玩家是否拥有该状态二选一。两份块的文字不同（差一个 Condition
+	// 头），所以按原文替换天然只命中自己那份；但按 id 定位（currentBlock）会撞成
+	// 多份，必须连条件一起匹配。
+	condition string
+}
+
+// pickBlock 从同名块里选出「默认编辑目标」：优先无条件块，没有才退回第一份。
+// 这样既有编辑链（霸体/连招/范围…）默认作用在无条件动作上，条件分支保持不动。
+func pickBlock(blocks []block) (block, bool) {
+	for _, candidate := range blocks {
+		if candidate.condition == "" {
+			return candidate, true
+		}
+	}
+	if len(blocks) == 0 {
+		return block{}, false
+	}
+	return blocks[0], true
 }
 
 // item.txt column 2 is the weapon subtype; retain unknown values explicitly.
@@ -470,6 +490,29 @@ func currentBlock(animation, want string) (string, bool) {
 			found = candidate
 			count++
 		}
+	}
+	return found, count == 1
+}
+
+// currentConditionalBlock 按 (id, 条件) 精确定位一段 <AnmDesc>。同名两份块只差
+// 一个 <Condition> 头，按 id 找会命中多份（currentBlock 直接失败），必须连条件
+// 一起匹配才能唯一。condition 传空表示要那份「无条件」的。
+func currentConditionalBlock(animation, want, condition string) (string, bool) {
+	found := ""
+	count := 0
+	for _, candidate := range animationPattern.FindAllString(animation, -1) {
+		node, err := parseXML(candidate)
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(node.get("id")) != want {
+			continue
+		}
+		if conditionUstate(node) != condition {
+			continue
+		}
+		found = candidate
+		count++
 	}
 	return found, count == 1
 }
@@ -575,7 +618,7 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 				return nil, err
 			}
 			key := prefix + "/" + strconv.Itoa(id)
-			result.blocks[key] = append(result.blocks[key], block{original, node})
+			result.blocks[key] = append(result.blocks[key], block{original, node, conditionUstate(node)})
 		}
 	}
 
@@ -1123,7 +1166,11 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 					break
 				}
 			}
-			source := info.blocks[actionKey(stage.Action)][0]
+			variants := actionVariants(info, stage.Action)
+			source, sourceOK := pickBlock(variants)
+			if !sourceOK {
+				return nil, fmt.Errorf("动作 %s 不存在", stage.Action)
+			}
 			file := "animation/" + stage.Action[:4] + ".xml"
 			animation, ok := animations[file]
 			if !ok {
@@ -1134,8 +1181,9 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 			}
 			changed := source.node.clone()
 			shared := len(info.owners[stage.Action]) > 1
+			cloneID := 0
 			if shared {
-				cloneID := entryProperties.allocate(stage.Action, reserved)
+				cloneID = entryProperties.allocate(stage.Action, reserved)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足，未修改配置", file)
 				}
@@ -1212,27 +1260,21 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 					node.set("skillproid", id)
 				}
 			})
-			target := source.original
-			if strings.Count(animation, target) != 1 {
-				// An earlier rule in this pass may already have rewritten the
-				// block, so the pristine text is gone: fall back to matching by
-				// id against the current file contents.
-				found, ok := currentBlock(animation, strings.TrimSpace(source.node.get("id")))
-				if !ok {
-					return nil, fmt.Errorf("动作定义无法唯一替换")
-				}
-				target = found
+			target, err := locateEditableBlock(animation, source)
+			if err != nil {
+				return nil, err
 			}
 			encoded, err := changed.serialize()
 			if err != nil {
 				return nil, err
 			}
 			if shared {
-				ending := regexp.MustCompile(`</AnmInfo\s*>`)
-				if len(ending.FindAllStringIndex(animation, -1)) != 1 {
-					return nil, fmt.Errorf("动作表结构错误")
+				// 连条件分支一起复制：否则新武器只拿到无条件那段，条件块成了孤儿。
+				next, err := cloneBlockVariants(animation, variants, source.condition, encoded, cloneID)
+				if err != nil {
+					return nil, err
 				}
-				animation = ending.ReplaceAllStringFunc(animation, func(string) string { return "\n" + encoded + "\n</AnmInfo>" })
+				animation = next
 			} else {
 				animation = strings.Replace(animation, target, encoded, 1)
 			}
@@ -1732,6 +1774,10 @@ type weaponState struct {
 	Scopes          map[string]map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
 	Cleared         map[string]map[int]bool                         `json:"cleared,omitempty"`
 	ExtraProperties map[string]ExtraProperty                        `json:"extra_properties,omitempty"`
+	// Variants authors 「按状态切换招式形态」: 给某个状态再注册一份带
+	// <Condition><Ustate id="N"/> 的动作块，引擎按玩家是否拥有该状态二选一。
+	// 键是武器 → 状态。分段与 skillproid 在落盘时才分配（见 applyVariants）。
+	Variants map[string]map[int][]VariantEdit `json:"variants,omitempty"`
 	// Chains holds an author-authored combo state machine per weapon. When a
 	// weapon has an entry here, it replaces whatever delayacttable.xml says
 	// (including a borrowed donor table) with exactly these transitions.
@@ -1911,9 +1957,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if request.Operation == "weapon_buff_apply" {
 			return weaponBuffApply(&state, client, folder, statePath)
 		}
-		result, err := weaponBuff(request, client, folder, &state, statePath)
-		logBuffRequest(request, client, folder, result, err)
-		return result, err
+		return weaponBuff(request, client, folder, &state, statePath)
 	}
 	// 合并式导入不碰编辑集、也不依赖基线：直接读目标客户端的 config.spf2，
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过
@@ -2459,6 +2503,53 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			"message":        message,
 		}, nil
 	}
+	if request.Operation == "weapon_variant_set" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		key := strconv.Itoa(request.Weapon)
+		actionText, err := base.text("itemact.txt")
+		if err != nil {
+			return nil, err
+		}
+		if actionRowIndex(actionText)[key] == nil {
+			return nil, fmt.Errorf("武器 %s 不在本客户端的动作表中", key)
+		}
+		if err := validateVariants(base, key, request.Variants); err != nil {
+			return nil, err
+		}
+		count := 0
+		for _, perStage := range request.Variants {
+			count += len(perStage)
+		}
+		// 整把一次性替换：map 里没有的状态 = 不改（沿用块里原有的分支）。
+		if len(request.Variants) == 0 {
+			snapshotState(statePath)
+			delete(state.Variants, key)
+		} else {
+			if state.Variants == nil {
+				state.Variants = map[string]map[int][]VariantEdit{}
+			}
+			state.Variants[key] = request.Variants
+		}
+		encoded, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := atomicWrite(statePath, encoded); err != nil {
+			return nil, err
+		}
+		message := fmt.Sprintf("已保存分支形态（%d 条）；应用到游戏后写入配置包", count)
+		if len(request.Variants) == 0 {
+			message = "已清除该武器的分支形态编辑，动作块回到原样"
+		}
+		return map[string]any{
+			"variants": state.Variants[key],
+			"saved":    count,
+			"revision": digest(append(append([]byte(nil), current...), encoded...)),
+			"message":  message,
+		}, nil
+	}
 	if request.Operation == "weapon_combo_chain_set" {
 		key := strconv.Itoa(request.Weapon)
 		if request.Weapon == 0 {
@@ -2633,6 +2724,10 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			// 现状 + 已保存的编辑 + 可写元素的清单（供界面按类型分组）。
 			"block_elements":       comboBlockElements(info, strconv.Itoa(request.Weapon)),
 			"block_elements_saved": state.BlockElements[strconv.Itoa(request.Weapon)],
+			// 分支形态（按状态切换招式）的现况 + 已保存的编辑 + 无条件块动作段。
+			"variants":             comboVariants(info, strconv.Itoa(request.Weapon)),
+			"variants_saved":       state.Variants[strconv.Itoa(request.Weapon)],
+			"variant_bases":        variantBases(info, strconv.Itoa(request.Weapon)),
 			"block_element_groups": blockElementGroups(),
 			"frame_keys":           frameKeyOptions(),
 			"keys":                 keyInputs(base),

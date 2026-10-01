@@ -44,6 +44,78 @@ func TestClientConfigNativeDuplicateScope(t *testing.T) {
 		t.Fatal("duplicate allowed outside skillproperty")
 	}
 }
+func TestClientConfigConditionalAnmDesc(t *testing.T) {
+	// 同名 AnmDesc + <Condition><Ustate id> 分流是本引擎「状态改变招式形态」的标准做法；
+	// 原生数据里还存在无条件重名的历史冗余（513/3759/523021 等）。两类都必须放行，
+	// 但每个物理节点要拿到唯一、稳定的键，否则列表里区分不出来、编辑会串。
+	ok := `<AnmInfo>` +
+		`<AnmDesc id="521011"><Anm name="a" skillproid="1"/></AnmDesc>` +
+		`<AnmDesc id="521011"><Condition><Ustate id="406"/></Condition><Anm name="a" skillproid="2"/></AnmDesc>` +
+		`<AnmDesc id="521011"><Condition><Ustate id="407"/></Condition><Anm name="a" skillproid="3"/></AnmDesc>` +
+		`</AnmInfo>`
+	units, _, err := configUnits("animation/2001.xml", ok)
+	if err != nil {
+		t.Fatalf("条件分支被拒：%v", err)
+	}
+	if len(units) != 3 {
+		t.Fatalf("应生成 3 个可辨识条目，实际 %d", len(units))
+	}
+	keys := map[string]bool{}
+	for _, u := range units {
+		if keys[u.Key] {
+			t.Fatalf("键不唯一：%s", u.Key)
+		}
+		keys[u.Key] = true
+	}
+	if !keys[`AnmDesc[id=521011]`] ||
+		!keys[`AnmDesc[id=521011]#ustate=406`] ||
+		!keys[`AnmDesc[id=521011]#ustate=407`] {
+		t.Fatalf("条件后缀键缺失：%v", keys)
+	}
+
+	// 原生无条件重名也要放行，且键各不同（第 2 份起用序号后缀）。
+	dupBase := `<AnmInfo>` +
+		`<AnmDesc id="513"><Anm name="a"/></AnmDesc>` +
+		`<AnmDesc id="513"><Anm name="a"/></AnmDesc>` +
+		`<AnmDesc id="513"><Anm name="a"/></AnmDesc>` +
+		`</AnmInfo>`
+	units, _, err = configUnits("animation/2001.xml", dupBase)
+	if err != nil {
+		t.Fatalf("原生无条件重名被拒：%v", err)
+	}
+	if len(units) != 3 {
+		t.Fatalf("重名应生成 3 条，实际 %d", len(units))
+	}
+	seen := map[string]bool{}
+	for _, u := range units {
+		if seen[u.Key] {
+			t.Fatalf("重名键不唯一：%s", u.Key)
+		}
+		seen[u.Key] = true
+	}
+	if !seen[`AnmDesc[id=513]`] || !seen[`AnmDesc[id=513]#2`] || !seen[`AnmDesc[id=513]#3`] {
+		t.Fatalf("重名序号键缺失：%v", seen)
+	}
+
+	// 同一条件号重复：也放行（原生冗余），键靠序号区分。
+	dupCond := `<AnmInfo>` +
+		`<AnmDesc id="1"><Condition><Ustate id="406"/></Condition><Anm name="a"/></AnmDesc>` +
+		`<AnmDesc id="1"><Condition><Ustate id="406"/></Condition><Anm name="b"/></AnmDesc>` +
+		`</AnmInfo>`
+	units, _, err = configUnits("animation/2001.xml", dupCond)
+	if err != nil {
+		t.Fatalf("重复条件号被拒：%v", err)
+	}
+	if len(units) != 2 || units[0].Key == units[1].Key {
+		t.Fatalf("重复条件号键应不同：%v", units)
+	}
+
+	// animation 之外的重复仍然拒绝（那才是真的歧义）。
+	if _, _, err := configUnits("mapmgr.xml", `<R><M Id="1"/><M Id="1"/></R>`); err == nil {
+		t.Fatal("非 animation 目录重复被放行")
+	}
+}
+
 func TestClientConfigResourceBoundary(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "config.spf2"), []byte("private"), 0600); err != nil {

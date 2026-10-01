@@ -81,17 +81,78 @@ func configCategory(file string) string {
 	}
 	return ""
 }
+
+// conditionUstate 返回节点自身 <Condition> 子节点里的状态号（没有则空）。
+//
+// animation/*.xml 允许同一份 <AnmDesc id> 注册多条，靠 <Condition><Ustate id> 分流：
+// 引擎按玩家是否带该状态二选一，这是「状态改变招式形态（段数/伤害）」的标准做法
+// （实例：253521 无 406 时 CC 一段 7，有 406 时三段 4/4/4）。
+//
+// 除此之外，原生表里本来也存在**无条件重名**的历史冗余（实测 2001.xml 里
+// 513 三份完全相同、523021 两份只差 hidebody、685 一份带注释一份不带），
+// skillproperty.xml 的重复 SkillProId 同理——客户端按文档位置区分，取第一条。
+// 所以这里对 AnmDesc 重名一律放行，只负责把键做唯一，不把原生数据当错误。
+func conditionUstate(n *xmlNode) string {
+	for _, child := range n.children {
+		if child.tag != "Condition" {
+			continue
+		}
+		for _, inner := range child.children {
+			if strings.EqualFold(inner.tag, "Ustate") {
+				if id := strings.TrimSpace(inner.get("id")); id != "" {
+					return id
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// configUnitKey 给一个 Xml 节点生成在文件内唯一的键。
+//
+// 普通节点用 <tag>[属性=值]；同名 AnmDesc 依次尝试「条件号后缀 → 出现序号」，
+// 保证每个物理节点都有独立、稳定（按文档顺序）的键，列表里可辨识、可分别编辑。
+func configUnitKey(file string, n *xmlNode, base string, taken map[string]bool) string {
+	if !strings.HasPrefix(file, "animation/") || n.tag != "AnmDesc" {
+		return base
+	}
+	if cond := conditionUstate(n); cond != "" {
+		candidate := base + "#ustate=" + cond
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+	if !taken[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s#%d", base, i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
 func configUnits(file, text string) ([]configUnit, *xmlNode, error) {
 	out := []configUnit{}
 	seen := map[string]bool{}
+	// allowDup 列出「原生表允许同键冗余」的两类节点：它们的键由 configUnitKey 做成唯一，
+	// 走到 seen 命中说明是同一物理节点被重复加入，跳过即可，不当错误。
+	allowDup := func(u configUnit) bool {
+		if u.node == nil {
+			return false
+		}
+		if file == "skillproperty.xml" && u.node.tag == "PropertyItem" {
+			// 客户端按文档位置区分；编辑器保留第一个。
+			return true
+		}
+		return strings.HasPrefix(file, "animation/") && u.node.tag == "AnmDesc"
+	}
 	add := func(u configUnit) error {
 		if seen[u.Key] {
-			if file != "skillproperty.xml" || u.node == nil || u.node.tag != "PropertyItem" {
+			if !allowDup(u) {
 				return fmt.Errorf("配置 %s 含重复编号：%s", file, u.Key)
 			}
-			// 原生表允许相同编号的冗余节点（skillproperty.xml 里重复的
-			// PropertyItem SkillProId 就是这种，客户端按文档位置区分）。
-			// 编辑器保留第一个、跳过后续同键项，避免把原生数据当错误。
 			return nil
 		}
 		u.Values = map[string]string{}
@@ -177,7 +238,13 @@ func configUnits(file, text string) ([]configUnit, *xmlNode, error) {
 				if label == "" {
 					label = n.get("name")
 				}
-				if e = add(configUnit{Key: prefix + key, Label: label + " · " + prefix + key, Content: s, node: n, parent: parent, index: i}); e != nil {
+				// 同名 AnmDesc 靠条件号/序号后缀保持键唯一；标签也带上条件，列表里一眼可辨。
+				fullKey := configUnitKey(file, n, prefix+key, seen)
+				display := label + " · " + prefix + key
+				if cond := conditionUstate(n); cond != "" {
+					display = label + " · " + prefix + key + "（需拥有状态 " + cond + "）"
+				}
+				if e = add(configUnit{Key: fullKey, Label: display, Content: s, node: n, parent: parent, index: i}); e != nil {
 					return e
 				}
 			} else {
@@ -769,25 +836,29 @@ func (admin *Admin) buildClientConfig(folder string, base *archive, r clientConf
 				root.children = append(root.children, group)
 			}
 			for _, s := range w.Stages {
-				blocks := info.blocks[actionKey(s.Action)]
-				if len(blocks) != 1 {
+				variants := info.blocks[actionKey(s.Action)]
+				if len(variants) == 0 {
 					return nil, fmt.Errorf("武器 %d 动作 %s 无法解析", w.ID, s.Action)
 				}
 				refs := map[string]bool{}
-				blocks[0].node.walk(func(n *xmlNode) {
-					if n.tag == "Anm" {
-						value := n.get("name")
-						if v, err := strconv.ParseUint(value, 10, 32); err == nil && v > 0 {
-							resources = append(resources, "Data/animation/"+value+".anm")
+				// 条件分支块引用的动画/特效也要一起打包，否则带上状态时那一段
+				// 会指向客户端里不存在的资源。
+				for _, blk := range variants {
+					blk.node.walk(func(n *xmlNode) {
+						if n.tag == "Anm" {
+							value := n.get("name")
+							if v, err := strconv.ParseUint(value, 10, 32); err == nil && v > 0 {
+								resources = append(resources, "Data/animation/"+value+".anm")
+							}
 						}
-					}
 
-					for _, attr := range n.attrs {
-						if strings.EqualFold(attr.Name.Local, "effectid") && strings.TrimSpace(attr.Value) != "" && attr.Value != "0" {
-							refs[attr.Value] = true
+						for _, attr := range n.attrs {
+							if strings.EqualFold(attr.Name.Local, "effectid") && strings.TrimSpace(attr.Value) != "" && attr.Value != "0" {
+								refs[attr.Value] = true
+							}
 						}
-					}
-				})
+					})
+				}
 				refsSorted := []string{}
 				for ref := range refs {
 					refsSorted = append(refsSorted, ref)

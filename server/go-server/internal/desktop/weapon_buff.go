@@ -1244,33 +1244,3 @@ func buffPlayerAPI() []map[string]any {
 		}},
 	}
 }
-
-// logBuffRequest 是临时诊断：把每次 weapon_buff_* 请求（除 apply）的参数与结果
-// 追加到 editing 目录下的 requests.log，用来判断前端到底有没有发出请求、参数为何。
-// 定位完成后应整体删除。
-func logBuffRequest(request Request, client, folder string, result any, err error) {
-	file := filepath.Join(folder, "requests.log")
-	f, ferr := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if ferr != nil {
-		return
-	}
-	defer f.Close()
-
-	raw, _ := json.Marshal(map[string]any{
-		"source_path": request.SourcePath,
-		"merge_ws":    request.MergeWorkspace,
-		"keys":        request.Keys,
-		"target":      request.Target,
-		"weapon":      request.Weapon,
-		"ustate":      request.UState,
-		"lua_len":     len(request.LuaText),
-	})
-	body, _ := json.Marshal(result)
-	status := "ok"
-	if err != nil {
-		status = "ERR: " + err.Error()
-	}
-	line := fmt.Sprintf("%s op=%s client=%q folder=%q args=%s status=%s result=%.600s\n",
-		time.Now().Format("2006-01-02 15:04:05"), request.Operation, client, folder, string(raw), status, string(body))
-	_, _ = f.WriteString(line)
-}
