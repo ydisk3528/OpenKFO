@@ -1911,7 +1911,9 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if request.Operation == "weapon_buff_apply" {
 			return weaponBuffApply(&state, client, folder, statePath)
 		}
-		return weaponBuff(request, client, folder, &state, statePath)
+		result, err := weaponBuff(request, client, folder, &state, statePath)
+		logBuffRequest(request, client, folder, result, err)
+		return result, err
 	}
 	// 合并式导入不碰编辑集、也不依赖基线：直接读目标客户端的 config.spf2，
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过

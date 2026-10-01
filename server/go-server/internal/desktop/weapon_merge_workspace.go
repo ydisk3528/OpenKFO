@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Imports are immutable candidates. Only an explicit apply touches the client.
@@ -371,10 +372,19 @@ func (admin *Admin) weaponMergeWorkspace(r Request, client string) (any, error) 
 		payload[rel] = raw
 	}
 	if r.Operation == "weapon_merge_save" {
-		if !strings.EqualFold(filepath.Ext(r.Path), ".zip") {
+		// 前端不传 path 时（GM 部署下原生保存对话框不可用），落到固定快照目录。
+		path := r.Path
+		if strings.TrimSpace(path) == "" {
+			dir := filepath.Join(admin.Root, "dist", "config-snapshots")
+			if e = os.MkdirAll(dir, 0700); e != nil {
+				return nil, e
+			}
+			path = filepath.Join(dir, fmt.Sprintf("config-merge-%s.zip", time.Now().Format("20060102-150405")))
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".zip") {
 			return nil, fmt.Errorf("请保存为 ZIP 文件")
 		}
-		if _, e = os.Stat(r.Path); !os.IsNotExist(e) {
+		if _, e = os.Stat(path); !os.IsNotExist(e) {
 			return nil, fmt.Errorf("保存目标已存在，请使用新文件名")
 		}
 		var buffer bytes.Buffer
@@ -396,7 +406,7 @@ func (admin *Admin) weaponMergeWorkspace(r Request, client string) (any, error) 
 		if e = writer.Close(); e != nil {
 			return nil, e
 		}
-		f, e := os.OpenFile(r.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if e != nil {
 			return nil, e
 		}
@@ -409,10 +419,10 @@ func (admin *Admin) weaponMergeWorkspace(r Request, client string) (any, error) 
 			e = closeErr
 		}
 		if e != nil {
-			os.Remove(r.Path)
+			os.Remove(path)
 			return nil, e
 		}
-		return map[string]any{"path": r.Path, "message": "临时配置和新增资源已保存为 ZIP，未修改游戏"}, nil
+		return map[string]any{"path": path, "message": "临时配置和新增资源已保存为 ZIP，未修改游戏"}, nil
 	}
 	if r.Operation != "weapon_merge_apply" {
 		return nil, fmt.Errorf("未知临时配置操作")

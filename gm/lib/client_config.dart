@@ -4,8 +4,6 @@ import 'weapon_config.dart';
 import 'buff_config.dart';
 import 'weapon_merge_page.dart';
 
-import 'package:file_selector/file_selector.dart';
-
 import 'item_pictures.dart';
 
 class ClientConfigPage extends StatefulWidget {
@@ -140,10 +138,41 @@ class _ClientConfigPageState extends State<ClientConfigPage> {
 
   Future<void> chooseClient() async {
     if (!await confirmChanges() || !mounted) return;
-    final path = await getDirectoryPath(initialDirectory: resourceRoot.text);
-    if (path == null || !mounted) return;
+    // 复用武器编辑器的自绘选择器：不依赖原生文件对话框，
+    // 那种实现在部分部署下会静默失败，表现为「点了没反应」。
+    Map<String, dynamic> info = {};
+    try {
+      final r = await widget.api({'operation': 'client_directory_get'});
+      if (r is Map) info = Map<String, dynamic>.from(r);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => message = '读不到客户端列表：$e');
+      return;
+    }
+    if (!mounted) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (_) => ClientPickerDialog(
+        current: '${info['directory'] ?? base.text}',
+        savedTo: '${info['saved_to'] ?? ''}',
+        detected: [
+          for (final value in (info['detected'] as List? ?? []))
+            Map<String, dynamic>.from(value as Map),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await applyClientDirectory(picked);
+  }
+
+  /// 切换客户端并刷新来源，供目录选择器与手动输入共用。
+  Future<void> applyClientDirectory(String path) async {
+    if (path.trim().isEmpty) return;
     await task(() async {
-      await widget.api({'operation': 'client_directory_set', 'directory': path});
+      await widget.api({
+        'operation': 'client_directory_set',
+        'directory': path.trim(),
+      });
       await reloadSource();
     });
   }

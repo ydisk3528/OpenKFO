@@ -157,9 +157,29 @@ type preparedClient struct {
 	Backup  string
 }
 
+// renderOption tunes prepareClient for narrower write paths.
+type renderOption func(*renderConfig)
+
+type renderConfig struct {
+	// skipComboReconcile skips the combo-rule renumber check. Set by the
+	// buff-only import path: it never touches weapon stage numbering, so a
+	// stale combo rule (which a full weapon apply would repair or reject)
+	// must not block writing a state definition that is unrelated to it.
+	skipComboReconcile bool
+}
+
+// withoutComboReconcile is used by buff-only writes.
+func withoutComboReconcile() renderOption {
+	return func(c *renderConfig) { c.skipComboReconcile = true }
+}
+
 // prepareClient renders the edit set onto the selected client's own baseline
 // and runs every guard, without touching the disk.
-func prepareClient(entry *clientBaseline, folder string, state *weaponState, plans map[string][]Rule, info *inspection) (*preparedClient, error) {
+func prepareClient(entry *clientBaseline, folder string, state *weaponState, plans map[string][]Rule, info *inspection, options ...renderOption) (*preparedClient, error) {
+	cfg := renderConfig{}
+	for _, option := range options {
+		option(&cfg)
+	}
 	if err := ensureBaseline(entry, folder, false); err != nil {
 		return nil, err
 	}
@@ -187,9 +207,12 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	// Combo rules match the client by skillproid number, but render renumbers
 	// the hit properties of every applied stage. Translate what is
 	// unambiguous and refuse the rest before anything is written, so a saved
-	// black/white list can never silently stop matching.
-	if _, err := reconcileComboRules(info, state); err != nil {
-		return nil, err
+	// black/white list can never silently stop matching. Buff-only writes do
+	// not renumber stages, so the check is skipped there.
+	if !cfg.skipComboReconcile {
+		if _, err := reconcileComboRules(info, state); err != nil {
+			return nil, err
+		}
 	}
 	base, err := buildWeaponBase(source, state)
 	if err != nil {

@@ -18,9 +18,11 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   List<String> icons = [];
   List<dynamic> apiGroups = [];
   List<dynamic> apiEvents = [];
+  List<dynamic> apiFields = [];
   String luaEntry = '';
   String? selected;
   String message = '';
+  bool messageIsError = false;
   bool busy = false;
 
   final typeCtrl = TextEditingController();
@@ -82,6 +84,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
       setState(() {
         apiGroups = r['groups'] as List? ?? [];
         apiEvents = r['events'] as List? ?? [];
+        apiFields = r['fields'] as List? ?? [];
       });
     } catch (e) {
       // 参考面板拉不到不致命
@@ -89,7 +92,12 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   }
 
   void _fail(Object e) {
-    if (mounted) setState(() => message = '$e');
+    if (mounted) {
+      setState(() {
+        message = '$e';
+        messageIsError = true;
+      });
+    }
   }
 
   Future<void> _run(Future<void> Function() work) async {
@@ -118,6 +126,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
         final luaEdited = '${d['lua_edited'] ?? ''}';
         luaCtrl.text = luaEdited.isNotEmpty ? luaEdited : '${d['lua'] ?? ''}';
         message = '';
+        messageIsError = false;
       });
     } catch (e) {
       _fail(e);
@@ -131,6 +140,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
       nodeCtrl.text = _templateNode();
       luaCtrl.text = _templateLua();
       message = '';
+      messageIsError = false;
     });
   }
 
@@ -148,7 +158,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
 
   String _templateLua() => '''
 function OnGetUstate_( ustate, self, attackerid )
-\t-- 状态生效时被调用（ustate.xml 里要有 TrigerType="2" Type="12"）
+\t-- 状态号生效时被引擎按「状态号」自动回调（与 LogicHandle 的 Type 无关）
 \t-- 可用：ustate.id / ustate.level / ustate.duration / ustate.overlap
 \treturn;
 end''';
@@ -264,7 +274,10 @@ end''';
   Future<void> _save() async {
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
-      setState(() => message = '请先填状态号');
+      setState(() {
+        message = '请先填状态号';
+        messageIsError = false;
+      });
       return;
     }
     await _run(() async {
@@ -307,7 +320,10 @@ end''';
       final r = Map<String, dynamic>.from(
         await _call('weapon_buff_delete', {'key': t}),
       );
-      setState(() => message = '${r['message']}');
+      setState(() {
+        message = '${r['message']}';
+        messageIsError = false;
+      });
       await _catalog();
     });
   }
@@ -315,14 +331,20 @@ end''';
   Future<void> _saveLua() async {
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
-      setState(() => message = '请先填状态号');
+      setState(() {
+        message = '请先填状态号';
+        messageIsError = false;
+      });
       return;
     }
     await _run(() async {
       final r = Map<String, dynamic>.from(
         await _call('weapon_buff_lua_save', {'key': t, 'lua': luaCtrl.text}),
       );
-      setState(() => message = '${r['message']}');
+      setState(() {
+        message = '${r['message']}';
+        messageIsError = false;
+      });
     });
   }
 
@@ -350,14 +372,20 @@ end''';
     if (ok != true) return;
     await _run(() async {
       final r = Map<String, dynamic>.from(await _call('weapon_buff_apply'));
-      setState(() => message = '${r['message']}');
+      setState(() {
+        message = '${r['message']}';
+        messageIsError = false;
+      });
     });
   }
 
   Future<void> _exportBuff() async {
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
-      setState(() => message = '请先填状态号');
+      setState(() {
+        message = '请先填状态号';
+        messageIsError = false;
+      });
       return;
     }
     await _run(() async {
@@ -389,7 +417,10 @@ end''';
       return;
     }
     if (pkgs.isEmpty) {
-      setState(() => message = '没有可导入的合并包（$dir）');
+      setState(() {
+        message = '没有可导入的合并包（$dir）';
+        messageIsError = false;
+      });
       return;
     }
     final chosen = await showDialog<String>(
@@ -436,13 +467,37 @@ end''';
       ),
     );
     if (ok != true) return;
-    await _run(() async {
+    // 外层 _run 已接管 busy 与错误捕获；这里不能再包一层 _run——它的
+    // `if (busy) return` 会让导入请求根本发不出去（表现为点了确定没反应）。
+    // 合并导入要 10-30 秒，期间用模态进度框给出可见反馈。
+    if (mounted) {
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (c) => const AlertDialog(
+          content: Row(
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 16),
+              Expanded(child: Text('正在合并导入…约 10-30 秒，请勿关闭')),
+            ],
+          ),
+        ),
+      );
+    }
+    try {
       final r = Map<String, dynamic>.from(
         await _call('weapon_buff_merge_import', {'source_path': chosen}),
       );
-      setState(() => message = '${r['message']}');
-      await _catalog();
-    });
+      if (!mounted) return;
+      setState(() {
+        message = '${r['message']}';
+        messageIsError = false;
+      });
+    } finally {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    }
+    await _catalog();
   }
 
   @override
@@ -524,9 +579,36 @@ end''';
           if (message.isNotEmpty)
             Container(
               width: double.infinity,
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              color: messageIsError
+                  ? Theme.of(context).colorScheme.errorContainer
+                  : Theme.of(context).colorScheme.surfaceContainerHighest,
               padding: const EdgeInsets.all(12),
-              child: Text(message),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    messageIsError
+                        ? Icons.error_outline
+                        : Icons.check_circle_outline,
+                    size: 18,
+                    color: messageIsError
+                        ? Theme.of(context).colorScheme.onErrorContainer
+                        : null,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: SelectableText(
+                      message,
+                      style: messageIsError
+                          ? TextStyle(
+                              color:
+                                  Theme.of(context).colorScheme.onErrorContainer,
+                            )
+                          : null,
+                    ),
+                  ),
+                ],
+              ),
             ),
         ],
       ),
@@ -615,6 +697,8 @@ end''';
           style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
         ),
         const SizedBox(height: 12),
+        _fieldReferencePanel(),
+        const SizedBox(height: 12),
         Text('lua 函数（保存到 $luaEntry）'),
         TextField(
           controller: luaCtrl,
@@ -657,6 +741,25 @@ end''';
         ),
         const SizedBox(height: 16),
         _apiPanel(),
+      ],
+    );
+  }
+
+  /// ustate.xml 字段与取值说明（后端从策划注释整理），折叠显示在节点编辑器下方。
+  Widget _fieldReferencePanel() {
+    if (apiFields.isEmpty) return const SizedBox.shrink();
+    return ExpansionTile(
+      title: const Text('XML 字段说明（ustate.xml）'),
+      initiallyExpanded: false,
+      children: [
+        for (final g in apiFields)
+          ExpansionTile(
+            title: Text('${(g as Map)['title']}'),
+            children: [
+              for (final it in ((g['items'] as List? ?? [])))
+                _apiItem(it as Map),
+            ],
+          ),
       ],
     );
   }

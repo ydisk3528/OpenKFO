@@ -1,6 +1,9 @@
 package desktop
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -187,5 +190,81 @@ func TestBuffSelfMadeAndDependencies(t *testing.T) {
 	got := strings.Join(deps, ",")
 	if got != "433,434" {
 		t.Errorf("依赖应为 433,434，实际 %q", got)
+	}
+}
+
+// TestBuffOnlyApplySkipsComboReconcile pins the contract behind the merge
+// import fix: a stale combo rule (one that names hit properties the next
+// render would renumber) must not veto a buff-only write, because that write
+// never renumbers stages. A full weapon apply still refuses it, so the guard
+// is preserved for the path it was written for.
+func TestBuffOnlyApplySkipsComboReconcile(t *testing.T) {
+	installed := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")
+	if installed == "" {
+		t.Skip("set OPENKFO_WEAPON_TEST_CLIENT for installed resource validation")
+	}
+	raw, err := os.ReadFile(configPath(installed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Work in a temp client so nothing is written inside the installed one.
+	client := t.TempDir()
+	if err = os.MkdirAll(filepath.Join(client, "Data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(configPath(client), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := &clientBaseline{Directory: client, File: "baseline.spf2", SourceHash: digest(raw), AppliedHash: digest(raw)}
+	if err = os.WriteFile(filepath.Join(client, "baseline.spf2"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := loadArchive(filepath.Join(client, "baseline.spf2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = source.verify(); err != nil {
+		t.Fatal(err)
+	}
+	itemText, err := source.text("item.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := itemsFromText(entry.Directory, itemText, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := inspect(source, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.weapons) == 0 {
+		t.Fatal("no weapons inspected")
+	}
+	selfMade := ""
+	for _, weapon := range info.weapons {
+		if len(weapon.Stages) > 0 {
+			selfMade = strconv.Itoa(weapon.ID)
+			break
+		}
+	}
+	if selfMade == "" {
+		t.Fatal("no weapon with stages")
+	}
+	// A rule naming numbers the render cannot produce: the reference is dead
+	// and reconcile must reject it.
+	state := &weaponState{
+		Baselines:  map[string]*clientBaseline{normalizeDir(client): entry},
+		ComboRules: map[string]ComboRuleSet{selfMade: {Black: []ComboRuleLink{{Prev: "not-a-real-number", Cur: "not-a-real-number"}}}},
+	}
+	_, err = prepareClient(entry, client, state, state.Applied, info)
+	if err == nil {
+		t.Fatal("完整武器应用路径应当拒绝失效的连招编号")
+	}
+	if !strings.Contains(err.Error(), "连招限制引用了客户端读不到的被动编号") {
+		t.Fatalf("报错文案不符：%v", err)
+	}
+	if _, err = prepareClient(entry, client, state, state.Applied, info, withoutComboReconcile()); err != nil {
+		t.Fatalf("buff-only 路径不应被连招校验拦下：%v", err)
 	}
 }

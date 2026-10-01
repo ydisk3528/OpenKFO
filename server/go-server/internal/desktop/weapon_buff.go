@@ -699,7 +699,7 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 		return map[string]any{"images": images}, nil
 
 	case "weapon_buff_api":
-		return map[string]any{"groups": buffPlayerAPI(), "events": buffEventHooks()}, nil
+		return map[string]any{"groups": buffPlayerAPI(), "events": buffEventHooks(), "fields": buffFieldReference()}, nil
 
 	case "weapon_buff_export":
 		return weaponBuffExport(request, state, client, folder)
@@ -741,6 +741,14 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 // 不能单独落盘——客户端包里已经是「基线 + 武器编辑 + Buff 编辑」的合成结果，
 // 只套 Buff 编辑会把武器那部分抹掉，所以这里仍然走 prepareClient 那条完整管线。
 func weaponBuffApply(state *weaponState, client, folder, statePath string) (any, error) {
+	return weaponBuffApplyWith(state, client, folder, statePath, false)
+}
+
+// weaponBuffApplyWith is weaponBuffApply with an explicit write mode. buffOnly
+// is set by the merge-import path: it writes only the state/lua edits and skips
+// the combo-rule renumber guard, which belongs to weapon applies and must not
+// veto an unrelated buff import.
+func weaponBuffApplyWith(state *weaponState, client, folder, statePath string, buffOnly bool) (any, error) {
 	if runtime.GOOS == "windows" {
 		command := exec.Command("tasklist", "/FI", "IMAGENAME eq gfld.dat", "/FO", "CSV", "/NH")
 		hideWindow(command)
@@ -782,7 +790,7 @@ func weaponBuffApply(state *weaponState, client, folder, statePath string) (any,
 	if err != nil {
 		return nil, err
 	}
-	plan, err := prepareClient(entry, folder, state, state.Applied, info)
+	plan, err := prepareClient(entry, folder, state, state.Applied, info, buffOnlyOptions(buffOnly)...)
 	if err != nil {
 		return nil, err
 	}
@@ -799,6 +807,14 @@ func weaponBuffApply(state *weaponState, client, folder, statePath string) (any,
 		return nil, err
 	}
 	return map[string]any{"backup": plan.Backup, "message": "状态/Buff 已写入客户端；重启游戏后加载，实战效果仍需验证"}, nil
+}
+
+// buffOnlyOptions converts the buffOnly flag into prepareClient render options.
+func buffOnlyOptions(buffOnly bool) []renderOption {
+	if !buffOnly {
+		return nil
+	}
+	return []renderOption{withoutComboReconcile()}
 }
 
 // buffMergeManifest 是 buff 合并包的 manifest：一个状态的 ustate 节点 + lua 函数，
@@ -1085,7 +1101,7 @@ func weaponBuffMergeImport(request Request, state *weaponState, client, folder, 
 		}
 	}
 
-	result, err := weaponBuffApply(state, client, folder, statePath)
+	result, err := weaponBuffApplyWith(state, client, folder, statePath, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,12 +1121,93 @@ func weaponBuffMergeImport(request Request, state *weaponState, client, folder, 
 // buffEventHooks 列出引擎会回调的 lua 函数名模板。
 func buffEventHooks() []map[string]string {
 	return []map[string]string{
-		{"name": "OnGetUstate_<N>", "desc": "状态生效时（ustate.xml 里要有 TrigerType=\"2\" Type=\"12\"）"},
-		{"name": "OnDelUstate_<N>", "desc": "状态解除时"},
-		{"name": "OnUstateTimer_<N>", "desc": "状态计时回调（需状态声明 TimerInvoke）"},
+		{"name": "OnGetUstate_<N>", "desc": "状态号 N 生效时被引擎回调（按状态号派发，与 LogicHandle 的 Type 无关）"},
+		{"name": "OnDelUstate_<N>", "desc": "状态号 N 解除时被引擎回调"},
+		{"name": "OnUstateTimer_<N>", "desc": "状态号 N 计时回调（需状态声明 TimerInvoke）"},
 		{"name": "OnUstateHitEvent_<N>", "desc": "持有该状态时命中敌人"},
 		{"name": "OnUstateBeHitEvent_<N>", "desc": "持有该状态时被击中"},
 		{"name": "OnUstatePlayerStateChange_<N>", "desc": "持有该状态时角色状态切换"},
+	}
+}
+
+// buffFieldReference 是 ustate.xml 各字段与取值的说明，内容整理自
+// ustate.xml 头部的策划注释 + 全库 <Data> 节点的中文注释（权威来源）。
+// 按分组返回，前端直接渲染成折叠参考面板。
+func buffFieldReference() []map[string]any {
+	return []map[string]any{
+		{"title": "<Data> 属性（状态声明）", "items": []map[string]string{
+			{"name": "type", "desc": "状态号（唯一 ID）。引擎按它派发 lua：OnGetUstate_<type> / OnDelUstate_<type> / OnUstateTimer_<type>"},
+			{"name": "DealType", "desc": "叠加规则：1=替换（高等级可替换低等级） 2=叠加 3=丢弃"},
+			{"name": "ActiveState", "desc": "激活态标记（0/1）"},
+			{"name": "TransformStop", "desc": "变身时是否清除该状态（1=清除）"},
+			{"name": "Icon", "desc": "状态图标路径，如 Picture\\AbnormalState\\abnormalstate8.png"},
+			{"name": "DeadAction", "desc": "死亡动作编号（0=无）"},
+			{"name": "AudioEffectId", "desc": "音效编号（空=无）"},
+			{"name": "HitDownStop", "desc": "受击倒地时是否清除（0/1）"},
+			{"name": "HitStop", "desc": "受击硬直时是否清除（0/1）"},
+			{"name": "ReliveStop", "desc": "复活时是否清除（0/1）"},
+			{"name": "SwitchWeaponStop", "desc": "切换武器时是否清除（0/1）"},
+			{"name": "KeepAttackingEffect", "desc": "持续攻击特效标记"},
+			{"name": "TalismanState", "desc": "法宝状态标记"},
+		}},
+		{"title": "<LogicHandle> 属性（数值效果）", "items": []map[string]string{
+			{"name": "TrigerType", "desc": "触发时机：2=状态生效时 5=被伤害时 4=用大招时 1=命中时(罕见) 0=无/纯特效"},
+			{"name": "Type", "desc": "效果类型（见下方 Type 枚举）。注意：Type=12 不是「调 lua」，lua 由状态号派发"},
+			{"name": "level1..level8", "desc": "各等级效果数值，按状态等级索引；具体含义由 Type 决定。可写小数（如 0.25）"},
+		}},
+		{"title": "Type 枚举（效果类型，整理自策划注释）", "items": []map[string]string{
+			{"name": "0", "desc": "纯特效 / 占位，无数值效果"},
+			{"name": "1", "desc": "持续减血 DoT（中毒/灼烧/瘟疫），level=总减血量（引擎换算每帧）"},
+			{"name": "2", "desc": "速度：level 负=减速，正=加速（速度属性值）"},
+			{"name": "3", "desc": "减攻（level=减攻击百分比）"},
+			{"name": "4", "desc": "虚弱 / 伤害加深（level=减防或加伤百分比）"},
+			{"name": "5", "desc": "混乱（操作键乱）"},
+			{"name": "6", "desc": "恐惧（操作键乱，高级）"},
+			{"name": "7", "desc": "加攻（level=加攻击百分比）"},
+			{"name": "8", "desc": "加防（level=减被伤害百分比）"},
+			{"name": "9", "desc": "无敌"},
+			{"name": "10", "desc": "隐身"},
+			{"name": "11", "desc": "变身"},
+			{"name": "12", "desc": "改血量：level 正=加血，负=扣血（如 18 加血 / 34 内伤 / 265 闪电扣血）。不是 lua"},
+			{"name": "13", "desc": "冰冻 / 禁锢（僵直），level 无效"},
+			{"name": "14", "desc": "眩晕，level 无效"},
+			{"name": "15", "desc": "加技能点"},
+			{"name": "16", "desc": "加瞄准（level=距离）"},
+			{"name": "17", "desc": "麻痹"},
+			{"name": "18", "desc": "无法防御（破防）"},
+			{"name": "19", "desc": "范围光环（痛苦结界等，level=半径）"},
+			{"name": "20", "desc": "全面怒气增长（level=倍乘系数）"},
+			{"name": "21", "desc": "快速怒气增长（level=倍乘系数）"},
+			{"name": "22", "desc": "伤害反弹（level=反弹系数，0.3=30%、1.0=100%，支持小数）"},
+			{"name": "23", "desc": "缴械（空手）"},
+			{"name": "24", "desc": "致盲 / 闪光"},
+			{"name": "25", "desc": "息怒（封怒气）"},
+			{"name": "26", "desc": "重生（level=复活后生命量，0=满血）"},
+			{"name": "27", "desc": "假无敌 / 霸体"},
+			{"name": "28", "desc": "吸血（固定血量）"},
+			{"name": "29", "desc": "吸血（按比例，1=100%）"},
+			{"name": "30", "desc": "免疫（Antibuf 配置索引）"},
+			{"name": "31", "desc": "清除负面状态（level=清除/免疫配置索引）"},
+			{"name": "32", "desc": "免疫"},
+			{"name": "33", "desc": "加血（加血量条，如生命吊坠）"},
+			{"name": "35", "desc": "综合减速（减攻减防减移速）"},
+			{"name": "36", "desc": "封技能 / 禁怒"},
+			{"name": "37", "desc": "延时攻击"},
+			{"name": "38", "desc": "换装（红/绿队初始换装）"},
+			{"name": "39", "desc": "束缚"},
+			{"name": "41", "desc": "百分比减血（感电，level=-20 即减当前血 20%）"},
+			{"name": "42", "desc": "武器切换动作加快"},
+		}},
+		{"title": "<Script> 回调声明", "items": []map[string]string{
+			{"name": "TimerInvoke", "desc": "计时回调间隔（毫秒），触发 OnUstateTimer_<type>"},
+			{"name": "HitInvoke", "desc": "持该状态命中敌人时回调 OnUstateHitEvent_<type>"},
+			{"name": "BeHitInvoke", "desc": "持该状态被击中时回调 OnUstateBeHitEvent_<type>"},
+			{"name": "StateInvoke", "desc": "持该状态角色状态切换时回调 OnUstatePlayerStateChange_<type>"},
+		}},
+		{"title": "<Behave> 表现（特效/动画）", "items": []map[string]string{
+			{"name": "<Effect>", "desc": "EffectId=特效编号 BoneId=骨骼挂点 EffectBindType=绑定方式(3=跟随)"},
+			{"name": "<Anim>", "desc": "AnimId=动画编号 AnimHandleType=播放方式 PRI=优先级 CanBreak=可打断"},
+		}},
 	}
 }
 
@@ -1146,4 +1243,34 @@ func buffPlayerAPI() []map[string]any {
 			{"name": "Player.SetDisableTalisman", "signature": "Player.SetDisableTalisman(目标ID, 0/1)", "desc": "开关法宝"},
 		}},
 	}
+}
+
+// logBuffRequest 是临时诊断：把每次 weapon_buff_* 请求（除 apply）的参数与结果
+// 追加到 editing 目录下的 requests.log，用来判断前端到底有没有发出请求、参数为何。
+// 定位完成后应整体删除。
+func logBuffRequest(request Request, client, folder string, result any, err error) {
+	file := filepath.Join(folder, "requests.log")
+	f, ferr := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if ferr != nil {
+		return
+	}
+	defer f.Close()
+
+	raw, _ := json.Marshal(map[string]any{
+		"source_path": request.SourcePath,
+		"merge_ws":    request.MergeWorkspace,
+		"keys":        request.Keys,
+		"target":      request.Target,
+		"weapon":      request.Weapon,
+		"ustate":      request.UState,
+		"lua_len":     len(request.LuaText),
+	})
+	body, _ := json.Marshal(result)
+	status := "ok"
+	if err != nil {
+		status = "ERR: " + err.Error()
+	}
+	line := fmt.Sprintf("%s op=%s client=%q folder=%q args=%s status=%s result=%.600s\n",
+		time.Now().Format("2006-01-02 15:04:05"), request.Operation, client, folder, string(raw), status, string(body))
+	_, _ = f.WriteString(line)
 }

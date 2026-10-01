@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:file_selector/file_selector.dart';
 
 List<String> compareLevelCosts(List<dynamic> client, List<dynamic> server) {
   final a = {for (final r in client) r['level']: r['next_experience']};
@@ -107,26 +106,6 @@ class _ConfigInspectPageState extends State<ConfigInspectPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: busy
-                      ? null
-                      : () => run(() async {
-                          final f = await openFile(
-                            acceptedTypeGroups: [
-                              const XTypeGroup(
-                                label: '配置包',
-                                extensions: ['spf2'],
-                              ),
-                            ],
-                          );
-                          if (f != null && mounted) {
-                            path.text = f.path;
-                            await load();
-                          }
-                        }),
-                  child: const Text('选择文件'),
                 ),
                 const SizedBox(width: 8),
                 FilledButton(

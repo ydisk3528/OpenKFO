@@ -1,4 +1,3 @@
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 /// ZIP imports have their own working copy; viewing a diff never writes a game.
@@ -52,19 +51,28 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
   }
 
   Future<void> chooseFile() async {
-    try {
-      final f = await openFile(
-        acceptedTypeGroups: [
-          const XTypeGroup(label: '武器合并包', extensions: ['zip']),
-        ],
-      );
-      if (f != null && mounted) {
-        source.text = f.path;
-        await compare();
-      }
-    } catch (e) {
-      if (mounted) setState(() => message = '选择文件失败：$e');
+    // 原生文件对话框（file_selector）在部分部署下抛 MissingPluginException，
+    // 改用自绘「最近武器包」列表；也可以直接在文本框填写 ZIP 路径。
+    if (packages.isEmpty) {
+      setState(() => message = '没有最近的武器包，请直接在文本框填写 ZIP 路径');
+      return;
     }
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (c) => SimpleDialog(
+        title: const Text('选择武器合并包'),
+        children: [
+          for (final p in packages)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(c, '${(p as Map)['path']}'),
+              child: Text('${p['name']}'),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    source.text = picked;
+    await compare();
   }
 
   Future<void> compare() async {
@@ -112,32 +120,20 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
   }
 
   Future<bool> save() async {
-    try {
-      final location = await getSaveLocation(
-        suggestedName:
-            'config-merge-${DateTime.now().millisecondsSinceEpoch}.zip',
-        acceptedTypeGroups: [
-          const XTypeGroup(label: '配置及资源快照', extensions: ['zip']),
-        ],
-      );
-      if (location == null || !mounted) return false;
-      return await task(() async {
-        final r = await widget.api({
-          'operation': 'weapon_merge_save',
-          'merge_workspace': workspace,
-          if (widget.clientConfig != null) 'client_config': widget.clientConfig,
-          'path': location.path,
-        });
-        if (mounted)
-          setState(() {
-            needsSave = false;
-            message = '${r['message']}\n${r['path']}';
-          });
+    // 原生保存对话框（file_selector）在部分部署下抛 MissingPluginException，
+    // 改为不传路径，由后端存到固定快照目录；消息里会显示完整路径。
+    return await task(() async {
+      final r = await widget.api({
+        'operation': 'weapon_merge_save',
+        'merge_workspace': workspace,
+        if (widget.clientConfig != null) 'client_config': widget.clientConfig,
       });
-    } catch (e) {
-      if (mounted) setState(() => message = '保存失败：$e');
-      return false;
-    }
+      if (mounted)
+        setState(() {
+          needsSave = false;
+          message = '${r['message']}\n${r['path']}';
+        });
+    });
   }
 
   Future<void> apply() async {

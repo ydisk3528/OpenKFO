@@ -178,7 +178,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> chooseClient(/* optional initial pick */) async {
     final picked = await showDialog<String>(
       context: context,
-      builder: (_) => _ClientPickerDialog(
+      builder: (_) => ClientPickerDialog(
         current: '${_clientInfo['directory'] ?? ''}',
         savedTo: '${_clientInfo['saved_to'] ?? ''}',
         detected: [
@@ -8292,8 +8292,12 @@ class _ComboDonorDialogState extends State<_ComboDonorDialog> {
 /// Detection only covers folders next to the server tree, so a manual path
 /// field is always offered as a fallback. A plain ListTile-based list is used
 /// instead of RadioListTile to stay clear of the Radio API churn.
-class _ClientPickerDialog extends StatefulWidget {
-  const _ClientPickerDialog({
+/// 客户端目录选择器：自动列出探测到的客户端 + 允许手填路径。
+/// 刻意不依赖原生文件对话框（file_selector 插件在部分部署下会静默失败），
+/// 因此武器编辑器与客户端配置页共用同一份实现。
+class ClientPickerDialog extends StatefulWidget {
+  const ClientPickerDialog({
+    super.key,
     required this.current,
     required this.detected,
     this.savedTo = '',
@@ -8304,10 +8308,10 @@ class _ClientPickerDialog extends StatefulWidget {
   final String savedTo;
 
   @override
-  State<_ClientPickerDialog> createState() => _ClientPickerDialogState();
+  State<ClientPickerDialog> createState() => _ClientPickerDialogState();
 }
 
-class _ClientPickerDialogState extends State<_ClientPickerDialog> {
+class _ClientPickerDialogState extends State<ClientPickerDialog> {
   String chosen = '';
   final manual = TextEditingController();
 
@@ -8401,7 +8405,7 @@ class _ClientPickerDialogState extends State<_ClientPickerDialog> {
                                 ? '$directory\n${problem.isEmpty ? '无法作为客户端目录' : problem}'
                                 : (hash.isEmpty
                                       ? directory
-                                      : '$directory\nconfig.spf2  ${hash.substring(0, 12)}…'),
+                                      : '$directory\nconfig.spf2  ${hash.length > 12 ? hash.substring(0, 12) : hash}…'),
                             style: TextStyle(
                               fontSize: 11,
                               color: valid
