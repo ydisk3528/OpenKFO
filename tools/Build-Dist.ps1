@@ -2,7 +2,7 @@
 param(
     [string]$Go = 'go',
     [string]$Flutter = 'flutter',
-    [string]$ManagementEndpoint = 'https://vxziouwkf.top/gm/api'
+    [string]$ManagementEndpoint = 'https://vxfnqfjdr.top/gm/api'
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
