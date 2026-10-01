@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"kungfu.local/server/internal/desktop"
@@ -88,7 +89,7 @@ func service(action string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(ctx, "systemctl", action, "kungfu-go").Run(); err != nil {
-		return fmt.Errorf("二区服务 %s 失败", action)
+		return fmt.Errorf("三区服务 %s 失败", action)
 	}
 	return nil
 }
@@ -103,39 +104,58 @@ func health() error {
 		}
 		time.Sleep(time.Second)
 	}
-	return fmt.Errorf("二区健康检查未通过")
+	return fmt.Errorf("三区健康检查未通过")
 }
 func database() (*persistence.Store, error) {
-	p, e := exec.Command("systemctl", "show", "kungfu-go", "--property=MainPID", "--value").Output()
+	p, e := exec.Command("systemctl", "show", "kungfu-go", "--property=MainPID").Output()
 	if e != nil {
 		return nil, e
 	}
-	b, e := os.ReadFile("/proc/" + strings.TrimSpace(string(p)) + "/environ")
+	b, e := os.ReadFile("/proc/" + strings.TrimPrefix(strings.TrimSpace(string(p)), "MainPID=") + "/environ")
 	if e != nil {
-		return nil, fmt.Errorf("二区未运行，不能读取数据库环境")
+		b, e = os.ReadFile("/etc/kungfu-go/game.env")
+		if e != nil {
+			return nil, fmt.Errorf("无法读取三区数据库环境")
+		}
+		b = []byte(strings.ReplaceAll(string(b), "\n", "\x00"))
 	}
 	for _, v := range strings.Split(string(b), "\x00") {
+		v = strings.TrimSpace(v)
 		if strings.HasPrefix(v, "KK_MYSQL_DSN=") {
 			dsn := strings.TrimPrefix(v, "KK_MYSQL_DSN=")
-			// Keep this helper realm-specific; never connect to realm 1 by mistake.
+			// Keep this helper realm-specific; never connect to another realm by mistake.
 			parsed, err := mysql.ParseDSN(dsn)
-			if err != nil || parsed.DBName != "kungfu_realm2" {
-				return nil, fmt.Errorf("数据库不是二区，拒绝同步")
+			if err != nil || parsed.DBName != "kungfu_realm3" {
+				return nil, fmt.Errorf("数据库不是三区，拒绝同步")
 			}
 			s, err := persistence.OpenExisting(dsn)
 			if err != nil {
-				return nil, fmt.Errorf("无法连接二区数据库")
+				return nil, fmt.Errorf("无法连接三区数据库")
 			}
 			return s, nil
 		}
 	}
-	return nil, fmt.Errorf("缺少二区数据库环境")
+	return nil, fmt.Errorf("缺少三区数据库环境")
 }
 func atomic(path string, b []byte) error {
 	if e := os.WriteFile(path+".next", b, 0600); e != nil {
 		return e
 	}
+	if info, err := os.Stat(path); err == nil {
+		if err = os.Chmod(path+".next", info.Mode().Perm()); err != nil {
+			return err
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			if err = os.Chown(path+".next", int(st.Uid), int(st.Gid)); err != nil {
+				return err
+			}
+		}
+	}
 	return os.Rename(path+".next", path)
+}
+
+func requiresRestart(oldHash, newHash, versionURL, currentVersion, nextVersion string, running bool) bool {
+	return oldHash != newHash || versionURL != base+"version/version.json" || currentVersion != nextVersion || !running
 }
 
 func run(q request) (any, error) {
@@ -167,7 +187,7 @@ func run(q request) (any, error) {
 	var oldHash, versionURL string
 	json.Unmarshal(cfg["config_hash"], &oldHash)
 	json.Unmarshal(cfg["release_version_url"], &versionURL)
-	if versionURL != base+"version/version.json" {
+	if versionURL != "" && versionURL != base+"version/version.json" {
 		return nil, fmt.Errorf("服务器没有使用固定 OSS 更新源")
 	}
 	s, e := database()
@@ -182,7 +202,14 @@ func run(q request) (any, error) {
 	if a.ClientHash != "" && a.ClientHash != oldHash {
 		return nil, fmt.Errorf("服务器和数据库哈希已不一致，请先修复")
 	}
-	result := map[string]any{"realm": "二区", "config_hash": oldHash, "database_hash": a.ClientHash, "restarted": false}
+	pid, pidErr := exec.Command("systemctl", "show", "kungfu-go", "--property=MainPID").Output()
+	if pidErr != nil {
+		return nil, pidErr
+	}
+	running := strings.TrimPrefix(strings.TrimSpace(string(pid)), "MainPID=") != "0" && strings.TrimPrefix(strings.TrimSpace(string(pid)), "MainPID=") != ""
+	var requiredRelease string
+	json.Unmarshal(cfg["required_client_release"], &requiredRelease)
+	result := map[string]any{"service_running": running, "realm": "三区", "config_hash": oldHash, "database_hash": a.ClientHash, "restarted": false}
 	if q.Mode == "status" {
 		result["state"] = "ready"
 		return result, nil
@@ -242,14 +269,18 @@ func run(q request) (any, error) {
 			return nil, e
 		}
 		if !q.AllowRestart {
-			return nil, fmt.Errorf("配置哈希变化，需要确认允许重启二区")
+			return nil, fmt.Errorf("配置哈希变化，需要确认允许重启三区")
 		}
+	}
+	restartRequired := requiresRestart(oldHash, f.SHA256, versionURL, requiredRelease, q.Version, running)
+	if restartRequired && !q.AllowRestart {
+		return nil, fmt.Errorf("版本、配置或运行状态变化，需要确认允许启动/重启三区")
 	}
 	result["target_hash"] = f.SHA256
 	result["version"] = q.Version
 	if q.Mode == "prepare" {
 		result["state"] = "prepared"
-		result["restart_required"] = oldHash != f.SHA256
+		result["restart_required"] = restartRequired
 		return result, nil
 	}
 	p, e := fetch(base+"version/version.json", 262144)
@@ -263,7 +294,7 @@ func run(q request) (any, error) {
 	if json.Unmarshal(p, &pointer) != nil || pointer.Version != q.Version || pointer.ClientManifest != base+"manifest/"+q.Version+"/client.json" {
 		return nil, fmt.Errorf("OSS 当前版本已改变，拒绝同步旧版本")
 	}
-	if oldHash == f.SHA256 {
+	if !restartRequired {
 		if e = health(); e != nil {
 			return nil, e
 		}
@@ -293,12 +324,20 @@ func run(q request) (any, error) {
 	if e = service("stop"); e != nil {
 		return nil, e
 	}
-	tx, e := s.BeginStageRebind(oldHash, f.SHA256)
-	if e != nil {
-		return nil, fmt.Errorf("二区已停止，数据库同步失败，备份：%s：%w", backup, e)
+	var tx interface {
+		Commit() error
+		Rollback() error
 	}
-	defer tx.Rollback()
+	if oldHash != f.SHA256 {
+		tx, e = s.BeginStageRebind(oldHash, f.SHA256)
+		if e != nil {
+			return nil, fmt.Errorf("三区已停止，数据库同步失败，备份：%s：%w", backup, e)
+		}
+		defer tx.Rollback()
+	}
 	cfg["config_hash"], _ = json.Marshal(f.SHA256)
+	cfg["required_client_release"], _ = json.Marshal(q.Version)
+	cfg["release_version_url"], _ = json.Marshal(base + "version/version.json")
 	updated, _ := json.MarshalIndent(cfg, "", "  ")
 	if e = atomic(cpath, updated); e != nil {
 		return nil, e
@@ -306,11 +345,14 @@ func run(q request) (any, error) {
 	if e = atomic(baseline, b); e != nil {
 		return nil, e
 	}
-	if e = tx.Commit(); e != nil {
+	if tx != nil {
+		e = tx.Commit()
+	}
+	if e != nil {
 		// COMMIT may succeed despite a lost acknowledgement. Re-read, never guess.
 		a, check := s.StageAccess()
 		if check != nil || a.ClientHash != f.SHA256 {
-			return nil, fmt.Errorf("数据库提交未确认，二区保持停止，请检查 %s", backup)
+			return nil, fmt.Errorf("数据库提交未确认，三区保持停止，请检查 %s", backup)
 		}
 	}
 	if e = service("start"); e != nil {
@@ -318,7 +360,7 @@ func run(q request) (any, error) {
 	}
 	if e = health(); e != nil {
 		_ = service("stop")
-		return nil, fmt.Errorf("新配置已同步但启动验证失败，二区已停止；备份：%s", backup)
+		return nil, fmt.Errorf("新配置已同步但启动验证失败，三区已停止；备份：%s", backup)
 	}
 	if e = os.Remove(filepath.Join(state, "recovery.json")); e != nil {
 		return nil, e

@@ -43,6 +43,7 @@ func (hub *Hub) resumePeer(s *Session, receipt string) error {
 				// Close can precede deferred Detach. Release only a confirmed
 				// closed session; never take an active process's transport ID.
 				hub.leave(other, false)
+				hub.removeHornSession(other)
 				delete(hub.Sessions, other.UID)
 			default:
 				return errPeerOccupied
@@ -81,6 +82,7 @@ func (hub *Hub) resetNativeSession(s *Session, sdk uint32) {
 			ch.Phase = "closed"
 		}
 	}
+	hub.removeHornSession(s)
 	s.GameChannel, s.BootstrapChannel = 0, 0
 	s.LobbyID = 0
 	s.TitleOffer = 0

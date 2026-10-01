@@ -57,7 +57,7 @@ func NewServer(hub *Hub, certificate tls.Certificate) *Server {
 
 func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	if server.Hub.Config.ExperimentalNeutralNPC {
+	if server.Hub.Config.ExperimentalNeutralNPC && server.Hub.Config.LocalNeutralNPCProbe {
 		mux.HandleFunc("GET /experimental/neutral-npc", server.Hub.neutralNPCStatus)
 		mux.HandleFunc("GET /experimental/neutral-npc-plan", server.Hub.neutralNPCStatus)
 		mux.HandleFunc("POST /experimental/neutral-npc-failure", server.Hub.neutralNPCFailure)
@@ -242,6 +242,7 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		return
 	}
 	session.ClientRelease = auth.ClientRelease
+	session.ClientConfigHash = auth.ConfigHash
 	defer server.Hub.Detach(session)
 	grant, peer := server.registerDatagramPeer(session)
 	defer server.unregisterDatagramPeer(peer)
@@ -308,10 +309,11 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 					report()
 					continue
 				}
-				connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				connection.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				writeErr := encoder.Encode(frame)
 				report()
 				if writeErr != nil {
+					log.Printf("session_write_end uid=%d op=%s error=%v", session.UID, frame.Op, writeErr)
 					return
 				}
 			}

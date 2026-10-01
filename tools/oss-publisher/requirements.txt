@@ -1,1 +1,2 @@
 alibabacloud-oss-v2==1.4.0
+paramiko==5.0.0

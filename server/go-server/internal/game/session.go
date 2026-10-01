@@ -21,6 +21,7 @@ import (
 // Hub serializes room transitions. Network writes run outside this lock so a
 // slow player cannot block the other players. Split by room if scale requires it.
 type Hub struct {
+	Horns                *HornManager
 	ioCond               *sync.Cond
 	ioPaused             bool
 	ioScope              *storageScope
@@ -54,10 +55,13 @@ type Channel struct {
 }
 
 type Session struct {
+	HornPending          bool
+	LastHorn             time.Time
 	TreasureDraw         *treasureDrawState
 	TreasureSerial       uint32
 	TreasurePreviewAt    time.Time
 	ClientRelease        string
+	ClientConfigHash     string
 	UpdateNoticeVersion  string
 	RandomWeaponMode     uint32
 	StageViewRequested   bool
@@ -128,6 +132,7 @@ func (hub *Hub) Attach(account persistence.Account, port uint16, peerReceipt ...
 		case <-previous.Done:
 			hub.scopeSession(previous)
 			hub.leave(previous, false)
+			hub.removeHornSession(previous)
 			delete(hub.Sessions, account.UID)
 		default:
 		}
@@ -215,6 +220,7 @@ func (hub *Hub) Detach(session *Session) {
 		return
 	}
 	hub.leave(session, false)
+	hub.removeHornSession(session)
 	delete(hub.Sessions, session.UID)
 	session.Close()
 }
@@ -312,12 +318,17 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 	case "logout":
 		hub.leave(session, false)
 		session.LoggedOut = true
+		hub.removeHornSession(session)
 		delete(hub.Sessions, session.UID)
 		session.emit(tunnel.Frame{Op: "logged_out"})
 		log.Printf("logout_complete uid=%d account=%q", session.UID, session.Account)
 		return nil
 	case "ping":
-		session.emit(tunnel.Frame{Op: "pong"})
+		reply := tunnel.Frame{Op: "pong"}
+		if frame.Kind == "mod" {
+			reply.Data = hub.modStatus(session)
+		}
+		session.emit(reply)
 		return nil
 	case "ready":
 		session.TablesReady = true
@@ -330,6 +341,7 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 	case "close":
 		if frame.Channel == session.GameChannel {
 			hub.leave(session, false)
+			hub.removeHornSession(session)
 			session.GameChannel = 0
 			session.LobbyID = 0
 			session.Bound = false
@@ -469,8 +481,11 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 			session.send(channel.ID, vipIdentityPacket(session.VIPKind, session.VIPShopPercent))
 			return hub.profileReady(session)
 		}
-		if time.Now().After(session.HandoffUntil) || session.GameChannel != 0 {
-			return persistence.ErrDenied
+		if time.Now().After(session.HandoffUntil) {
+			return fmt.Errorf("lobby handoff expired: %w", persistence.ErrDenied)
+		}
+		if session.GameChannel != 0 {
+			return fmt.Errorf("lobby channel already active: %w", persistence.ErrDenied)
 		}
 		lobbyID, err := hub.admitLobby(protocol.ReadUint32(payload, 8))
 		if err != nil {
@@ -481,6 +496,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		session.GrantUntil = time.Time{}
 		session.GameChannel = channel.ID
 		channel.Phase = "lobby"
+		hub.hornManager().join(session)
 		reply := protocol.Lobby(session.Port)
 		protocol.WriteUint32(reply.Payload, 0, lobbyID)
 		protocol.WriteUint32(reply.Payload, 26, lobbyID)
@@ -534,6 +550,7 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 		// tunnel logout (before password reauthentication) releases the account.
 		session.send(channel.ID, protocol.Message{ID: 2070})
 		hub.leave(session, false)
+		hub.removeHornSession(session)
 		session.GameChannel, session.BootstrapChannel = 0, 0
 		session.LobbyID = 0
 		session.StageViewRequested = false
@@ -580,6 +597,9 @@ func (hub *Hub) route(session *Session, channel *Channel, message protocol.Messa
 	}
 	if message.ID == msgFriends {
 		return hub.friends(session, payload)
+	}
+	if message.ID == 2480 || message.ID == 2486 || message.ID == 2481 {
+		return hub.horn(session, message)
 	}
 	if message.ID == 5000 || message.ID == 5002 {
 		if err := hub.chat(session, message); err != nil {

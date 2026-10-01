@@ -4,9 +4,19 @@ import (
 	"bytes"
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
+	"log"
 )
 
-func (h *Hub) tasks(s *Session, m protocol.Message) error {
+func (h *Hub) tasks(s *Session, m protocol.Message) (result error) {
+	// Task configuration/read errors are not transport/authentication failures.
+	// Never retry a grant here: its transaction may already have committed.
+	defer func() {
+		if result != nil {
+			log.Printf("task_request_failed uid=%d message=%d error=%v", s.UID, m.ID, result)
+			s.sendGame(notice("[TASK-001] 任务服务暂时不可用，请稍后刷新；奖励结果请以背包和余额为准。"))
+			result = nil
+		}
+	}()
 	var action uint32
 	var key uint16
 	var awards persistence.TaskAwards

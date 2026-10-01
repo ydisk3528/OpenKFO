@@ -176,3 +176,11 @@ func TestTreasureTicketsOnItemsShelf(t *testing.T) {
 		t.Fatal("treasure tickets missing", got)
 	}
 }
+
+func TestCardShelfIncludesHornVariants(t *testing.T) {
+	source := []shelfOffer{shelfFixture(1, 10, 71, true), shelfFixture(2, 10, 71, true), shelfFixture(3, 10, 71, false)}
+	got := arrangeCompatibleShelf(67, 67, compatibleShelfKinds(67, 67), source)
+	if len(got) != 2 {
+		t.Fatalf("horn variants missing: %d", len(got))
+	}
+}

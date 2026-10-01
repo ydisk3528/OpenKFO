@@ -201,9 +201,15 @@ func (r RewardRules) Validate() error {
 		if int(row.Level) != i+1 {
 			return fmt.Errorf("等级必须从1开始连续且不能重复")
 		}
-		for _, v := range []uint32{row.WinGold, row.LossGold, row.DrawGold, row.WinExperience, row.LossExperience, row.DrawExperience} {
+		for _, v := range []uint32{row.WinGold, row.LossGold, row.DrawGold} {
 			if v > 1000000 {
 				return fmt.Errorf("第 %d 级单局奖励须为 0–1000000", row.Level)
+			}
+		}
+		// Experience uses signed DWORD client fields; do not raise currency limits.
+		for _, v := range []uint32{row.WinExperience, row.LossExperience, row.DrawExperience} {
+			if v > 2147483647 {
+				return fmt.Errorf("第 %d 级单局经验须为 0–2147483647", row.Level)
 			}
 		}
 		if row.NextExperience > 2147483647 || (int(row.Level) == len(r.Levels) && row.NextExperience != 0) {

@@ -2,6 +2,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kungfu_item_manager/reward_table.dart';
 
 void main() {
+  test('large experience does not relax currency bounds', () {
+    final rows = rewardRows({});
+    rows[149]['win_experience'] = 200000000;
+    validateRewardRows(rows);
+    rows[149]['win_gold'] = 1000001;
+    expect(() => validateRewardRows(rows), throwsFormatException);
+    rows[149]['win_gold'] = 0;
+    rows[149]['win_experience'] = 2147483648;
+    expect(() => validateRewardRows(rows), throwsFormatException);
+  });
   test('drop-only changes are included in online preview', () {
     final a = {
       'drops': [

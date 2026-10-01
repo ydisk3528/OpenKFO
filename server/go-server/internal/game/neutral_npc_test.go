@@ -9,6 +9,34 @@ import (
 	"kungfu.local/server/internal/protocol"
 )
 
+func TestNeutralNPCRandomPlanIsFixedForReplicas(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		h, owner, _, _ := combatFixture()
+		h.Config.ExperimentalNeutralNPC = true
+		r := owner.Room
+		r.Request[46] = byte(protocol.TeamSurvival)
+		m := extendedPacket(neutralNPCRequest, 79, owner.UID, 100, 43)
+		protocol.WriteUint32(m.Payload, 71, 3)
+		if err := h.battleMessage(owner, owner.game(), m); err != nil {
+			t.Fatal(err)
+		}
+		n := r.NeutralNPC
+		if n == nil || n.monsters < 1 || n.monsters > 4 || (n.template != 0 && n.template != 2) {
+			t.Fatal("invalid resolved random plan")
+		}
+		if err := h.battleMessage(owner, owner.game(), m); err != nil {
+			t.Fatal(err)
+		}
+		if r.NeutralNPC != n {
+			t.Fatal("duplicate request rerolled plan")
+		}
+		p := r.neutralNPCPlan()
+		if protocol.ReadUint32(p, 52) != n.monsters || protocol.ReadUint32(p, 56) != n.template {
+			t.Fatal("replica plan differs")
+		}
+	}
+}
+
 func requestNeutralNPC(t *testing.T, h *Hub, owner *Session) protocol.Message {
 	t.Helper()
 	m := extendedPacket(neutralNPCRequest, 67, owner.UID, 100, 43)
@@ -209,7 +237,7 @@ func TestNeutralNPCLeaveBeforeAndAfterReady(t *testing.T) {
 }
 
 func TestNeutralNPCMultipleIdentitiesAndAdmission(t *testing.T) {
-	for _, options := range [][3]uint32{{0, 0, 0}, {5, 0, 0}, {2, 3, 0}, {2, 0, 2}, {4, 2, 1}} {
+	for _, options := range [][3]uint32{{5, 0, 0}, {2, 4, 0}, {2, 0, 2}, {4, 2, 1}} {
 		h, owner, peer, _ := combatFixture()
 		h.Config.ExperimentalNeutralNPC = true
 		r := owner.Room
@@ -258,5 +286,50 @@ func TestNeutralNPCMultipleIdentitiesAndAdmission(t *testing.T) {
 		if len(p) != 192 || protocol.ReadUint32(p, 0) != 0x3343504e || protocol.ReadUint32(p, 52) != 4 || protocol.ReadUint32(p, 56) != 2 || protocol.ReadUint32(p, 60) != 1 {
 			t.Fatal("NPC3 metadata mismatch")
 		}
+	}
+}
+
+func TestModStatusOwnRoomAndPVEOnly(t *testing.T) {
+	h, owner, peer, outsider := combatFixture()
+	h.Config.ExperimentalNeutralNPC = true
+	r := owner.Room
+	r.Request[46] = byte(protocol.TeamSurvival)
+	p := h.modStatus(peer)
+	if len(p) != 216 || protocol.ReadUint64(p, 8) != peer.UID || protocol.ReadUint64(p, 24) != owner.UID || protocol.ReadUint32(p, 208) != 0 {
+		t.Fatal("wrong team status")
+	}
+	outsider.Room = nil
+	if protocol.ReadUint32(h.modStatus(outsider), 64) != 0 {
+		t.Fatal("outsider sees room")
+	}
+	r.Request[46] = byte(protocol.StageAssault)
+	if protocol.ReadUint32(h.modStatus(peer), 208) != 1 {
+		t.Fatal("PVE not enabled")
+	}
+	r.Members[peer.UID].Spectator = true
+	if protocol.ReadUint32(h.modStatus(peer), 208) != 0 {
+		t.Fatal("spectator enabled")
+	}
+	r.Members[peer.UID].Spectator = false
+	r.Stage = "settlement"
+	if protocol.ReadUint32(h.modStatus(peer), 208) != 0 {
+		t.Fatal("settlement enabled")
+	}
+	h.Config.ExperimentalNeutralNPC = false
+	if protocol.ReadUint32(h.modStatus(peer), 212) != 0 {
+		t.Fatal("server switch ignored")
+	}
+}
+
+func TestOnlineModDoesNotExposeLegacyHTTP(t *testing.T) {
+	h, _, _, _ := combatFixture()
+	h.Config.ExperimentalNeutralNPC = true
+	server := &Server{Hub: h}
+	request := httptest.NewRequest("GET", "/experimental/neutral-npc-plan?room=1&serial=7", nil)
+	request.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, request)
+	if w.Code != 404 {
+		t.Fatalf("legacy HTTP exposed through proxy: %d", w.Code)
 	}
 }

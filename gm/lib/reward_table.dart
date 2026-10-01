@@ -36,7 +36,7 @@ void validateRewardRows(List<Map<String, int>> rows, {bool growth = false}) {
       final n = row[key];
       if (n == null ||
           n < 0 ||
-          n > (key == 'next_experience' ? 2147483647 : 1000000)) {
+          n > (key.endsWith('experience') ? 2147483647 : 1000000)) {
         throw FormatException('第 ${i + 1} 级 ${rewardColumns[key]} 数值超出范围');
       }
     }

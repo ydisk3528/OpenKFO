@@ -21,13 +21,15 @@ Future<void> writeAtomic(String path, List<int> bytes) async {
   }
 }
 
-String publicError(Object error) => error
-    .toString()
-    .replaceAll(RegExp(r'(?:https?|wss?|tls)://[^\s"<>]+'), '[NET_ENDPOINT]')
-    .replaceAll(
-      RegExp(r'\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b'),
-      '[NET_ADDRESS]',
-    );
+String publicError(Object error) => error.toString()
+    .replaceAll(RegExp(r'(?:https?|wss?|tls|tcp|udp)://[^\s"<>]+', caseSensitive: false), '[连接地址]')
+    .replaceAll(RegExp(r'\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b'), '[网络地址]')
+    .replaceAll(RegExp(r'\[[0-9a-fA-F:%]+\](?::[0-9]+)?'), '[网络地址]')
+    .replaceAllMapped(RegExp(r'\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?::\d+)?\b', caseSensitive: false), (m) {
+      final value = m[0]!;
+      if (RegExp(r'\.(exe|dll|dat|log|json|xml|crt|pem)$', caseSensitive: false).hasMatch(value)) return value;
+      return '[连接地址]';
+    });
 
 class GameDirectoryError implements Exception {
   @override
@@ -57,9 +59,13 @@ class LauncherService {
     for (final raw in data as List) {
       final r = Map<String, dynamic>.from(raw as Map);
       final uri = Uri.tryParse(r['url'] as String? ?? '');
+      // Dart treats WSS as an unknown scheme (default port 0); HTTPS has the same wire port.
+      final port = uri?.scheme == 'wss'
+          ? Uri.tryParse((r['url'] as String).replaceFirst('wss:', 'https:'))?.port
+          : uri?.port;
       if (r['id'] is! String || !RegExp(r'^[a-z0-9-]+$').hasMatch(r['id']) || !ids.add(r['id']) ||
-          r['name'] is! String || (r['name'] as String).isEmpty || uri == null || uri.scheme != 'tls' ||
-          uri.host.isEmpty || !uri.hasPort || uri.port < 1 || uri.port > 65535 || uri.hasQuery || uri.hasFragment || uri.userInfo.isNotEmpty ||
+          r['name'] is! String || (r['name'] as String).isEmpty || uri == null || !['tls', 'wss'].contains(uri.scheme) ||
+          uri.host.isEmpty || (uri.scheme == 'tls' && !uri.hasPort) || (port == null || port < 1 || port > 65535) || uri.hasQuery || uri.hasFragment || uri.userInfo.isNotEmpty ||
           r['server_certificate'] is! String || !components.containsKey(r['server_certificate'])) {
         throw Exception('区服配置无效，请重新下载完整启动器。');
       }
@@ -307,11 +313,64 @@ class LauncherService {
     }
   }
 
+  Future<List<int>> verifiedCertificate(String key) async {
+    final name=(config[key] as String).replaceAll('\\','/');
+    final bundled=name.startsWith('launcher-files/') ? name.substring(15) : name;
+    if (components.containsKey(bundled)) return component(bundled);
+    if (local) return File(resolve(name)).readAsBytes();
+    throw Exception('配套证书缺失或配置不匹配，请重新解压完整启动器；不要复制旧版证书。');
+  }
+  Future<String> connectionScope() async => hashBytes(utf8.encode(jsonEncode([
+    endpoint.toString(),config['config_hash'],p.normalize(p.join(game,clientExecutable)).toLowerCase(),
+    for(final key in ['server_certificate','login_certificate','login_key']) hashBytes(await verifiedCertificate(key)),
+  ])));
+  Future<List<Map<String,dynamic>>> portConflicts() async {
+    final rows=(await native({'Op':'port_owners'}) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
+    Map<String,dynamic>? owner;
+    try { final value=jsonDecode(await File(p.join(shared,'bridge-owner.json')).readAsString()); if(value is Map<String,dynamic>) owner=value; }
+    on FileSystemException { } on FormatException { }
+    final scope=await connectionScope();
+    return rows.where((r) => !(owner!=null && owner['PID']==r['PID'] && owner['Created']==r['Created'] && owner['Scope']==scope &&
+      p.normalize(r['Image'] as String? ?? '').toLowerCase()==p.normalize(bridgeExecutable).toLowerCase())).toList();
+  }
+  Future<void> restoreCertificates() async {
+    for(final key in ['server_certificate','login_certificate','login_key']) {
+      final bytes=await verifiedCertificate(key), target=resolve(config[key]);
+      if (!await File(target).exists() || await fileHash(target)!=hashBytes(bytes)) await writeAtomic(target,bytes);
+    }
+  }
   Future<String> health() async {
+    for (var attempt=0; attempt<2; attempt++) {
+      try { return await checkHealth(); }
+      on HandshakeException { throw Exception('安全连接校验失败，请检查系统日期时间，并重新解压完整启动器；仍失败请联系管理员检查服务端证书。'); }
+      on TimeoutException {
+        if(attempt==1) throw Exception('连接检查超时（已重试一次）。请稍后重试；若其他玩家也无法连接，请管理员检查服务和隧道状态。');
+      }
+      on SocketException {
+        if(attempt==1) throw Exception('无法连接登录服务（已重试一次）。请检查网络、代理和防火墙是否允许启动器联网；仍失败请联系管理员检查服务。');
+      }
+      await Future<void>.delayed(const Duration(milliseconds:500));
+    }
+    throw StateError('连接检查未完成');
+  }
+  Future<String> checkHealth() async {
     final watch = Stopwatch()..start();
+    if (endpoint.scheme == 'wss') {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+      try {
+        final request = await client.getUrl(endpoint.replace(scheme: 'https', path: '/health', query: null));
+        request.followRedirects = false;
+        final response = await request.close().timeout(const Duration(seconds: 8));
+        if (response.statusCode != 200) throw Exception('服务器检查失败（HTTP ${response.statusCode}）。${response.statusCode == 403 ? '访问被拒绝，请管理员检查访问规则。' : response.statusCode >= 500 ? '服务或隧道暂不可用，请稍后重试并联系管理员。' : '请联系管理员检查服务配置。'}');
+        final data = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 8)));
+        if (data['status'] != 'ok' || data['service'] != 'kungfu-go') throw Exception('服务器状态异常');
+        final key = data['launcher_credentials_key'];
+        if (key is String && RegExp(r'^[!-~]{16}$').hasMatch(key)) credentialsKey = key;
+        return '请求往返 ${watch.elapsedMilliseconds} ms';
+      } finally { client.close(force: true); }
+    }
     if (endpoint.scheme != 'tls') throw Exception('此版本使用直连服务器，请检查配套配置。');
-    final pem = await File(resolve(config['server_certificate']))
-        .readAsString();
+    final pem = utf8.decode(await verifiedCertificate('server_certificate'));
     final context=SecurityContext(withTrustedRoots:false)..setTrustedCertificatesBytes(utf8.encode(pem));
     final raw=await Socket.connect(endpoint.host,endpoint.port,timeout:const Duration(seconds:8));
     late SecureSocket socket;
@@ -395,6 +454,30 @@ class LauncherService {
     }
   }
 
+  // Settings.xml belongs to the player. Preserve its original encoding and
+  // keep each distinct version, including launches that need no modification.
+  Future<void> updatePlayerSettings(String Function(String) transform) async {
+    final settings = File(p.join(game, 'Settings.xml'));
+    final original = await settings.readAsBytes();
+    final text = latin1.decode(original);
+    final updated = transform(text);
+    if (updated != text) {
+      for (var n = 1; n <= 8; n++) {
+        if (await state(n) != null) {
+          throw StateError('游戏窗口仍在运行，未改写 Settings.xml。请关闭该目录的游戏窗口后再更改帧率或选区设置。');
+        }
+      }
+    }
+    final digest = hashBytes(original);
+    final backup = File(p.join(game, 'launcher-components', 'backups', digest, 'Settings.xml'));
+    if (!await backup.exists()) await writeAtomic(backup.path, original);
+    if (updated == text) return;
+    if (await fileHash(settings.path) != digest) {
+      throw StateError('Settings.xml 正被其他程序修改，本次未覆盖，请稍后重试。');
+    }
+    await writeAtomic(settings.path, latin1.encode(updated));
+  }
+
   Future<void> prepare() async {
     await validate();
     await validateClientExecutable();
@@ -417,22 +500,19 @@ class LauncherService {
     );
     final settings = File(p.join(game, 'Settings.xml'));
     if (await settings.exists()) {
-      final original = latin1.decode(await settings.readAsBytes());
-      final re = RegExp(r'(<LoginServer\b[^>]*\bIndex\s*=\s*")[^"]*(")');
-      if (!re.hasMatch(original)) {
-        throw Exception('Settings.xml 缺少选区设置，未修改其他设置');
-      }
-      final updated = original.replaceAllMapped(re, (m) => '${m[1]}0${m[2]}');
-      if (updated != original) {
-        await writeAtomic(
-          '${settings.path}.launcher-backup',
-          await settings.readAsBytes(),
-        );
-        await writeAtomic(settings.path, latin1.encode(updated));
-      }
+      await updatePlayerSettings((original) {
+        final re = RegExp(r'(<LoginServer\b[^>]*\bIndex\s*=\s*")[^"]*(")');
+        if (!re.hasMatch(original)) {
+          throw Exception('Settings.xml 缺少选区设置，未修改其他设置');
+        }
+        return original.replaceAllMapped(re, (m) => '${m[1]}0${m[2]}');
+      });
     }
     await Directory(shared).create(recursive: true);
     await install('OnlineBridge.exe', bridgeExecutable);
+    if (components.containsKey('GameMod.exe')) {
+      await install('GameMod.exe', p.join(p.dirname(bridgeExecutable), 'GameMod.exe'));
+    }
   }
 
   Future<void> launch(
@@ -442,21 +522,20 @@ class LauncherService {
     void Function(String) status,
   ) async {
     await validate();
-    final lock = await File(p.join(root, '.launcher-start.lock'))
+    final lock = await File(p.join(game, '.launcher-start.lock'))
         .open(mode: FileMode.append);
     try {
       await lock.lock(FileLock.exclusive);
+      if ((await portConflicts()).isNotEmpty) throw Exception('本地端口占用情况已变化，请再次点击启动游戏重新检查。');
+      await restoreCertificates();
       await prepare();
       var s = await state(n);
       if (s == null) {
-        final settings = File(p.join(game, 'Settings.xml'));
-        final original = await settings.readAsBytes();
-        final updated = latin1.encode(applyFrameMode(latin1.decode(original), frameMode));
-        await writeAtomic('${settings.path}.before-frame-mode', original);
-        await writeAtomic(settings.path, updated);
+        await updatePlayerSettings((original) => applyFrameMode(original, frameMode));
         final c = Map<String, dynamic>.from(config)
           ..addAll({
             'client_directory': game,
+            'launcher_scope': await connectionScope(),
             'client_release': verifiedRelease ?? const String.fromEnvironment('LAUNCHER_VERSION', defaultValue: 'development'),
             'client_executable': clientExecutable,
             'client_sha256': await fileHash(p.join(game, clientExecutable)),
@@ -514,6 +593,13 @@ class LauncherService {
         mode: ProcessStartMode.detached,
         workingDirectory: skin,
       );
+      if (components.containsKey('GameMod.exe')) {
+        await Process.start(
+          p.join(p.dirname(bridgeExecutable), 'GameMod.exe'),
+          ['--attach', '${s['PID']}', '${s['Created']}'],
+          mode: ProcessStartMode.detached,
+        );
+      }
       if (fps && (s['fps_counter'] ?? 0) != 0) {
         await Process.start(await fpsExecutable(), [
           '--fps',

@@ -30,3 +30,20 @@ func TestConfigEntryRejectsAmbiguousAndExternalResources(t *testing.T) {
 		t.Fatal("cross-version accepted")
 	}
 }
+
+func TestReleaseActivationAndAtomicMode(t *testing.T) {
+	for _, tc := range []struct {
+		old, next, url, current, version string
+		running, want                    bool
+	}{
+		{"a", "a", base + "version/version.json", "v", "v", true, false},
+		{"a", "a", base + "version/version.json", "test", "v", true, true},
+		{"a", "a", base + "version/version.json", "v", "v", false, true},
+		{"a", "a", "", "v", "v", true, true},
+		{"a", "b", base + "version/version.json", "v", "v", true, true},
+	} {
+		if requiresRestart(tc.old, tc.next, tc.url, tc.current, tc.version, tc.running) != tc.want {
+			t.Fatal(tc)
+		}
+	}
+}

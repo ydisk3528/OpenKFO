@@ -21,6 +21,7 @@ type AdminOffer struct {
 	Enabled bool `json:"enabled"`
 }
 type AdminRequest struct {
+	Horn                   *HornSettings        `json:"horn,omitempty"`
 	LoginErrors            *LoginErrorSettings  `json:"login_errors,omitempty"`
 	Treasure               *TreasureSettings    `json:"treasure,omitempty"`
 	RecommendationPriority int32                `json:"recommendation_priority"`
@@ -81,6 +82,13 @@ func (store *Store) adminOffers() ([]AdminOffer, error) {
 }
 func (store *Store) Admin(request AdminRequest) (any, error) {
 	switch request.Operation {
+	case "horn_get":
+		return store.HornSettings()
+	case "horn_save":
+		if request.Horn == nil {
+			return nil, ErrDenied
+		}
+		return store.SaveHornSettings(*request.Horn)
 	case "login_errors_get":
 		return store.LoginErrorSettings()
 	case "login_errors_save":

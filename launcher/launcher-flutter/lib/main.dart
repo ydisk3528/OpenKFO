@@ -15,6 +15,7 @@ import 'connection_error.dart';
 import 'classic_skin.dart';
 import 'package:file_selector/file_selector.dart';
 
+const launcherDisplayVersion = 'V1.2';
 const launcherVersion = String.fromEnvironment('LAUNCHER_VERSION', defaultValue: 'development');
 
 void main() {
@@ -111,7 +112,7 @@ class _LauncherPageState extends State<LauncherPage> {
   }
 
   void report(String text) {
-    if (mounted) setState(() => status = text);
+    if (mounted) setState(() => status = publicError(text));
   }
 
   Future<void> initialize() async {
@@ -259,7 +260,7 @@ class _LauncherPageState extends State<LauncherPage> {
     try {
       if (ready && service.config['update_enabled'] == false) {
         updateBlocked = false;
-        report('本地测试模式：已暂停在线更新。');
+        report('测试模式：已暂停在线更新。');
         await ensureGameDirectory();
         return;
       }
@@ -342,6 +343,23 @@ class _LauncherPageState extends State<LauncherPage> {
     finally { if (mounted) setState(() => busy = false); }
   }
 
+  Future<bool> resolvePortConflicts() async {
+    for(var attempt=0; attempt<4; attempt++) {
+      final conflicts=await service.portConflicts();
+      if(conflicts.isEmpty) return true;
+      final owner=conflicts.first;
+      final same=conflicts.where((r)=>r['PID']==owner['PID']);
+      final label='${owner['Name']}（PID ${owner['PID']}）';
+      final ports=same.map((r)=>"${r['Protocol']} ${r['Port']}").join('、');
+      if(owner['CanStop']!=true) throw Exception('$label 占用了本地端口 $ports。无法安全结束，请手动关闭；系统服务请联系管理员处理。');
+      final yes=await confirm('本地端口被占用', '$label 占用了本地端口 $ports。\n可能是其他区服的游戏或旧登录组件。请先保存该程序中的工作。结束它可能使相关游戏断线。\n是否结束该程序并重新检查？',yes:'结束该程序',no:'取消启动');
+      if(!yes) return false;
+      await service.native({...owner,'Op':'stop_port_owner'});
+      await Future<void>.delayed(const Duration(milliseconds:500));
+    }
+    throw Exception('仍有程序占用本地端口，请关闭相关程序后重试。');
+  }
+
   Future<void> launch() async {
     setState(() { busy = true; transfer = null; });
     try {
@@ -361,6 +379,7 @@ class _LauncherPageState extends State<LauncherPage> {
         }
         service.verifiedRelease = updates.verifiedRelease;
       }
+      if (!await resolvePortConflicts()) return;
       await service.launch(selected, frameMode, fps, report);
     } catch (e) {
       await error(e);
@@ -447,6 +466,14 @@ class _LauncherPageState extends State<LauncherPage> {
     ));
   }
 
+  bool maximized = false;
+  Future<void> windowAction(String action) async {
+    try {
+      final value=await const MethodChannel('launcher/window').invokeMethod<bool>(action);
+      if(mounted && action=='maximize') setState(() => maximized=value ?? false);
+    } catch(e) { await error(e); }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     body: ClassicBackdrop(
@@ -454,10 +481,20 @@ class _LauncherPageState extends State<LauncherPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(children: [
-          const Spacer(),
           TextButton(onPressed: busy ? null : () => checkUpdate(manual: true), child: const Text('检查更新', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
           TextButton(onPressed: busy ? null : settings, child: const Text('设置', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
           TextButton(onPressed: () => confirm('使用说明', '选择窗口后点击“进入游戏”。', yes: '知道了'), child: const Text('使用说明', style: TextStyle(color: Color(0xffffdd57), fontWeight: FontWeight.bold))),
+          Expanded(child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanStart: (_) => windowAction('drag'),
+            onDoubleTap: () => windowAction('maximize'),
+            child: const SizedBox(height: 40))),
+          IconButton(tooltip: '最小化', onPressed: () => windowAction('minimize'),
+            icon: const Icon(Icons.remove, color: Color(0xffffdd57))),
+          IconButton(tooltip: maximized ? '还原窗口' : '最大化', onPressed: () => windowAction('maximize'),
+            icon: Icon(maximized ? Icons.filter_none : Icons.crop_square, size: 19, color: const Color(0xffffdd57))),
+          IconButton(tooltip: '关闭启动器', hoverColor: Colors.red, onPressed: () => windowAction('close'),
+            icon: const Icon(Icons.close, color: Color(0xffffdd57))),
         ]),
         const SizedBox(height: 8),
         Expanded(child: Container(
@@ -553,7 +590,11 @@ class _LauncherPageState extends State<LauncherPage> {
         ]),
         if (transfer != null) UpdateProgressView(transfer!),
         if (busy && transfer == null) const LinearProgressIndicator(),
-        SelectableText(status, maxLines: 2, style: const TextStyle(fontSize: 12, color: Colors.white)),
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(child: SelectableText(status, maxLines: 2, style: const TextStyle(fontSize: 12, color: Colors.white))),
+          const SizedBox(width: 12),
+          const Text(launcherDisplayVersion, style: TextStyle(fontSize: 12, color: Color(0xffffdd57))),
+        ]),
       ],
     )))),
   );

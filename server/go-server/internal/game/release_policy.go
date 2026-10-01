@@ -22,15 +22,23 @@ func (h *Hub) requiredRelease() string {
 }
 func (h *Hub) outdatedRelease(s *Session) bool {
 	v := h.requiredRelease()
-	return v != "" && s.ClientRelease != v
+	return v != "" && (s.ClientRelease != v || (h.Config.ConfigHash != "" && s.ClientConfigHash != h.Config.ConfigHash))
 }
 
 // Called while Hub.Mutex is held, after lobby UI can receive chat text.
 func (h *Hub) warnOldRelease(s *Session) {
 	v := h.requiredRelease()
-	if h.outdatedRelease(s) && s.UpdateNoticeVersion != v {
-		s.sendGame(notice(OldReleaseNotice))
-		s.UpdateNoticeVersion = v
+	key := v + ":" + h.Config.ConfigHash
+	if v != "" && s.UpdateNoticeVersion != key {
+		if h.outdatedRelease(s) {
+			s.sendGame(notice(OldReleaseNotice))
+			if s.ClientRelease == v {
+				s.sendGame(notice("版本号一致，但客户端配置文件不一致。请关闭游戏，用启动器检查更新；更新前不能开战。"))
+			}
+		} else {
+			s.sendGame(notice("当前版本：" + v + "，配置校验通过。"))
+		}
+		s.UpdateNoticeVersion = key
 	}
 }
 func (h *Hub) roomReleaseReady(r *Room) bool {

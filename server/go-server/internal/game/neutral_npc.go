@@ -3,6 +3,7 @@ package game
 import (
 	"log"
 	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"sort"
@@ -36,43 +37,7 @@ func (h *Hub) neutralNPCStatus(w http.ResponseWriter, req *http.Request) {
 	}
 	r.refreshNeutralNPC(time.Now())
 	if req.URL.Path == "/experimental/neutral-npc-plan" {
-		// Fixed versioned layout, eight player slots. No client memory addresses.
-		p := make([]byte, 192)
-		protocol.WriteUint32(p, 0, 0x3343504e) // NPC3: monster count/template/AI
-		protocol.WriteUint32(p, 4, r.Serial)
-		protocol.WriteUint64(p, 8, r.Owner)
-		protocol.WriteUint32(p, 20, uint32(r.Type()))
-		protocol.WriteUint32(p, 24, uint32(neutralNPCIdentity))
-		protocol.WriteUint32(p, 48, uint32(r.ID))
-		if n := r.NeutralNPC; n != nil {
-			protocol.WriteUint64(p, 8, n.owner)
-			protocol.WriteUint32(p, 16, n.state())
-			protocol.WriteUint32(p, 28, n.floor)
-			protocol.WriteUint32(p, 52, n.monsters)
-			protocol.WriteUint32(p, 56, n.template)
-			protocol.WriteUint32(p, 60, n.ai)
-			for i, v := range n.position {
-				protocol.WriteUint32(p, 32+i*4, v)
-			}
-			var uids []uint64
-			for uid := range n.ready {
-				uids = append(uids, uid)
-			}
-			sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
-			protocol.WriteUint32(p, 44, uint32(len(uids)))
-			for i, uid := range uids {
-				status := uint32(1)
-				if n.ready[uid] {
-					status = 2
-				}
-				if n.failed[uid] != 0 {
-					status = 3
-				}
-				protocol.WriteUint64(p, 64+i*16, uid)
-				protocol.WriteUint32(p, 72+i*16, status)
-				protocol.WriteUint32(p, 76+i*16, n.failed[uid])
-			}
-		}
+		p := r.neutralNPCPlan()
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(p)
@@ -181,8 +146,15 @@ func (h *Hub) neutralNPCRequest(s *Session, msg protocol.Message) error {
 		n.monsters = protocol.ReadUint32(p, 67)
 		n.template = protocol.ReadUint32(p, 71)
 		n.ai = protocol.ReadUint32(p, 75)
-		if n.monsters < 1 || n.monsters > 4 || n.template > 2 || n.ai > 1 {
+		if n.monsters > 4 || n.template > 3 || n.ai > 1 {
 			return protocol.ErrFrame
+		}
+		// Random choices are resolved once by the owner request's server plan.
+		if n.monsters == 0 {
+			n.monsters = 1 + rand.Uint32N(4)
+		}
+		if n.template == 3 {
+			n.template = 2 * rand.Uint32N(2)
 		}
 	}
 	for i := range n.position {
@@ -298,4 +270,69 @@ func (h *Hub) neutralNPCReady(s *Session, msg protocol.Message) error {
 	n.active = true
 	log.Printf("neutral_npc_ready room=%d serial=%d owner=%d actor=%d", r.ID, r.Serial, r.Owner, neutralNPCIdentity)
 	return nil
+}
+
+func (r *Room) neutralNPCPlan() []byte {
+	// Fixed versioned layout, eight player slots. No client memory addresses.
+	p := make([]byte, 192)
+	protocol.WriteUint32(p, 0, 0x3343504e) // NPC3: monster count/template/AI
+	protocol.WriteUint32(p, 4, r.Serial)
+	protocol.WriteUint64(p, 8, r.Owner)
+	protocol.WriteUint32(p, 20, uint32(r.Type()))
+	protocol.WriteUint32(p, 24, uint32(neutralNPCIdentity))
+	protocol.WriteUint32(p, 48, uint32(r.ID))
+	if n := r.NeutralNPC; n != nil {
+		protocol.WriteUint64(p, 8, n.owner)
+		protocol.WriteUint32(p, 16, n.state())
+		protocol.WriteUint32(p, 28, n.floor)
+		protocol.WriteUint32(p, 52, n.monsters)
+		protocol.WriteUint32(p, 56, n.template)
+		protocol.WriteUint32(p, 60, n.ai)
+		for i, v := range n.position {
+			protocol.WriteUint32(p, 32+i*4, v)
+		}
+		var uids []uint64
+		for uid := range n.ready {
+			uids = append(uids, uid)
+		}
+		sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+		protocol.WriteUint32(p, 44, uint32(len(uids)))
+		for i, uid := range uids {
+			status := uint32(1)
+			if n.ready[uid] {
+				status = 2
+			}
+			if n.failed[uid] != 0 {
+				status = 3
+			}
+			protocol.WriteUint64(p, 64+i*16, uid)
+			protocol.WriteUint32(p, 72+i*16, status)
+			protocol.WriteUint32(p, 76+i*16, n.failed[uid])
+		}
+	}
+	return p
+}
+
+// Only the authenticated fighter's own room is exposed. No public HTTP API.
+func (h *Hub) modStatus(s *Session) []byte {
+	p := make([]byte, 216)
+	protocol.WriteUint64(p, 0, uint64(time.Now().UnixMilli()))
+	protocol.WriteUint64(p, 8, s.UID)
+	if h.Config.ExperimentalNeutralNPC {
+		protocol.WriteUint32(p, 212, 1)
+	}
+	r := s.Room
+	if r == nil || r.Stage != "battle" {
+		return p
+	}
+	m := r.Members[s.UID]
+	if m == nil || m.Session != s || m.Spectator {
+		return p
+	}
+	if r.Type() == protocol.FosterMode || r.Type() == protocol.StageAssault {
+		protocol.WriteUint32(p, 208, 1)
+	}
+	r.refreshNeutralNPC(time.Now())
+	copy(p[16:208], r.neutralNPCPlan())
+	return p
 }

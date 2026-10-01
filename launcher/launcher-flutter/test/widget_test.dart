@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:openkfo_launcher/main.dart';
 import 'package:openkfo_launcher/launcher_service.dart';
 import 'package:openkfo_launcher/update_service.dart';
@@ -32,6 +33,23 @@ class ComponentTestLauncher extends LauncherService {
 }
 
 void main() {
+  testWidgets('custom title controls dispatch native actions and menu stays left', (tester) async {
+    const channel=MethodChannel('launcher/window');
+    final calls=<String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel,(call) async {
+      calls.add(call.method); return call.method=='maximize';
+    });
+    addTearDown(() => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel,null));
+    await tester.pumpWidget(const MaterialApp(home: LauncherPage(preview:true)));
+    expect(find.text('V1.2'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('检查更新')).dx,lessThan(50));
+    for(final tip in ['最小化','最大化','关闭启动器']) {
+      await tester.tap(find.byTooltip(tip)); await tester.pump();
+    }
+    expect(calls,['minimize','maximize','close']);
+    expect(find.byTooltip('还原窗口'),findsOneWidget);
+    expect(tester.takeException(),isNull);
+  });
   testWidgets('mandatory update has no skip or dismiss path', (tester) async {
     await tester.pumpWidget(const MaterialApp(home: LauncherPage(preview: true)));
     final dynamic state = tester.state(find.byType(LauncherPage));
@@ -131,7 +149,7 @@ void main() {
   test('TXT export includes full Chinese log and hides network endpoints',()async {
     final dir=await Directory.systemTemp.createTemp('log-export-');addTearDown(()=>dir.delete(recursive:true));
     final source=File('${dir.path}/online-client.log');await source.writeAsString('开始日志\n${List.filled(4000,"玩家动作 中文\n").join()}https://example.invalid:443/test\n结束日志');
-    final path='${dir.path}/日志.txt';await exportLog(source,path);final bytes=await File(path).readAsBytes();expect(bytes.take(3),[0xef,0xbb,0xbf]);final text=utf8.decode(bytes.skip(3).toList());expect(text,contains('开始日志'));expect(text,contains('结束日志'));expect(text,contains('[NET_ENDPOINT]'));expect(text, isNot(contains('example.invalid')));expect(bytes.length,greaterThan(32768));
+    final path='${dir.path}/日志.txt';await exportLog(source,path);final bytes=await File(path).readAsBytes();expect(bytes.take(3),[0xef,0xbb,0xbf]);final text=utf8.decode(bytes.skip(3).toList());expect(text,contains('开始日志'));expect(text,contains('结束日志'));expect(text,contains('[连接地址]'));expect(text, isNot(contains('example.invalid')));expect(bytes.length,greaterThan(32768));
   });
   testWidgets('update details show both progress bars and byte counts',(tester)async {
     await tester.pumpWidget(const MaterialApp(home:Scaffold(body:UpdateProgressView(UpdateProgress('下载更新文件','Weapon/test.dat',2,4,512,1024,1536,4096)))));
@@ -226,6 +244,7 @@ void main() {
         'runtime-x86/vcruntime140.dll': [11],
         'runtime-x86/ucrtbase.dll': [12],
         'OnlineBridge.exe': [7],
+        'GameMod.exe': [71],
         'client-config.xml': utf8.encode('<LoginServer Port="18000"/>'),
         'bridge.json': utf8.encode(
           jsonEncode({
@@ -259,6 +278,7 @@ void main() {
       await legacyBridge.parent.create(recursive: true);
       await legacyBridge.writeAsBytes([90]);
       await service.prepare();
+      expect(await File('${File(service.bridgeExecutable).parent.path}/GameMod.exe').readAsBytes(), [71]);
       expect(await legacyBridge.readAsBytes(), [90]);
       final firstBridge = service.bridgeExecutable;
       expect(await File(firstBridge).readAsBytes(), [7]);

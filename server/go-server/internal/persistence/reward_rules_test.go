@@ -57,3 +57,20 @@ func TestRewardRulesPersistence(t *testing.T) {
 		t.Fatal("restart or stale write reverted GM changes", current, err)
 	}
 }
+
+func TestLargeExperienceKeepsCurrencyAndSignedBounds(t *testing.T) {
+	r := RewardRules{}.Normalized()
+	r.Levels[149].WinExperience = 200000000
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r.Levels[149].WinGold = 1000001
+	if r.Validate() == nil {
+		t.Fatal("currency limit changed")
+	}
+	r.Levels[149].WinGold = 0
+	r.Levels[149].WinExperience = 2147483648
+	if r.Validate() == nil {
+		t.Fatal("signed experience overflow accepted")
+	}
+}

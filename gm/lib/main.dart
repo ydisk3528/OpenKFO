@@ -1,3 +1,4 @@
+import 'horn_config.dart';
 import 'catalog_cache.dart';
 import 'config_inspect.dart';
 import 'client_config.dart';
@@ -1258,6 +1259,13 @@ class _ManagerState extends State<Manager> {
                                     ),
                                   ),
                                 ),
+                        ),
+                        ListTile(
+                          textColor: Colors.white, iconColor: Colors.white,
+                          leading: const Icon(Icons.campaign),
+                          title: const Text('喇叭管理'),
+                          onTap: busy ? null : () => Navigator.push(context,
+                            MaterialPageRoute<void>(builder: (_) => HornConfigPage(api: api, environment: environmentLabel))),
                         ),
                         ListTile(
                           textColor: Colors.white,

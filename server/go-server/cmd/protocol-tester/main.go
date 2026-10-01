@@ -362,6 +362,7 @@ func connectObserved(cmd command, observe func(protocol.Message)) (*client, erro
 		URL         string `json:"url"`
 		Certificate string `json:"server_certificate"`
 		Hash        string `json:"config_hash"`
+		Release     string `json:"client_release"`
 	}
 	if err = json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
@@ -399,7 +400,7 @@ func connectObserved(cmd command, observe func(protocol.Message)) (*client, erro
 	}()
 	digest := sha256.Sum256([]byte("xfmRn9z7K1wTfvBYhpCwZmE8yLWN1oLv" + cmd.Password))
 	cmd.Password = ""
-	if err = c.send(tunnel.Frame{Op: "auth", Account: cmd.Account, Password: hex.EncodeToString(digest[:]), ConfigHash: cfg.Hash, Port: 18001}); err != nil {
+	if err = c.send(tunnel.Frame{Op: "auth", Account: cmd.Account, Password: hex.EncodeToString(digest[:]), ConfigHash: cfg.Hash, ClientRelease: cfg.Release, Port: 18001}); err != nil {
 		return nil, err
 	}
 	f, _, err := c.read()
@@ -469,6 +470,9 @@ func connectObserved(cmd command, observe func(protocol.Message)) (*client, erro
 	return c, nil
 }
 func run() error {
+	if len(os.Args) == 2 && os.Args[1] == "--room-bots" {
+		return roomBots()
+	}
 	if len(os.Args) > 1 {
 		if len(os.Args) != 3 || (os.Args[1] != "--stage-catalog" && os.Args[1] != "--training-catalog") {
 			return fmt.Errorf("usage: --stage-catalog or --training-catalog config.spf2")

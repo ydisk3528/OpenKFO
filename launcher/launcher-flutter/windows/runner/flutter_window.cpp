@@ -1,6 +1,8 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <flutter/method_channel.h>
+#include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "launcher_lifecycle.h"
@@ -27,9 +29,33 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  flutter::MethodChannel<flutter::EncodableValue> window_channel(
+      flutter_controller_->engine()->messenger(), "launcher/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  window_channel.SetMethodCallHandler([this](const auto& call, auto result) {
+    const auto hwnd = GetHandle();
+    if (call.method_name() == "minimize") {
+      ShowWindow(hwnd, SW_MINIMIZE);
+    } else if (call.method_name() == "maximize") {
+      ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    } else if (call.method_name() == "close") {
+      PostMessage(hwnd, WM_CLOSE, 0, 0);
+    } else if (call.method_name() == "drag") {
+      ReleaseCapture();
+      PostMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    } else {
+      result->NotImplemented();
+      return;
+    }
+    result->Success(flutter::EncodableValue(IsZoomed(hwnd) != FALSE));
+  });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
+    const auto hwnd = GetHandle();
+    SetWindowLongPtr(hwnd, GWL_STYLE, GetWindowLongPtr(hwnd, GWL_STYLE) & ~WS_CAPTION);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     this->Show();
   });
 
@@ -53,6 +79,20 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_STYLECHANGING && static_cast<int>(wparam) == GWL_STYLE) {
+    reinterpret_cast<STYLESTRUCT*>(lparam)->styleNew &= ~WS_CAPTION;
+    return 0;
+  }
+  // Let Flutter occupy the entire frame, including the native title area.
+  if (message == WM_NCCALCSIZE && wparam) {
+    if (IsZoomed(hwnd)) {
+      MONITORINFO monitor{sizeof(MONITORINFO)};
+      if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)->rgrc[0] = monitor.rcWork;
+      }
+    }
+    return 0;
+  }
   if (message == launcher_lifecycle::ActivateMessage()) {
     ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(hwnd);

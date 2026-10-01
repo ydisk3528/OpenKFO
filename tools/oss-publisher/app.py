@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import credentials
-from realm_sync import FIXED, DEFAULT_KEY, RealmSync
+from realm_sync import FIXED, RealmSync
 
 from publisher import OssStore, announcement_bytes, inspect_zip, publish, error_message, set_release_notes, retain_previous_client, POINTER
 
@@ -18,7 +18,7 @@ from publisher import OssStore, announcement_bytes, inspect_zip, publish, error_
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('OSS 发布工具 1.1.0 · 二区同步')
+        root.title('OSS 发布工具 1.2.0 · 三区同步')
         root.geometry('980x830')
         root.minsize(850, 740)
         self.events = queue.Queue()
@@ -39,7 +39,7 @@ class App:
             secrets = {}
         for name, env in [('access_id', 'OSS_ACCESS_KEY_ID'), ('secret', 'OSS_ACCESS_KEY_SECRET'), ('token', 'OSS_SESSION_TOKEN')]:
             self.variables[name] = tk.StringVar(value=os.environ.get(env, secrets.get(name, '')))
-        self.variables['sync_key'] = tk.StringVar(value=saved.get('sync_key', DEFAULT_KEY))
+        self.variables['sync_password'] = tk.StringVar(value=secrets.get('sync_password', ''))
         self.zip_path = tk.StringVar()
         self.notice_title = tk.StringVar(value='更新公告')
         self.status = tk.StringVar(value='选择 OSS 更新包 ZIP，先检查，再上传发布。')
@@ -49,7 +49,7 @@ class App:
         frame = ttk.Frame(root, padding=16)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='OSS 更新发布', font=('Microsoft YaHei UI', 19, 'bold')).pack(anchor='w')
-        ttk.Label(frame, text='固定发布到原 OSS · 自动同步二区 · 配置变化时先停止服务再同步启动').pack(anchor='w', pady=(3, 10))
+        ttk.Label(frame, text='固定发布到原 OSS · 自动同步三区 · 配置变化时先停止服务再同步启动').pack(anchor='w', pady=(3, 10))
         settings = ttk.LabelFrame(frame, text='OSS 连接配置', padding=10)
         settings.pack(fill='x')
         settings.columnconfigure(1, weight=1)
@@ -66,11 +66,11 @@ class App:
                 entry.configure(state='readonly')
                 self.readonly.append(entry)
         ttk.Label(settings, text='密钥仅加密保存在本机 Windows 用户下；EXE 不内置密钥。').grid(row=3, column=0, columnspan=4, sticky='w', pady=(5, 0))
-        ttk.Label(settings, text='二区 SSH 私钥').grid(row=4, column=0, sticky='w')
-        key_entry = ttk.Entry(settings, textvariable=self.variables['sync_key'])
+        ttk.Label(settings, text='三区 root 密码').grid(row=4, column=0, sticky='w')
+        key_entry = ttk.Entry(settings, textvariable=self.variables['sync_password'], show='*')
         key_entry.grid(row=4, column=1, columnspan=2, sticky='ew')
         self.inputs.append(key_entry)
-        self.button(settings, '选择私钥…', self.choose_key).grid(row=4, column=3, sticky='w')
+        ttk.Label(settings, text='固定三区 · 主机密钥校验').grid(row=4, column=3, sticky='w')
         tabs = ttk.Notebook(frame)
         tabs.pack(fill='x', pady=12)
         release = ttk.Frame(tabs, padding=12)
@@ -96,7 +96,7 @@ class App:
         actions.pack(fill='x')
         self.button(actions, '仅检查压缩包', lambda: self.start('inspect')).pack(side='left', padx=(0, 8))
         self.button(actions, '预览合并清单', lambda: self.start('preview')).pack(side='left', padx=(0, 8))
-        self.button(actions, '一键发布并同步二区', lambda: self.start('publish')).pack(side='left', padx=(0, 8))
+        self.button(actions, '一键发布并同步三区', lambda: self.start('publish')).pack(side='left', padx=(0, 8))
         self.button(actions, '读取线上版本', lambda: self.start('version')).pack(side='left')
         self.button(actions, '重试同步当前版本', lambda: self.start('sync')).pack(side='left', padx=8)
         ttk.Label(release, text='资源全部上传并回读校验后，最后发布 version/version.json。更新包不会覆盖独立公告。').pack(anchor='w', pady=(10, 0))
@@ -131,10 +131,6 @@ class App:
         self.buttons.append(button)
         return button
 
-    def choose_key(self):
-        path = filedialog.askopenfilename(title='选择二区 SSH 私钥')
-        if path:
-            self.variables['sync_key'].set(path)
 
     def choose(self):
         path = filedialog.askopenfilename(filetypes=[('OSS 更新包', '*.zip')])
@@ -177,17 +173,17 @@ class App:
             return
         allow_restart = False
         if action in ('publish', 'sync'):
-            if not messagebox.askyesno('发布并同步二区', '将核验 OSS 配置并同步二区。若 config.spf2 哈希变化，将先停止二区服务、同步哈希及关卡绑定、再启动，当前玩家会断线。哈希不变则不重启。\n\n是否继续？'):
+            if not messagebox.askyesno('发布并同步三区', '将核验 OSS 配置并同步三区。若 config.spf2 哈希变化，将先停止三区服务、同步哈希及关卡绑定、再启动，当前玩家会断线。发布版本或运行状态变化时也会同步启动。\n\n是否继续？'):
                 return
             allow_restart = True
             try:
-                credentials.save(self.folder, {k: config[k] for k in ('access_id', 'secret', 'token')})
+                credentials.save(self.folder, {k: config[k] for k in ('access_id', 'secret', 'token', 'sync_password')})
             except OSError:
                 messagebox.showerror('保存密钥失败', '无法保存本机加密凭据，未开始发布。')
                 return
         override_notes = self.release_notes.get('1.0', 'end-1c') if self.edit_notes.get() else None
         self.folder.mkdir(parents=True, exist_ok=True)
-        (self.folder / 'settings.json').write_text(json.dumps({k: config[k] for k in ('sync_key',)}, ensure_ascii=False, indent=2), encoding='utf-8')
+        (self.folder / 'settings.json').write_text(json.dumps({}, ensure_ascii=False), encoding='utf-8')
         self.busy = True
         self.cancel.clear()
         for widget in self.inputs + self.buttons:
@@ -204,7 +200,7 @@ class App:
 
         def work():
             try:
-                sync = RealmSync(config['sync_key'], notify, allow_restart)
+                sync = RealmSync(config['sync_password'], notify, allow_restart)
                 if action in ('publish', 'sync'):
                     sync.status()
                 if action in ('inspect', 'preview', 'publish'):
@@ -222,12 +218,12 @@ class App:
                         elif action == 'preview':
                             store = OssStore(config['bucket'], config['region'], config['access_id'], config['secret'], config['token'])
                             retain_previous_client(release, store, store.get(POINTER), notify)
-                        notify('done', {'publish': '完成：OSS 版本入口已确认，二区哈希同步成功。', 'preview': '合并预览完成，没有上传。正式发布会重新读取最新线上清单，并校验历史资源。', 'inspect': '压缩包检查通过，未连接 OSS。'}[action])
+                        notify('done', {'publish': '完成：OSS 版本入口已确认，三区哈希同步成功。', 'preview': '合并预览完成，没有上传。正式发布会重新读取最新线上清单，并校验历史资源。', 'inspect': '压缩包检查通过，未连接 OSS。'}[action])
                 else:
                     store = OssStore(config['bucket'], config['region'], config['access_id'], config['secret'], config['token'])
                     if action == 'sync':
                         sync.retry(store)
-                        notify('done', '当前 OSS 版本已同步到二区。')
+                        notify('done', '当前 OSS 版本已同步到三区。')
                     elif action == 'notice':
                         data = announcement_bytes(title, content)
                         store.put('announcement.json', data)
@@ -247,7 +243,7 @@ class App:
             except Exception as error:
                 # Never expose SDK request snapshots, signed headers or credentials.
                 text = error_message(error)
-                for key in ('access_id', 'secret', 'token'):
+                for key in ('access_id', 'secret', 'token', 'sync_password'):
                     if config[key]:
                         text = text.replace(config[key], '[已隐藏]')
                 notify('error', text)

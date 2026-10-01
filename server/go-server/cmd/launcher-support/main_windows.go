@@ -31,6 +31,8 @@ const accountControl = 1001
 const passwordControl = 1002
 
 type request struct {
+	Port                                            int
+	Protocol                                        string
 	Op, Path, Key, Account, Password, Image, Action string
 	Accounts                                        []credentials
 	PID                                             uint32
@@ -202,7 +204,11 @@ func atomic(path string, b []byte) error {
 	return nil
 }
 func identity(r request) (syscall.Handle, error) {
-	h, err := syscall.OpenProcess(processQuery|syscall.SYNCHRONIZE, false, r.PID)
+	access := uint32(processQuery | syscall.SYNCHRONIZE)
+	if r.Op == "stop_port_owner" {
+		access |= syscall.PROCESS_TERMINATE
+	}
+	h, err := syscall.OpenProcess(access, false, r.PID)
 	if err != nil {
 		return 0, err
 	}
@@ -300,6 +306,10 @@ func window(r request) (any, error) {
 }
 func run(r request) (any, error) {
 	switch r.Op {
+	case "port_owners":
+		return portOwners()
+	case "stop_port_owner":
+		return nil, stopPortOwner(r)
 	case "info":
 		h, e := identity(r)
 		if e != nil {

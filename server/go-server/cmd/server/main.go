@@ -217,6 +217,7 @@ func main() {
 				}
 			}
 			config.ExperimentalNeutralNPC = true
+			config.LocalNeutralNPCProbe = true
 		}
 		hub := game.NewHub(store, config)
 		audit := logqueue.New(log.Writer(), 256)

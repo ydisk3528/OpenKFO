@@ -18,6 +18,7 @@ import (
 )
 
 type Request struct {
+	Horn                   *persistence.HornSettings            `json:"horn,omitempty"`
 	ManagementSessionToken string                               `json:"management_session_token,omitempty"`
 	LoginAccount           string                               `json:"login_account,omitempty"`
 	LoginPassword          string                               `json:"login_password,omitempty"`
@@ -270,6 +271,7 @@ func (admin *Admin) Call(request Request) (any, error) {
 	remote.UIDs, remote.All = request.UIDs, request.All
 	remote.Reason = request.Reason
 	remote.BannedWords = request.BannedWords
+	remote.Horn = request.Horn
 	remote.StageAccess = request.StageAccess
 	remote.StageUnlocks = request.StageUnlocks
 	remote.Honour = request.Honour
@@ -296,7 +298,7 @@ func (admin *Admin) Call(request Request) (any, error) {
 			return nil, fmt.Errorf("%s尚未部署普通通知功能，请切换本地测试服测试，或先部署对应服务器版本；本次请求已拒绝", environment)
 		}
 		return result, err
-	case "users_list", "user_ban_save", "user_ban_history", "banned_words_get", "banned_words_save", "stage_unlocks_get", "stage_unlocks_save":
+	case "horn_get", "horn_save", "users_list", "user_ban_save", "user_ban_history", "banned_words_get", "banned_words_save", "stage_unlocks_get", "stage_unlocks_save":
 		return call(remote)
 	case "login_errors_get", "login_errors_save", "treasure_get", "treasure_save", "treasure_preview", "tasks_get", "tasks_save", "titles_get", "titles_save":
 		return call(remote)

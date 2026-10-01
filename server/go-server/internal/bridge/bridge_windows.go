@@ -29,6 +29,7 @@ import (
 )
 
 type Config struct {
+	LauncherScope     string `json:"launcher_scope"`
 	ClientRelease     string `json:"client_release"`
 	SharedClient      bool   `json:"shared_client"`
 	ControlDirectory  string `json:"control_directory"`
@@ -84,6 +85,9 @@ func (session *remoteSession) send(frame tunnel.Frame) error {
 func (session *remoteSession) close() {
 	session.closeOnce.Do(func() {
 		close(session.done)
+		if path := modStatusPath(session.identity); path != "" {
+			_ = os.Remove(path)
+		}
 		if session.udpTransport != nil {
 			session.udpTransport.conn.Close()
 		}
@@ -216,6 +220,28 @@ func Run(ctx context.Context, config Config, launch bool) error {
 		return err
 	}
 	defer bridge.udp.Close()
+	if config.SharedClient && config.LauncherScope != "" {
+		executable, e := os.Executable()
+		if e != nil {
+			return e
+		}
+		owner, e := processIdentity(uint32(os.Getpid()), executable)
+		if e != nil {
+			return e
+		}
+		data, e := json.Marshal(struct {
+			PID     uint32
+			Created uint64
+			Scope   string
+		}{owner.PID, owner.Created, config.LauncherScope})
+		if e != nil {
+			return e
+		}
+		if e = os.WriteFile(filepath.Join(config.ControlDirectory, "bridge-owner.json"), data, 0600); e != nil {
+			return e
+		}
+	}
+
 	go bridge.datagrams()
 	log.Printf("online bridge ready: %s", config.URL)
 	if config.SharedClient {
@@ -448,7 +474,11 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 	}
 	go bridge.receive(session)
 	go func() {
-		ticker := time.NewTicker(15 * time.Second)
+		interval := 15 * time.Second
+		if modToolAvailable() {
+			interval = time.Second
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -456,7 +486,11 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 				return
 			case <-ticker.C:
 				current, err := processIdentity(identity.PID, bridge.Image)
-				if err != nil || current != identity || session.send(tunnel.Frame{Op: "ping"}) != nil {
+				frame := tunnel.Frame{Op: "ping"}
+				if interval == time.Second {
+					frame.Kind = "mod"
+				}
+				if err != nil || current != identity || session.send(frame) != nil {
 					session.close()
 					return
 				}
@@ -609,6 +643,9 @@ func (bridge *Bridge) receive(session *remoteSession) {
 			}
 			bridge.udp.WriteToUDP(frame.Data, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(frame.Port)})
 		case "pong":
+			if len(frame.Data) == 216 {
+				writeModStatus(session.identity, frame.Data)
+			}
 		default:
 			return
 		}

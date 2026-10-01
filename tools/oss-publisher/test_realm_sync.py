@@ -36,7 +36,7 @@ class SyncTests(unittest.TestCase):
         sync = RealmSync('unused', Mock())
         sync.request = {'version':'test','manifest_hash':'a'*64}
         sync.call = Mock(side_effect=RuntimeError('offline'))
-        with self.assertRaisesRegex(RuntimeError, 'OSS 已发布，但二区同步未完成'):
+        with self.assertRaisesRegex(RuntimeError, 'OSS 已发布，但三区同步未完成'):
             sync.activate()
 
     def test_bridge_hash_mismatch_blocks_before_server_call(self):

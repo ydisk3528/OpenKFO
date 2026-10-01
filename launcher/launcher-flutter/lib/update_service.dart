@@ -97,6 +97,7 @@ class UpdateService {
   }
 
   Future<String> announcement() async {
+    if (launcher.config['update_enabled'] == false) return '测试版本：暂未启用在线更新和公告。';
     final configured = launcher.config['announcement_url'] as String?;
     final url = configured != null && configured.isNotEmpty
         ? httpsUrl(configured)

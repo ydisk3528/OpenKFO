@@ -1,39 +1,50 @@
-"""Fixed realm-2 operator connection. SSH key stays on the operator's machine."""
+"""Fixed realm-3 operator connection. Password stays in the local DPAPI vault."""
 import hashlib
 import json
-import subprocess
+import paramiko
+import base64
+import socket
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 BASE = 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/'
 FIXED = {'bucket': 'openkfo', 'region': 'cn-hangzhou', 'base': BASE}
-DEFAULT_KEY = r'E:\ams\kongfukid\bieren\kk.pem'
+SSH_HOST = 'aaa.vxfnqfjdr.top'
+SSH_USER = 'root'
+SSH_HOST_KEY = 'AAAAC3NzaC1lZDI1NTE5AAAAIBkoD0SsZPijRQeS0XVkLIxeDsbafXBQAJ2sQN1uydEc'
 
 
 class RealmSync:
-    def __init__(self, key, notify, allow_restart=False):
-        self.key, self.notify, self.allow_restart = key, notify, allow_restart
+    def __init__(self, password, notify, allow_restart=False):
+        self.password, self.notify, self.allow_restart = password, notify, allow_restart
         self.request = None
 
     def call(self, request):
-        if not Path(self.key).is_file():
-            raise ValueError('请选择二区 SSH 私钥；私钥不会进入更新包或上传 OSS。')
-        command = ['ssh', '-T', '-i', str(Path(self.key).resolve()), '-o', 'BatchMode=yes',
-                   '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
-                   '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10',
-                   '-o', 'ServerAliveCountMax=2', 'root@47.122.124.138', '/opt/kungfu-go/oss-sync-helper']
+        if not self.password:
+            raise ValueError('请填写三区登录密码。')
+        client = paramiko.SSHClient()
+        client.get_host_keys().add(SSH_HOST, 'ssh-ed25519', paramiko.Ed25519Key(data=base64.b64decode(SSH_HOST_KEY)))
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         try:
-            result = subprocess.run(command, input=json.dumps(request).encode(), capture_output=True,
-                                    timeout=240, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        except subprocess.TimeoutExpired:
-            raise RuntimeError('二区同步响应超时，执行结果未确认；请读取同步状态，不要重复发布。') from None
-        if result.returncode:
-            error = result.stderr.decode('utf-8', errors='replace').strip()[-2000:]
-            raise RuntimeError('二区同步未完成：' + error)
-        response = json.loads(result.stdout)
-        if response.get('realm') != '二区':
-            raise ValueError('服务器身份不是二区，停止发布')
+            client.connect(SSH_HOST, username=SSH_USER, password=self.password,
+                           look_for_keys=False, allow_agent=False, timeout=15, auth_timeout=15, banner_timeout=15)
+            stdin, stdout, stderr = client.exec_command('/opt/kungfu-go/oss-sync-helper', timeout=240)
+            stdin.write(json.dumps(request)); stdin.flush(); stdin.channel.shutdown_write()
+            raw, error = stdout.read(), stderr.read()
+            if stdout.channel.recv_exit_status():
+                raise RuntimeError('三区同步未完成：' + error.decode('utf-8', 'replace')[-2000:])
+            response = json.loads(raw)
+        except paramiko.AuthenticationException:
+            raise RuntimeError('三区登录失败，请检查服务器密码。') from None
+        except paramiko.BadHostKeyException:
+            raise RuntimeError('三区主机密钥不匹配，已停止连接。') from None
+        except (socket.timeout, TimeoutError):
+            raise RuntimeError('三区同步响应超时，执行结果未确认；请读取同步状态，不要重复发布。') from None
+        finally:
+            client.close()
+        if response.get('realm') != '三区':
+            raise ValueError('服务器身份不是三区，停止发布')
         return response
 
     def status(self):
@@ -62,24 +73,24 @@ class RealmSync:
                 raise ValueError('bridge.json 与 config.spf2 哈希不同，请重新制作完整更新包；版本入口尚未发布。')
         self.request = {'version': release.version, 'manifest_hash': hashlib.sha256(raw).hexdigest(),
                         'allow_restart': self.allow_restart}
-        self.notify('log', '正在预检二区配置兼容性和数据库绑定，版本入口尚未发布…')
+        self.notify('log', '正在预检三区配置兼容性和数据库绑定，版本入口尚未发布…')
         response = self.call(dict(self.request, mode='prepare'))
         if response.get('state') != 'prepared' or response.get('target_hash') != expected:
-            raise ValueError('二区预检结果与更新包不一致')
-        self.notify('log', '二区预检通过；' + ('配置变化，同步时将重启。' if response.get('restart_required') else '哈希相同，无需重启。'))
+            raise ValueError('三区预检结果与更新包不一致')
+        self.notify('log', '三区预检通过；' + ('配置变化，同步时将重启。' if response.get('restart_required') else '哈希相同，无需重启。'))
 
     def activate(self):
         if not self.request:
-            raise ValueError('缺少二区发布预检结果')
-        self.notify('log', 'OSS 已发布，正在同步二区；此阶段请勿关闭工具…')
+            raise ValueError('缺少三区发布预检结果')
+        self.notify('log', 'OSS 已发布，正在同步三区；此阶段请勿关闭工具…')
         try:
             response = self.call(dict(self.request, mode='sync'))
             if response.get('state') != 'synced':
                 raise ValueError('服务器未确认同步成功')
-            self.notify('log', f"二区同步完成：{response['config_hash']}；重启：{'是' if response['restarted'] else '否'}")
+            self.notify('log', f"三区同步完成：{response['config_hash']}；重启：{'是' if response['restarted'] else '否'}")
             return response
         except Exception as error:
-            raise RuntimeError(f'OSS 已发布，但二区同步未完成。不要改版本号重发；可用“重试同步当前版本”。\n{error}') from error
+            raise RuntimeError(f'OSS 已发布，但三区同步未完成。不要改版本号重发；可用“重试同步当前版本”。\n{error}') from error
 
     def retry(self, store):
         pointer = json.loads(store.get('version/version.json'))
