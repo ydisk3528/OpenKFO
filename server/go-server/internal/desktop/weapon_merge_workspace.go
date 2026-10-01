@@ -519,5 +519,78 @@ func (admin *Admin) weaponMergeWorkspace(r Request, client string) (any, error) 
 		}
 		written = append(written, rel)
 	}
+	// 合并导入直接换掉了客户端的 config.spf2。武器编辑器的基线若还停在旧文件上，
+	// 之后每次「应用到游戏」都会撞上 prepareClient 的守卫（客户端配置与基线
+	// 不一致）而被永久拒绝——编辑集里的 buff/招式挂载再也写不回去。所以这里
+	// 顺手把该客户端的新配置采为基线，并把编辑集里已应用的编辑重新渲染进去，
+	// 让基线 = 「客户端当前真实状态 + 已应用编辑」，守卫下一轮才能通过。
+	if e = syncBaselineAfterImport(edits, client, backup); e != nil {
+		return rollback(e)
+	}
 	return map[string]any{"path": configPath(client), "backup": backup, "message": "临时配置已应用到游戏，请重新打开游戏"}, nil
+}
+
+// syncBaselineAfterImport 在合并导入换掉客户端的 config.spf2 之后，重新采集
+// 该客户端的基线，并把编辑集里已应用的编辑重新渲染回去，避免后续写入被守卫拒绝。
+func syncBaselineAfterImport(folder, client, backup string) error {
+	statePath := filepath.Join(folder, "settings.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var state weaponState
+	if err = json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+	if len(state.Applied) == 0 && len(state.UStates) == 0 && len(state.LuaScripts) == 0 {
+		return nil
+	}
+	if _, err = os.Stat(configPath(client)); err != nil {
+		return nil
+	}
+	entry := state.baselineFor(client)
+	if err = ensureBaseline(entry, folder, true); err != nil {
+		return err
+	}
+	source, err := loadArchive(entry.path(folder))
+	if err != nil {
+		return fmt.Errorf("重新采集基线后无法读取：%w", err)
+	}
+	if err = source.verify(); err != nil {
+		return fmt.Errorf("重新采集基线后校验失败：%w", err)
+	}
+	base, err := buildWeaponBase(source, &state)
+	if err != nil {
+		return err
+	}
+	itemText, err := base.text("item.txt")
+	if err != nil {
+		return err
+	}
+	items, err := itemsFromText(entry.Directory, itemText, true, true)
+	if err != nil {
+		return err
+	}
+	info, err := inspect(base, items)
+	if err != nil {
+		return err
+	}
+	// 合并导入不碰招式编号，连招校验与本次写入无关，跳过以免旧黑名单拦住。
+	plan, err := prepareClient(entry, folder, &state, state.Applied, info, withoutComboReconcile())
+	if err != nil {
+		return err
+	}
+	if err = commitClient(plan, folder); err != nil {
+		return err
+	}
+	state.SourceHash = entry.SourceHash
+	state.AppliedHash = entry.AppliedHash
+	encoded, err := json.MarshalIndent(&state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(statePath, encoded)
 }
