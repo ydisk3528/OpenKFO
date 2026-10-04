@@ -15,6 +15,11 @@ func (c Config) persistedStagePlan(access persistence.StageAccess, mapID uint32,
 	if err := access.Validate(); err != nil {
 		return nil, err
 	}
+	return validatedStagePlan(access, mapID, players)
+}
+
+// Caller must validate the complete access snapshot and its client hash first.
+func validatedStagePlan(access persistence.StageAccess, mapID uint32, players int) (*stageWaves, error) {
 	if !access.Allows(mapID) {
 		return nil, fmt.Errorf("当前关卡已关闭")
 	}

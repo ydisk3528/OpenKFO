@@ -15,6 +15,11 @@ func (c Config) persistedFosterPlan(access persistence.StageAccess, mapID uint32
 	if err := access.Validate(); err != nil {
 		return nil, err
 	}
+	return validatedFosterPlan(access, mapID, players)
+}
+
+// Caller must validate the complete access snapshot and its client hash first.
+func validatedFosterPlan(access persistence.StageAccess, mapID uint32, players int) (*protocol.FosterPlan, error) {
 	if !access.Allows(mapID) {
 		return nil, fmt.Errorf("当前关卡已关闭")
 	}

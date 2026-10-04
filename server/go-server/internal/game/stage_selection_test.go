@@ -2,6 +2,7 @@ package game
 
 import (
 	"bytes"
+	"fmt"
 	"kungfu.local/server/internal/persistence"
 	"kungfu.local/server/internal/protocol"
 	"strings"
@@ -100,6 +101,9 @@ func TestStageSelectionIncludesPersistedPVEPlans(t *testing.T) {
 	view.Access.Disabled = nil
 	view.Access.ClientHash = strings.Repeat("b", 64)
 	check()
+	view.Access.ClientHash = hash
+	view.Access.FosterPlans[0].Plan.PlayerLimit = 0
+	check() // One invalid plan must still invalidate the whole access snapshot.
 }
 
 func TestStageAuxiliaryStateQuery(t *testing.T) {
@@ -118,4 +122,51 @@ func TestStageAuxiliaryStateQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	roomOutputs(t, owner, 20150)
+}
+
+// Compare the complete catalogue with the former repeated-admission path.
+func BenchmarkStageCatalogueValidation(b *testing.B) {
+	hash := strings.Repeat("a", 64)
+	config := Config{ConfigHash: hash}
+	access := persistence.StageAccess{ClientHash: hash}
+	for i := uint32(0); i < 50; i++ {
+		id := 8100 + i
+		access.PVEMaps = append(access.PVEMaps, id)
+		access.Requirements = append(access.Requirements, persistence.StageTitleRequirement{MapID: id, Name: fmt.Sprint(id)})
+		access.WavePlans = append(access.WavePlans, persistence.StageWaveConfig{MapID: id, ScriptHash: hash, RuntimeHash: hash, Templates: []string{"Monster"}, Variants: []StageWaveVariant{{MinPlayers: 2, MaxPlayers: 6, Waves: []StageWavePlan{{Monsters: map[uint32]uint32{0: 4}}}}}})
+	}
+	if err := access.Validate(); err != nil {
+		b.Fatal(err)
+	}
+	view := persistence.StagePlayerView{Configured: true, Access: access, Maps: access.PVEMaps}
+	b.Run("repeated_validation", func(b *testing.B) {
+		for n := 0; n < b.N; n++ {
+			ids := []uint32{}
+			for _, plan := range access.WavePlans {
+				for players := 1; players <= 8; players++ {
+					if _, err := config.persistedStagePlan(access, plan.MapID, players); err == nil {
+						ids = append(ids, plan.MapID)
+						break
+					}
+				}
+			}
+			if _, err := (protocol.StageProgress{MapIDs: ids}).Encode(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("single_validation", func(b *testing.B) {
+		for n := 0; n < b.N; n++ {
+			p, err := stageSelectionPayload(config, view)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if n == 0 {
+				expected, _ := (protocol.StageProgress{MapIDs: access.PVEMaps}).Encode()
+				if !bytes.Equal(p, expected) {
+					b.Fatal("catalogue changed")
+				}
+			}
+		}
+	})
 }

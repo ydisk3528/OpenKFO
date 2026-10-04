@@ -58,22 +58,27 @@ type Bridge struct {
 	relogin      chan *remoteSession
 }
 type remoteSession struct {
-	udpTransport *clientDatagramPeer
-	account      string
-	uid          uint64
-	traces       map[uint32]*packetTrace
-	identity     Identity
-	connection   net.Conn
-	reader       *bufio.Reader
-	encoder      *json.Encoder
-	writeMutex   sync.Mutex
-	mutex        sync.Mutex
-	channels     map[uint32]net.Conn
-	udpPorts     map[int]bool
-	nextChannel  uint32
-	done         chan struct{}
-	loggedOut    chan struct{}
-	closeOnce    sync.Once
+	udpDrain        tunnel.UDPDrain
+	udpDropLog      time.Time
+	udpDropped      uint64
+	udpFallback     chan tunnel.Frame
+	udpFallbackOnce sync.Once
+	udpTransport    *clientDatagramPeer
+	account         string
+	uid             uint64
+	traces          map[uint32]*packetTrace
+	identity        Identity
+	connection      net.Conn
+	reader          *bufio.Reader
+	encoder         *json.Encoder
+	writeMutex      sync.Mutex
+	mutex           sync.Mutex
+	channels        map[uint32]*nativeChannel
+	udpPorts        map[int]bool
+	nextChannel     uint32
+	done            chan struct{}
+	loggedOut       chan struct{}
+	closeOnce       sync.Once
 }
 
 func (session *remoteSession) send(frame tunnel.Frame) error {
@@ -351,9 +356,9 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 		raw.Close()
 		return nil, err
 	}
-	session := &remoteSession{account: account, traces: map[uint32]*packetTrace{}, identity: identity, connection: connection, reader: bufio.NewReaderSize(connection, 65536), encoder: json.NewEncoder(connection), channels: map[uint32]net.Conn{}, udpPorts: map[int]bool{}, done: make(chan struct{})}
+	session := &remoteSession{account: account, traces: map[uint32]*packetTrace{}, identity: identity, connection: connection, reader: bufio.NewReaderSize(connection, 65536), encoder: json.NewEncoder(connection), channels: map[uint32]*nativeChannel{}, udpPorts: map[int]bool{}, done: make(chan struct{})}
 	receipt := bridge.peerReceiptFor(identity)
-	if err = session.send(tunnel.Frame{PeerReceipt: receipt, ClientRelease: bridge.Config.ClientRelease, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
+	if err = session.send(tunnel.Frame{Kind: "udp-drain-v1", PeerReceipt: receipt, ClientRelease: bridge.Config.ClientRelease, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
 		session.close()
 		return nil, err
 	}
@@ -535,13 +540,16 @@ func (bridge *Bridge) forward(connection net.Conn, kind string) {
 	}
 	session.nextChannel++
 	channelID := session.nextChannel
-	session.channels[channelID] = connection
+	native := newNativeChannel(session, channelID, connection)
+	session.channels[channelID] = native
 	var upstream *packetTrace
 	if bridge.Config.TraceProtocol && kind == "game" {
 		upstream = &packetTrace{account: session.account, uid: session.uid, channel: channelID}
 		session.traces[channelID] = &packetTrace{account: session.account, uid: session.uid, channel: channelID}
 	}
 	session.mutex.Unlock()
+	go native.writeLoop()
+	defer native.Close()
 	log.Printf("native channel opened kind=%s channel=%d", kind, channelID)
 	defer func() {
 		session.mutex.Lock()
@@ -602,36 +610,14 @@ func (bridge *Bridge) receive(session *remoteSession) {
 		case "logged_out":
 			close(session.loggedOut)
 			return
-		case "close":
+		case "close", "data":
 			session.mutex.Lock()
-			connection := session.channels[frame.Channel]
-			session.mutex.Unlock()
-			if connection != nil {
-				connection.Close()
-			}
-		case "data":
-			session.mutex.Lock()
-			connection := session.channels[frame.Channel]
+			channel := session.channels[frame.Channel]
 			trace := session.traces[frame.Channel]
 			session.mutex.Unlock()
-			packets := trace.decode(frame.Data)
-			trace.record("server_read", readAt, packets, nil)
-			if connection != nil {
-				connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				var written int
-				written, err = connection.Write(frame.Data)
-				if err == nil && written != len(frame.Data) {
-					err = io.ErrShortWrite
-				}
-				event := "native_write_complete"
-				if err != nil {
-					event = "native_write_failed"
-				}
-				trace.record(event, time.Now(), packets, err)
-				if err != nil {
-					log.Printf("native_write_failed account=%q uid=%d channel=%d bytes=%d error=%v", session.account, session.uid, frame.Channel, written, err)
-					return
-				}
+			if channel != nil && !channel.enqueue(nativeDelivery{data: frame.Data, readAt: readAt, trace: trace, close: frame.Op == "close"}) {
+				log.Printf("native_queue_overflow uid=%d channel=%d", session.uid, frame.Channel)
+				return
 			}
 		case "udp":
 			bridge.rememberPeerReceipt(session.identity, frame.PeerReceipt)
@@ -643,6 +629,14 @@ func (bridge *Bridge) receive(session *remoteSession) {
 			}
 			bridge.udp.WriteToUDP(frame.Data, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(frame.Port)})
 		case "pong":
+			if frame.Kind == "udp-drain" {
+				session.udpDrain.Ack(frame.Value)
+			}
+			if frame.Kind == "udp-down-drain" {
+				if err := session.send(tunnel.Frame{Op: "ping", Kind: "udp-down-drain-ack", Value: frame.Value}); err != nil {
+					return
+				}
+			}
 			if len(frame.Data) == 216 {
 				writeModStatus(session.identity, frame.Data)
 			}
@@ -652,6 +646,8 @@ func (bridge *Bridge) receive(session *remoteSession) {
 	}
 }
 func (bridge *Bridge) datagrams() {
+	cache := newUDPIdentityCache()
+	defer cache.close()
 	buffer := make([]byte, 32769)
 	for {
 		count, peer, err := bridge.udp.ReadFromUDP(buffer)
@@ -661,7 +657,7 @@ func (bridge *Bridge) datagrams() {
 		if count > 32768 {
 			continue
 		}
-		identity, err := udpIdentity(peer, bridge.Image)
+		identity, err := cache.resolve(peer, bridge.Image)
 		if err != nil {
 			continue
 		}
@@ -672,12 +668,7 @@ func (bridge *Bridge) datagrams() {
 		session.mutex.Lock()
 		session.udpPorts[peer.Port] = true
 		session.mutex.Unlock()
-		if session.udpTransport != nil && count >= 24 && protocol.ReadUint16(buffer[:count], 2) == 1008 && session.udpTransport.send(uint16(peer.Port), buffer[:count]) {
-			continue
-		}
-		if session.send(tunnel.Frame{Op: "udp", Port: uint16(peer.Port), Data: buffer[:count]}) != nil {
-			session.close()
-		}
+		session.enqueueUDPFallback(tunnel.Frame{Op: "udp", Port: uint16(peer.Port), Data: buffer[:count]})
 	}
 }
 

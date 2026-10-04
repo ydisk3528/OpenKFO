@@ -17,9 +17,10 @@ const datagramHeader = 30
 var ErrDatagram = errors.New("invalid secure datagram")
 
 type DatagramGrant struct {
-	ID   []byte `json:"id"`
-	Key  []byte `json:"key"`
-	Port int    `json:"port"`
+	Drain bool   `json:"drain_ack,omitempty"`
+	ID    []byte `json:"id"`
+	Key   []byte `json:"key"`
+	Port  int    `json:"port"`
 }
 type DatagramCodec struct {
 	mu                  sync.Mutex
@@ -30,7 +31,7 @@ type DatagramCodec struct {
 }
 
 func NewDatagramGrant(port int) (*DatagramGrant, error) {
-	g := &DatagramGrant{ID: make([]byte, 16), Key: make([]byte, 32), Port: port}
+	g := &DatagramGrant{ID: make([]byte, 16), Key: make([]byte, 32), Port: port, Drain: true}
 	if _, e := rand.Read(g.ID); e != nil {
 		return nil, e
 	}

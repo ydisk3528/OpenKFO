@@ -15,7 +15,7 @@ func TestReloginQueuesOnlyRequestingSessionAndClosesOldSockets(t *testing.T) {
 	defer server.Close()
 	native, game := net.Pipe()
 	defer game.Close()
-	s := &remoteSession{connection: client, reader: bufio.NewReader(client), done: make(chan struct{}), channels: map[uint32]net.Conn{1: native}}
+	s := &remoteSession{connection: client, reader: bufio.NewReader(client), done: make(chan struct{}), channels: map[uint32]*nativeChannel{1: {Conn: native, stopped: make(chan struct{})}}}
 	b := &Bridge{active: s, relogin: make(chan *remoteSession, 1)}
 	go b.receive(s)
 	server.SetWriteDeadline(time.Now().Add(time.Second))

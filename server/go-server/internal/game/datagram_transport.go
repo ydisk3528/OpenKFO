@@ -10,22 +10,24 @@ import (
 )
 
 type inboundDatagram struct {
-	port uint16
-	data []byte
-	addr *net.UDPAddr
+	received time.Time
+	port     uint16
+	data     []byte
+	addr     *net.UDPAddr
 }
 
 type serverDatagramPeer struct {
-	input    chan inboundDatagram
-	stopped  chan struct{}
-	stopOnce sync.Once
-	mu       sync.Mutex
-	server   *Server
-	session  *Session
-	codec    *tunnel.DatagramCodec
-	id       [16]byte
-	remote   *net.UDPAddr
-	ready    time.Time
+	input      chan inboundDatagram
+	heartbeats chan inboundDatagram
+	stopped    chan struct{}
+	stopOnce   sync.Once
+	mu         sync.Mutex
+	server     *Server
+	session    *Session
+	codec      *tunnel.DatagramCodec
+	id         [16]byte
+	remote     *net.UDPAddr
+	ready      time.Time
 }
 
 // Open before accepting TLS clients. Failure to bind must not silently advertise UDP.
@@ -55,12 +57,13 @@ func (s *Server) registerDatagramPeer(session *Session) (*tunnel.DatagramGrant, 
 	if e != nil {
 		return nil, nil
 	}
-	p := &serverDatagramPeer{server: s, session: session, codec: c, input: make(chan inboundDatagram, 128), stopped: make(chan struct{})}
+	p := &serverDatagramPeer{server: s, session: session, codec: c, input: make(chan inboundDatagram, 128), heartbeats: make(chan inboundDatagram, 4), stopped: make(chan struct{})}
 	copy(p.id[:], g.ID)
 	s.udpMutex.Lock()
 	s.udpPeers[p.id] = p
 	s.udpMutex.Unlock()
 	go p.readInput()
+	go p.readHeartbeats()
 	return g, p
 }
 func (s *Server) unregisterDatagramPeer(p *serverDatagramPeer) {
@@ -74,16 +77,24 @@ func (s *Server) unregisterDatagramPeer(p *serverDatagramPeer) {
 }
 func (p *serverDatagramPeer) send(f tunnel.Frame) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.remote == nil || time.Since(p.ready) > 3*time.Second {
+		p.mu.Unlock()
 		return false
 	}
+	remote := p.remote
+	p.mu.Unlock()
 	encoded, e := p.codec.Seal(f.Port, f.Data)
 	if e != nil {
 		return false
 	}
-	_, e = p.server.udp.WriteToUDP(encoded, p.remote)
+	_, e = p.server.udp.WriteToUDP(encoded, remote)
 	return e == nil
+}
+
+func (p *serverDatagramPeer) readyForSend() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.remote != nil && time.Since(p.ready) <= 3*time.Second
 }
 func (s *Server) readDatagrams() {
 	buffer := make([]byte, tunnel.DatagramLimit+1)
@@ -106,7 +117,7 @@ func (s *Server) readDatagrams() {
 		if e != nil {
 			continue
 		}
-		p.enqueueInput(inboundDatagram{port: port, data: data, addr: addr})
+		p.enqueueInput(inboundDatagram{port: port, data: data, addr: addr, received: time.Now()})
 	}
 }
 
@@ -120,6 +131,15 @@ func (p *serverDatagramPeer) enqueueInput(packet inboundDatagram) {
 		return
 	default:
 	}
+	if packet.port == 0 {
+		// Authenticated heartbeats must not sit behind a busy combat handler.
+		// A full bounded lane drops the probe; the next periodic probe retries.
+		select {
+		case p.heartbeats <- packet:
+		default:
+		}
+		return
+	}
 	select {
 	case p.input <- packet:
 	default:
@@ -130,7 +150,21 @@ func (p *serverDatagramPeer) enqueueInput(packet inboundDatagram) {
 	}
 }
 
+func (p *serverDatagramPeer) readHeartbeats() {
+	for {
+		select {
+		case <-p.session.Done:
+			return
+		case <-p.stopped:
+			return
+		case packet := <-p.heartbeats:
+			p.handleInput(packet)
+		}
+	}
+}
+
 func (p *serverDatagramPeer) readInput() {
+	var lastSlow time.Time
 	for {
 		select {
 		case <-p.session.Done:
@@ -138,7 +172,13 @@ func (p *serverDatagramPeer) readInput() {
 		case <-p.stopped:
 			return
 		case packet := <-p.input:
+			started := time.Now()
 			p.handleInput(packet)
+			finished := time.Now()
+			if !packet.received.IsZero() && finished.Sub(packet.received) > 100*time.Millisecond && finished.Sub(lastSlow) > 5*time.Second {
+				lastSlow = finished
+				log.Printf("udp_input_slow uid=%d queue_ms=%d handle_ms=%d remaining=%d", p.session.UID, started.Sub(packet.received).Milliseconds(), finished.Sub(started).Milliseconds(), len(p.input))
+			}
 		}
 	}
 }
@@ -155,9 +195,9 @@ func (p *serverDatagramPeer) handleInput(packet inboundDatagram) {
 		if len(data) != 1 || data[0] > 1 {
 			return
 		}
-		s.Hub.Mutex.Lock()
+		s.Hub.Mutex.RLock()
 		live := s.Hub.Sessions[p.session.UID] == p.session && !p.session.LoggedOut
-		s.Hub.Mutex.Unlock()
+		s.Hub.Mutex.RUnlock()
 		if !live {
 			return
 		}

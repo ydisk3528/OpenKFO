@@ -38,21 +38,24 @@ func stageSelectionPayload(config Config, view persistence.StagePlayerView) ([]b
 			}
 		}
 	}
-	// PVE admission uses persisted plans, not competitive map pools. Reuse
-	// the same validators as room creation for at least one supported size.
-	for _, plan := range view.Access.FosterPlans {
-		for players := 1; players <= 8; players++ {
-			if _, err := config.persistedFosterPlan(view.Access, plan.MapID, players); err == nil {
-				supported[plan.MapID] = true
-				break
+	if config.ConfigHash != "" && view.Access.ClientHash == config.ConfigHash && view.Access.Validate() == nil {
+		// PVE admission uses persisted plans, not competitive map pools. Reuse
+		// the same validators as room creation for at least one supported size.
+		// Validate this immutable snapshot once, rather than once per map/size.
+		for _, plan := range view.Access.FosterPlans {
+			for players := 1; players <= 8; players++ {
+				if _, err := validatedFosterPlan(view.Access, plan.MapID, players); err == nil {
+					supported[plan.MapID] = true
+					break
+				}
 			}
 		}
-	}
-	for _, plan := range view.Access.WavePlans {
-		for players := 1; players <= 8; players++ {
-			if _, err := config.persistedStagePlan(view.Access, plan.MapID, players); err == nil {
-				supported[plan.MapID] = true
-				break
+		for _, plan := range view.Access.WavePlans {
+			for players := 1; players <= 8; players++ {
+				if _, err := validatedStagePlan(view.Access, plan.MapID, players); err == nil {
+					supported[plan.MapID] = true
+					break
+				}
 			}
 		}
 	}
@@ -75,7 +78,12 @@ func stageSelectionPayload(config Config, view persistence.StagePlayerView) ([]b
 }
 
 func (h *Hub) sendStageSelection(s *Session, view persistence.StagePlayerView, explicit bool) error {
-	p, err := stageSelectionPayload(h.Config, view)
+	config := h.Config
+	var p []byte
+	var err error
+	if !h.readSessionSnapshot(s, func() { p, err = stageSelectionPayload(config, view) }) || h.Config.ConfigHash != config.ConfigHash {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

@@ -170,6 +170,11 @@ void main() {
     await tester.pump();
     expect(find.byTooltip('进入游戏'), findsOneWidget);
     expect(find.text('更新公告'), findsOneWidget);
+    expect(find.text('自动启动 MOD'), findsOneWidget);
+    expect(tester.widget<Checkbox>(find.byType(Checkbox).first).value, false);
+    await tester.tap(find.byType(Checkbox).first);
+    await tester.pump();
+    expect(tester.widget<Checkbox>(find.byType(Checkbox).first).value, true);
     await tester.tap(find.text('设置'));
     await tester.pumpAndSettle();
     expect(find.textContaining('账号不存在时'), findsOneWidget);

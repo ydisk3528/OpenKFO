@@ -23,7 +23,10 @@ import (
 )
 
 func main() {
-	var output *logqueue.Queue
+	var output interface {
+		io.Writer
+		Close(time.Duration) bool
+	}
 	fatal := func(v ...any) {
 		log.Print(v...)
 		if output != nil {
@@ -44,6 +47,7 @@ func main() {
 	operation := flag.String("operation", "serve", "serve, import, create-account, reset-password, wallet, snapshot")
 	udpAddress := flag.String("udp-listen", "", "authenticated UDP relay address; empty keeps TLS-only mode")
 	traceProtocol := flag.Bool("trace-protocol", false, "print every decoded protocol packet (sensitive login fields redacted)")
+	diagnosticDirectory := flag.String("diagnostic-log-dir", "logs/diagnostics", "bounded asynchronous JSONL diagnostics directory")
 	protocolLog := flag.String("protocol-log", "", "append console and protocol logs to this file")
 	bannedWordsPath := flag.String("banned-words", "", "optional UTF-8 seed word list; existing GM settings take precedence")
 	neutralNPC := flag.Bool("experimental-neutral-npc", os.Getenv("OPENKFO_NEUTRAL_NPC_EXPERIMENT") == "1", "enable local team NPC experiment; all clients need the diagnostic EXE")
@@ -65,7 +69,12 @@ func main() {
 		log.SetOutput(io.MultiWriter(file, os.Stdout))
 	}
 	if *operation == "serve" {
-		output = logqueue.New(log.Writer(), 1024)
+		output, err = logqueue.NewManager(*diagnosticDirectory, logqueue.DefaultLimits(), log.Writer())
+		if err != nil {
+			// Diagnostics must not prevent gameplay when the disk is unavailable.
+			log.Printf("diagnostic_file_unavailable: %v", err)
+			output = logqueue.New(log.Writer(), 1024)
+		}
 		log.SetOutput(output)
 		defer output.Close(2 * time.Second)
 	}

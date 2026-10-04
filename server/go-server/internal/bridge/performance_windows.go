@@ -75,7 +75,7 @@ func patchPerformance(process syscall.Handle, options PerformanceOptions) (uintp
 	if address == 0 {
 		return 0, fmt.Errorf("allocate FPS counter: %w", err)
 	}
-	if address+2*performancePageSize > 1<<32 {
+	if uint64(address)+2*uint64(performancePageSize) > 1<<32 {
 		return 0, fmt.Errorf("FPS counter outside 32-bit address space")
 	}
 	counter := address + performancePageSize

@@ -242,13 +242,14 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		return
 	}
 	session.ClientRelease = auth.ClientRelease
+	session.udpDrain.Supported = auth.Kind == "udp-drain-v1"
 	session.ClientConfigHash = auth.ConfigHash
 	defer server.Hub.Detach(session)
 	grant, peer := server.registerDatagramPeer(session)
 	defer server.unregisterDatagramPeer(peer)
 	if peer != nil {
 		session.datagramEnabled.Store(true)
-		go session.writeDatagrams(peer.send)
+		go session.writeDatagrams(peer.send, peer.readyForSend)
 	}
 	if err = encoder.Encode(tunnel.Frame{Op: "auth", UID: session.UID, UDP: grant}); err != nil {
 		return
@@ -304,10 +305,6 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 						lastSlowWrite = finished
 						log.Printf("game_send_slow uid=%d op=%s queue_ms=%d write_ms=%d remaining=%d", session.UID, frame.Op, queued.Milliseconds(), finished.Sub(started).Milliseconds(), len(session.Output))
 					}
-				}
-				if peer != nil && frame.Op == "udp" && frame.PeerReceipt == "" && peer.send(frame) {
-					report()
-					continue
 				}
 				connection.SetWriteDeadline(time.Now().Add(30 * time.Second))
 				writeErr := encoder.Encode(frame)

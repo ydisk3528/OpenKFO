@@ -52,8 +52,12 @@ class LauncherPage extends StatefulWidget {
 
 class _LauncherPageState extends State<LauncherPage> {
   final service = LauncherService(p.dirname(Platform.resolvedExecutable));
-  late final updates = UpdateService(service, onProgress: (value) { if(mounted) setState(()=>transfer=value); });
+  late final updates = UpdateService(service, onProgress: updateTransfer);
   UpdateProgress? transfer;
+
+  void updateTransfer(UpdateProgress value) {
+    if (mounted) setState(() => transfer = value.phase == '更新完成' ? null : value);
+  }
   final account = TextEditingController(), password = TextEditingController();
   final accounts = List.generate(
     8,
@@ -61,7 +65,7 @@ class _LauncherPageState extends State<LauncherPage> {
   );
   int selected = 1;
   final running = <int, bool>{};
-  Timer? stateTimer;
+  Timer? stateTimer, keySettingsTimer;
   bool readingState = false;
 
   Future<void> refreshRunning() async {
@@ -77,8 +81,8 @@ class _LauncherPageState extends State<LauncherPage> {
       readingState = false;
     }
   }
-  bool busy = true, ready = false, gameReady = false, hide = false, fps = true;
-  FrameMode frameMode = FrameMode.normal;
+  bool busy = true, ready = false, gameReady = false, hide = false, fps = true, autoStartMod = false;
+  FrameMode frameMode = FrameMode.high125;
   String status = '正在准备启动器…', health = '正在检查服务器…';
   bool updateBlocked = true;
   Map<String, dynamic>? release;
@@ -121,10 +125,10 @@ class _LauncherPageState extends State<LauncherPage> {
       gameReady = await LauncherService.isGameDirectory(service.game);
       if (await preferences.exists()) {
         final m = jsonDecode(await preferences.readAsString());
-        frameMode = FrameMode.values.where((v) => v.name == m['frame_mode']).firstOrNull
-            ?? (m['high'] == true ? FrameMode.high125 : FrameMode.normal);
+        // 每次打开统一默认推荐帧率，其他模式仅用于本次启动器会话。
         fps = m['fps'] != false;
         hide = m['hide'] == true;
+        autoStartMod = m['auto_start_mod'] == true;
       }
       for (var n = 1; n <= 8; n++) {
         accounts[n - 1] = await service.loadAccount(n);
@@ -135,6 +139,11 @@ class _LauncherPageState extends State<LauncherPage> {
       await refreshRunning();
       stateTimer = Timer.periodic(const Duration(seconds: 2), (_) {
         if (!busy) unawaited(refreshRunning());
+      });
+      keySettingsTimer = Timer.periodic(const Duration(seconds: 20), (_) async {
+        if (busy) return;
+        try { await service.captureKeySettings(); }
+        catch (e) { report('按键备份未更新：$e'); }
       });
       report('选择窗口，填写账号后启动游戏');
       await refreshHealth();
@@ -168,6 +177,27 @@ class _LauncherPageState extends State<LauncherPage> {
     password.text = accounts[selected - 1]['Password'] ?? '';
   }
 
+  Future<void> selectFrameMode(FrameMode? requestedMode) async {
+    final mode = requestedMode == FrameMode.configZero ? FrameMode.high125 : requestedMode;
+    if (mode == null || mode == frameMode) return;
+    if (mode != FrameMode.high125) {
+      final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+        title: const Text('帧率模式提醒'),
+        content: const Text('建议统一使用约 125 FPS 模式。玩家帧率不统一可能会造成卡顿。是否仍使用所选模式？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('使用推荐模式')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('仍然使用')),
+        ],
+      ));
+      if (!mounted) return;
+      if (accepted != true) {
+        setState(() => frameMode = FrameMode.high125);
+        return;
+      }
+    }
+    if (mounted) setState(() => frameMode = mode);
+  }
+
   Future<void> save() async {
     if (!ready) return;
     await service.saveAccount(selected, account.text.trim(), password.text);
@@ -177,7 +207,7 @@ class _LauncherPageState extends State<LauncherPage> {
     };
     await writeAtomic(
       preferences.path,
-      utf8.encode(jsonEncode({'frame_mode': frameMode.name, 'fps': fps, 'hide': hide})),
+      utf8.encode(jsonEncode({'frame_mode': frameMode.name, 'fps': fps, 'hide': hide, 'auto_start_mod': autoStartMod})),
     );
   }
 
@@ -380,7 +410,7 @@ class _LauncherPageState extends State<LauncherPage> {
         service.verifiedRelease = updates.verifiedRelease;
       }
       if (!await resolvePortConflicts()) return;
-      await service.launch(selected, frameMode, fps, report);
+      await service.launch(selected, frameMode, fps, report, autoStartMod: autoStartMod);
     } catch (e) {
       await error(e);
     } finally {
@@ -437,6 +467,7 @@ class _LauncherPageState extends State<LauncherPage> {
   @override
   void dispose() {
     stateTimer?.cancel();
+    keySettingsTimer?.cancel();
     account.dispose();
     password.dispose();
     super.dispose();
@@ -568,14 +599,17 @@ class _LauncherPageState extends State<LauncherPage> {
             decoration: const InputDecoration(labelText: '帧率模式 · 重启游戏生效', floatingLabelBehavior: FloatingLabelBehavior.never, border: OutlineInputBorder(), isDense: true),
             items: const [
               DropdownMenuItem(value: FrameMode.normal, child: Text('普通模式')),
-              DropdownMenuItem(value: FrameMode.high125, child: Text('高帧率模式 1 · 约 125 FPS')),
-              DropdownMenuItem(value: FrameMode.configZero, child: Text('高帧率模式 2 · 最高约 500帧（实验）')),
-            ], onChanged: busy ? null : (v) { if(v != null) setState(() => frameMode = v); })),
+              DropdownMenuItem(value: FrameMode.high125, child: Text('约 125 FPS（推荐，实验性功能）')),
+            ], onChanged: busy ? null : selectFrameMode)),
           const SizedBox(width: 12),
           Switch(value: fps, onChanged: busy ? null : (v) => setState(() => fps = v)), const Text('显示 FPS', style: TextStyle(color: Color(0xffffdd57))),
           const SizedBox(width: 8),
           IconButton(onPressed: ready && !busy ? () => service.show(selected) : null,
             tooltip: '显示游戏窗口', icon: const Icon(Icons.open_in_new)),
+        ]),
+        Row(children: [
+          Checkbox(value: autoStartMod, onChanged: busy ? null : (v) => setState(() => autoStartMod = v == true)),
+          const Text('自动启动 MOD', style: TextStyle(color: Color(0xffffdd57))),
         ]),
         const SizedBox(height: 10),
         Row(children: [const Icon(Icons.public, size: 15, color: Color(0xffffdd57)), const SizedBox(width: 8),

@@ -64,6 +64,18 @@ func TestUDPBusyRoomDoesNotBlockOtherPeer(t *testing.T) {
 	if err != nil || port != 0 || len(data) != 1 || data[0] != 1 {
 		t.Fatal("invalid heartbeat", err)
 	}
+	// The blocked player's own heartbeat must also bypass its combat lane.
+	hello, _ = codecs[0].Seal(0, []byte{1})
+	sockets[0].Write(hello)
+	sockets[0].SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	n, err = sockets[0].Read(buf)
+	if err != nil {
+		t.Fatalf("own heartbeat blocked by combat queue: %v", err)
+	}
+	port, data, err = codecs[0].Open(buf[:n])
+	if err != nil || port != 0 || len(data) != 1 || data[0] != 1 {
+		t.Fatal("invalid own heartbeat", err)
+	}
 }
 
 func TestUDPInputIsBoundedAndOrdered(t *testing.T) {
@@ -79,6 +91,44 @@ func TestUDPInputIsBoundedAndOrdered(t *testing.T) {
 	}
 	if len(p.input) != 2 || (<-p.input).port != 1 || (<-p.input).port != 2 {
 		t.Fatal("queue order or bound changed")
+	}
+}
+
+func TestUDPHeartbeatDoesNotWaitForBattleReadLock(t *testing.T) {
+	h := NewHub(nil, Config{})
+	server := NewServer(h, tls.Certificate{})
+	stop, err := server.ListenDatagrams("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	s := &Session{UID: 99, Done: make(chan struct{})}
+	h.Sessions[s.UID] = s
+	defer s.Close()
+	grant, peer := server.registerDatagramPeer(s)
+	defer server.unregisterDatagramPeer(peer)
+	codec, _ := tunnel.NewDatagramCodec(grant, false)
+	sock, err := net.DialUDP("udp", nil, server.udp.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sock.Close()
+	// Simulate another room handling combat under the registry read lock.
+	h.Mutex.RLock()
+	defer h.Mutex.RUnlock()
+	packet, _ := codec.Seal(0, []byte{1})
+	sock.SetDeadline(time.Now().Add(time.Second))
+	if _, err := sock.Write(packet); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1200)
+	n, err := sock.Read(buf)
+	if err != nil {
+		t.Fatalf("heartbeat blocked by unrelated battle: %v", err)
+	}
+	port, data, err := codec.Open(buf[:n])
+	if err != nil || port != 0 || len(data) != 1 || data[0] != 1 {
+		t.Fatalf("invalid heartbeat: %v", err)
 	}
 }
 

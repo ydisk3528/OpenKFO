@@ -6,7 +6,7 @@ function Run($exe, $arguments) { & $exe @arguments; if($LASTEXITCODE -ne 0){thro
 Push-Location (Join-Path $repo 'server/go-server')
 try {
  Run $go @('build','-o',"$out/服务器/kungfu-server.exe",'./cmd/server')
- Run $go @('build','-ldflags','-H windowsgui','-o',"$out/登录器/launcher-files/OnlineBridge.exe",'./cmd/bridge')
+ & (Join-Path $PSScriptRoot 'Build-BridgeGo120.ps1') -Output "$out/登录器/launcher-files/OnlineBridge.exe"
  Run $go @('build','-ldflags','-H windowsgui','-o',"$out/登录器/LauncherSupport.exe",'./cmd/launcher-support')
  Run $go @('build','-ldflags','-H windowsgui -X kungfu.local/server/internal/desktop.DefaultManagementEndpoint=https://vxfnqfjdr.top/gm/api','-o',"$out/GM管理器/kungfu-desktop-admin.exe",'./cmd/desktop-admin')
 } finally {Pop-Location}

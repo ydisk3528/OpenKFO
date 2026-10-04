@@ -454,6 +454,55 @@ class LauncherService {
     }
   }
 
+  String? keySettingsGame;
+  Future<void>? keySettingsCapture;
+  File get keySettingsFile => File(p.join(root, 'LoginKeySetting.xml'));
+
+  String keySettingsBlock(String text) {
+    final blocks = RegExp(r'<OperationsSettings>.*?</OperationsSettings>', dotAll: true).allMatches(text).toList();
+    if (blocks.length != 1) throw StateError('按键配置不完整，已保留上次保存的按键。');
+    final block = blocks.single.group(0)!;
+    var body = block.substring('<OperationsSettings>'.length, block.length - '</OperationsSettings>'.length);
+    for (final name in ['Up','Down','Left','Right','Aim','LAttack','WAttack','Jump','Defence','Skill','ConsumeWeaopon1','ConsumeWeaopon2','SwitchWeapon','Burst']) {
+      final re = RegExp('<$name Key="([0-9]+)"></$name>');
+      final matches = re.allMatches(body).toList();
+      if (matches.length != 1 || int.parse(matches.single.group(1)!) > 255) {
+        throw StateError('按键配置异常，已保留上次保存的按键。');
+      }
+      body = body.replaceFirst(re, '');
+    }
+    if (body.trim().isNotEmpty) throw StateError('按键配置格式不支持，未覆盖保存文件。');
+    return block;
+  }
+
+  Future<void> restoreKeySettings() async {
+    await keySettingsCapture;
+    final current = File(p.join(game, 'Settings.xml'));
+    final text = latin1.decode(await current.readAsBytes());
+    final block = keySettingsBlock(text);
+    if (!await keySettingsFile.exists()) {
+      await writeAtomic(keySettingsFile.path, latin1.encode(block));
+      return;
+    }
+    final saved = keySettingsBlock(latin1.decode(await keySettingsFile.readAsBytes()));
+    await updatePlayerSettings((original) => original.replaceFirst(keySettingsBlock(original), saved));
+  }
+
+  Future<void> captureKeySettings() {
+    return keySettingsCapture ??= _captureKeySettings().whenComplete(() => keySettingsCapture = null);
+  }
+
+  Future<void> _captureKeySettings() async {
+    if (keySettingsGame != game) return; // Do not replace the saved keys before startup restoration.
+    final current = File(p.join(game, 'Settings.xml'));
+    final bytes = await current.readAsBytes();
+    final block = keySettingsBlock(latin1.decode(bytes));
+    final saved = await keySettingsFile.exists() ? keySettingsBlock(latin1.decode(await keySettingsFile.readAsBytes())) : null;
+    if (saved == block) return;
+    if (await fileHash(current.path) != hashBytes(bytes)) return;
+    await writeAtomic(keySettingsFile.path, latin1.encode(block));
+  }
+
   // Settings.xml belongs to the player. Preserve its original encoding and
   // keep each distinct version, including launches that need no modification.
   Future<void> updatePlayerSettings(String Function(String) transform) async {
@@ -519,8 +568,9 @@ class LauncherService {
     int n,
     FrameMode frameMode,
     bool fps,
-    void Function(String) status,
-  ) async {
+    void Function(String) status, {
+    bool autoStartMod = false,
+  }) async {
     await validate();
     final lock = await File(p.join(game, '.launcher-start.lock'))
         .open(mode: FileMode.append);
@@ -531,6 +581,7 @@ class LauncherService {
       await prepare();
       var s = await state(n);
       if (s == null) {
+        await restoreKeySettings();
         await updatePlayerSettings((original) => applyFrameMode(original, frameMode));
         final c = Map<String, dynamic>.from(config)
           ..addAll({
@@ -576,6 +627,7 @@ class LauncherService {
         }
         if (s == null) throw Exception('窗口 $n 启动超时\n${await logText()}');
       }
+      keySettingsGame = game;
       final skinHash =
           (components['LoginSkin.dll'] as String).substring(0, 12) +
           (components['LoginSkinHost.exe'] as String).substring(0, 12);
@@ -593,7 +645,7 @@ class LauncherService {
         mode: ProcessStartMode.detached,
         workingDirectory: skin,
       );
-      if (components.containsKey('GameMod.exe')) {
+      if (autoStartMod && components.containsKey('GameMod.exe')) {
         await Process.start(
           p.join(p.dirname(bridgeExecutable), 'GameMod.exe'),
           ['--attach', '${s['PID']}', '${s['Created']}'],

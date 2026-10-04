@@ -13,9 +13,9 @@ $oldOS, $oldArch, $oldCGO = $env:GOOS, $env:GOARCH, $env:CGO_ENABLED
 Push-Location (Join-Path $repoRoot 'server/go-server')
 try {
     $env:GOOS = 'windows'
-    $env:GOARCH = 'amd64'
+    $env:GOARCH = '386'
     $env:CGO_ENABLED = '0'
-    & $Go test -mod=readonly '-modfile=bridge-go120.mod' ./internal/bridge ./internal/tunnel
+    & $Go test -mod=readonly '-modfile=bridge-go120.mod' ./internal/bridge ./internal/tunnel ./cmd/bridge
     if ($LASTEXITCODE) { throw 'Go 1.20 bridge tests failed' }
     New-Item -ItemType Directory -Force (Split-Path -Parent $Output) | Out-Null
     & $Go build -mod=readonly '-modfile=bridge-go120.mod' -trimpath '-ldflags=-s -w -H=windowsgui' -o $Output ./cmd/bridge

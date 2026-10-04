@@ -25,7 +25,7 @@ type Hub struct {
 	ioCond               *sync.Cond
 	ioPaused             bool
 	ioScope              *storageScope
-	lastSlowHandleLog    time.Time
+	lastSlowHandleLog    [3]time.Time
 	slowLogMutex         sync.Mutex
 	auditWriteMutex      sync.Mutex
 	releaseVersion       atomic.Value
@@ -55,6 +55,7 @@ type Channel struct {
 }
 
 type Session struct {
+	udpDrain             tunnel.UDPDrain
 	HornPending          bool
 	LastHorn             time.Time
 	TreasureDraw         *treasureDrawState
@@ -271,6 +272,16 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 		scope = hub.ioScope
 	}
 	acquired := time.Now()
+	var firstMessage, lastMessage uint32
+	messageCount := 0
+	var roomID uint16
+	if session.Room != nil {
+		roomID = session.Room.ID
+	}
+	phase := ""
+	if channel := session.Channels[frame.Channel]; channel != nil {
+		phase = channel.Phase
+	}
 	defer func() {
 		finished := time.Now()
 		storageTime := time.Duration(0)
@@ -278,11 +289,18 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 			storageTime = scope.ioTime
 		}
 		held := finished.Sub(acquired) - storageTime
+		// Waiters must not consume the log budget of the handler holding the lock.
+		bucket := 0
+		if held > 100*time.Millisecond {
+			bucket = 1
+		} else if storageTime > 100*time.Millisecond {
+			bucket = 2
+		}
 		hub.slowLogMutex.Lock()
-		report := (acquired.Sub(started) > 100*time.Millisecond || held > 100*time.Millisecond || storageTime > 100*time.Millisecond) && finished.Sub(hub.lastSlowHandleLog) > 5*time.Second
+		report := (acquired.Sub(started) > 100*time.Millisecond || held > 100*time.Millisecond || storageTime > 100*time.Millisecond) && finished.Sub(hub.lastSlowHandleLog[bucket]) > 5*time.Second
 		uid := session.UID
 		if report {
-			hub.lastSlowHandleLog = finished
+			hub.lastSlowHandleLog[bucket] = finished
 		}
 		hub.slowLogMutex.Unlock()
 		if owner {
@@ -294,7 +312,7 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 			hub.Mutex.Unlock()
 		}
 		if report {
-			log.Printf("game_handle_slow uid=%d op=%s channel=%d wait_ms=%d hold_ms=%d storage_ms=%d", uid, frame.Op, frame.Channel, acquired.Sub(started).Milliseconds(), held.Milliseconds(), storageTime.Milliseconds())
+			log.Printf("game_handle_slow uid=%d op=%s channel=%d room=%d phase=%s first_message=%d last_message=%d message_count=%d wait_ms=%d hold_ms=%d storage_ms=%d", uid, frame.Op, frame.Channel, roomID, phase, firstMessage, lastMessage, messageCount, acquired.Sub(started).Milliseconds(), held.Milliseconds(), storageTime.Milliseconds())
 		}
 	}()
 	if frame.Op == "data" || frame.Op == "logout" || frame.Op == "open" || frame.Op == "close" {
@@ -324,7 +342,15 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 		log.Printf("logout_complete uid=%d account=%q", session.UID, session.Account)
 		return nil
 	case "ping":
+		if frame.Kind == "udp-down-drain-ack" {
+			session.udpDrain.Ack(frame.Value)
+			return nil
+		}
 		reply := tunnel.Frame{Op: "pong"}
+		if frame.Kind == "udp-drain" {
+			reply.Kind = frame.Kind
+			reply.Value = frame.Value
+		}
 		if frame.Kind == "mod" {
 			reply.Data = hub.modStatus(session)
 		}
@@ -369,6 +395,11 @@ func (hub *Hub) Handle(session *Session, frame tunnel.Frame) error {
 			return err
 		}
 		for _, message := range messages {
+			if messageCount == 0 {
+				firstMessage = message.ID
+			}
+			lastMessage = message.ID
+			messageCount++
 			session.tracePacket("C->S", channel.ID, "game", message.ID, message.Payload, false)
 			channel.Sequence++
 			if err = hub.route(session, channel, message); err != nil {

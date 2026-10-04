@@ -17,6 +17,30 @@ class SettingsLauncher extends LauncherService {
 }
 
 void main() {
+  test('saved keys restore before launch and polling preserves other settings', () async {
+    final dir = await Directory.systemTemp.createTemp('login-keys-');
+    addTearDown(() => dir.delete(recursive: true));
+    final service = SettingsLauncher(dir.path);
+    final file = File('${dir.path}/Settings.xml');
+    final names = ['Up','Down','Left','Right','Aim','LAttack','WAttack','Jump','Defence','Skill','ConsumeWeaopon1','ConsumeWeaopon2','SwitchWeapon','Burst'];
+    final block = '<OperationsSettings>${names.map((n) => '<$n Key="65"></$n>').join()}</OperationsSettings>';
+    await file.writeAsString('<Settings>$block<RenderIntervel Intervel="0"/></Settings>');
+    await service.restoreKeySettings();
+    final saved = await service.keySettingsFile.readAsBytes();
+    final changed = block.replaceFirst('Jump Key="65"', 'Jump Key="86"');
+    await file.writeAsString('<Settings>$changed<RenderIntervel Intervel="1"/></Settings>');
+    await service.captureKeySettings(); // Unarmed: never overwrite the previous session's keys.
+    expect(await service.keySettingsFile.readAsBytes(), saved);
+    await service.restoreKeySettings();
+    expect(await file.readAsString(), '<Settings>$block<RenderIntervel Intervel="1"/></Settings>');
+    service.keySettingsGame = dir.path;
+    await file.writeAsString('<Settings>$changed<RenderIntervel Intervel="1"/></Settings>');
+    await service.captureKeySettings();
+    expect(await service.keySettingsFile.readAsString(), changed);
+    await file.writeAsString('<Settings><OperationsSettings>');
+    await expectLater(service.captureKeySettings(), throwsStateError);
+    expect(await service.keySettingsFile.readAsString(), changed);
+  });
   test('player settings preserve bytes, backups and concurrent edits', () async {
     final dir = await Directory.systemTemp.createTemp('player-settings-');
     addTearDown(() => dir.delete(recursive: true));
