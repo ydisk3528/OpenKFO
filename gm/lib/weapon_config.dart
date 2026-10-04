@@ -1,5 +1,6 @@
 import 'item_pictures.dart';
 import 'weapon_merge_page.dart';
+import 'weapon_workspace.dart';
 
 import 'dart:convert';
 
@@ -27,20 +28,65 @@ const packageSections = <String, String>{
 
 class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Map<String, dynamic>? data, weapon;
+  WeaponWorkspace? workspace;
+  Map<String, dynamic> remaps = {}, cleared = {}, extraProperties = {};
+
+  Map<String, dynamic> _hitValues(Object? value) {
+    if (value is Map && value['values'] is Map) {
+      return Map<String, dynamic>.from(value['values'] as Map);
+    }
+    if (value is Map) {
+      return {
+        for (final entry in value.entries)
+          if (entry.key != 'id' &&
+              entry.key != 'values' &&
+              entry.key != 'buff' &&
+              entry.key != 'variant')
+            '${entry.key}': entry.value,
+      };
+    }
+    return {};
+  }
+
+  Map<String, dynamic> _ruleValues(Object? value) {
+    final values = _hitValues(value);
+    final result = <String, dynamic>{};
+    for (final entry in values.entries) {
+      final parsed = entry.value is num
+          ? entry.value as num
+          : num.tryParse('${entry.value}'.trim());
+      if (parsed != null && parsed.isFinite) {
+        result['${entry.key}'] = parsed;
+      }
+    }
+    return result;
+  }
+
+  /// 命中属性的唯一内存来源；rules.properties 仅作为旧数据兼容投影。
+  Map<String, dynamic> hitProperties = {};
+  Map<String, dynamic> _structureBaseline = {};
   Map<String, dynamic> _clientInfo = {};
   final form = GlobalKey<FormState>();
   List<Map<String, dynamic>> rules = [];
   String query = '', message = '';
   String weaponType = '全部类型';
   bool busy = true, dirty = false, failed = false;
+  bool workspaceExists = false;
+  String workspaceSavedAt = '';
   String? selectedAction;
   int editorVersion = 0;
+  int _loadGeneration = 0;
+  int _selectionGeneration = 0;
+
   /// 非自建武器「启用编辑」开关：每次重新选中武器都会复位，需要再次手动开启。
   bool editUnlocked = false;
+
   /// 最近一次导出发版包的结果（后端 packageResult）；空 map 表示还没导出过。
   Map<String, dynamic> exportResult = {};
+
   /// 最近一次导出是不是合并包（只含当前武器的配置）。
   bool lastExportMerge = false;
+
   /// 最近一次「导入武器包」的结果（后端 mergeImportReport）；空 map 表示还没导入过。
   Map<String, dynamic> mergeImportResult = {};
 
@@ -51,9 +97,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> load({int? prefer, bool refresh = true}) async {
+    final generation = ++_loadGeneration;
+    final selectedId = prefer ?? weapon?['id'] as int?;
+    ++_selectionGeneration;
+    setState(() {
+      busy = true;
+      failed = false;
+    });
     try {
       final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_catalog', '_refresh': refresh}),
+        await widget.api({'operation': 'weapon_list', '_refresh': refresh}),
       );
       Map<String, dynamic> client = {};
       try {
@@ -63,34 +116,193 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       } catch (_) {
         // The card falls back to whatever was shown before.
       }
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
+      final selected = (result['weapons'] as List).where(
+        (w) => selectedId != null && w['id'] == selectedId,
+      );
       setState(() {
         data = result;
         if (client.isNotEmpty) _clientInfo = client;
-        // 状态目录（ustate.xml）：动作块里的 UState/Ustate/AddBuff 都按它的编号引用。
         ustateOptions = [
           for (final u in (result['ustates'] as List? ?? []))
             {'id': '${(u as Map)['id']}', 'name': '${u['name'] ?? ''}'},
         ];
-        final weapons = (data!['weapons'] as List);
-        final selected = weapons.where(
-          (w) => w['id'] == (prefer ?? weapon?['id'] ?? 253013),
-        );
-        if (selected.isNotEmpty) {
-          select(Map<String, dynamic>.from(selected.first));
-        } else if (weapons.isNotEmpty) {
-          select(Map<String, dynamic>.from(weapons.first));
-        }
-        busy = false;
+        clearWeaponDetails();
+        weapon = null;
+        rules = [];
+        dirty = false;
+        busy = selected.isNotEmpty;
       });
+      if (selected.isNotEmpty) {
+        await select(Map<String, dynamic>.from(selected.first));
+      }
     } catch (e) {
-      if (mounted) {
+      if (mounted && generation == _loadGeneration) {
         setState(() {
           busy = false;
           failed = true;
           message = '$e';
         });
       }
+    }
+  }
+
+  Future<void> reloadSelectedWeapon({int? prefer}) async {
+    final selected = weapon;
+    if (selected != null && (prefer == null || selected['id'] == prefer)) {
+      await select(Map<String, dynamic>.from(selected));
+    }
+  }
+
+  Future<void> refreshWorkspaceStatus() async {
+    final selected = weapon;
+    if (selected == null) return;
+    try {
+      final result = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_workspace_status',
+          'weapon': selected['id'],
+        }),
+      );
+      if (!mounted || weapon?['id'] != selected['id']) return;
+      setState(() {
+        workspaceExists = result['exists'] == true;
+        workspaceSavedAt =
+            '${result['payload'] is Map ? (result['payload'] as Map)['saved_at'] ?? '' : ''}';
+      });
+    } catch (_) {
+      if (mounted)
+        setState(() {
+          workspaceExists = false;
+          workspaceSavedAt = '';
+        });
+    }
+  }
+
+  Future<void> saveWorkspace() async {
+    final selected = weapon;
+    if (selected == null || busy) return;
+    final currentWorkspace = _snapshotWorkspace();
+    setState(() {
+      workspace = currentWorkspace;
+      busy = true;
+      failed = false;
+      message = '正在保存当前武器暂存副本…';
+    });
+    try {
+      final result = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_workspace_save',
+          'weapon': selected['id'],
+          'workspace': currentWorkspace.toJson(),
+        }),
+      );
+      if (!mounted) return;
+      setState(() {
+        busy = false;
+        workspaceExists = true;
+        workspaceSavedAt = '${result['saved_at'] ?? ''}';
+        dirty = false;
+        message = '${result['message'] ?? '当前武器暂存已保存'}';
+      });
+    } catch (e) {
+      if (mounted)
+        setState(() {
+          busy = false;
+          failed = true;
+          message = '$e';
+        });
+    }
+  }
+
+  Future<void> loadWorkspace() async {
+    final selected = weapon;
+    if (selected == null || busy) return;
+    setState(() {
+      busy = true;
+      failed = false;
+      message = '正在检查并加载当前武器暂存副本…';
+    });
+    try {
+      final result = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_workspace_load',
+          'weapon': selected['id'],
+        }),
+      );
+      if (result['exists'] != true || result['payload'] is! Map) {
+        throw StateError('当前武器没有可加载的暂存副本');
+      }
+      final restored = WeaponWorkspace.fromJson(
+        Map<String, dynamic>.from(result['payload'] as Map),
+      );
+      if (!mounted) return;
+      setState(() {
+        _restoreWorkspace(restored);
+        workspace = restored;
+        workspaceExists = true;
+        workspaceSavedAt = '${(result['payload'] as Map)['saved_at'] ?? ''}';
+        dirty = true;
+        busy = false;
+        failed = false;
+        message = '暂存副本已加载到当前武器内存；点击“应用到游戏”才会写入客户端。';
+      });
+    } catch (e) {
+      if (mounted)
+        setState(() {
+          busy = false;
+          failed = true;
+          message = '$e';
+        });
+    }
+  }
+
+  Future<void> deleteWorkspace() async {
+    final selected = weapon;
+    if (selected == null || busy || !workspaceExists) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除暂存副本？'),
+        content: const Text('只删除当前武器的本地 JSON 暂存，不会修改客户端配置。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      busy = true;
+      message = '正在删除当前武器暂存副本…';
+    });
+    try {
+      final result = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_workspace_delete',
+          'weapon': selected['id'],
+        }),
+      );
+      if (mounted)
+        setState(() {
+          busy = false;
+          workspaceExists = false;
+          workspaceSavedAt = '';
+          message = '${result['message'] ?? '暂存已删除'}';
+        });
+    } catch (e) {
+      if (mounted)
+        setState(() {
+          busy = false;
+          failed = true;
+          message = '$e';
+        });
     }
   }
 
@@ -217,7 +429,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     }
   }
 
-    Future<void> rebaseClient() async {
+  Future<void> rebaseClient() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -301,55 +513,97 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   List<Map<String, String>> comboChain = [];
   List<Map<String, String>> comboDeadEnds = [];
+
   /// 动作块内的帧级按键切换（CustomStateSwitch），第二条连招通道。
   /// 这份是渲染后的现状（含已保存的编辑），编辑器据此展示。
   /// 元素里除了 state/next/keycode/window 这些展示字段，还有 attrs（原始属性表），
   /// 所以不能收窄成 Map<String, String>。
   List<Map<String, dynamic>> frameSwitches = [];
+
   /// 本次编辑中改过的状态 → 该状态要写的切换列表。
   Map<String, List<Map<String, dynamic>>> frameEdits = {};
+
   /// 后端已保存的帧级连招（用于判断某状态是否被定制过）。
   Map<String, List<Map<String, dynamic>>> frameSaved = {};
+
   /// 底层按键码可选项（后端 frame_keys；与 delayacttable 的按键编号是两套）。
   List<Map<String, String>> frameKeys = [];
+
   /// 动作块内的招架（`<Counter>` + `<TriggerBox>`）：第三条连招通道，
   /// **被对手攻击触发**（不是按键）。每状态至多一条；这份是渲染后的现状
   /// （含已保存的编辑），未编辑时就是供体块里带过来的原样。
   List<Map<String, dynamic>> counters = [];
+
   /// 本次编辑中改过的状态 → 要写的招架；值为 null 表示"删掉这个状态的招架"。
   Map<String, Map<String, dynamic>?> counterEdits = {};
+
   /// 后端已保存的招架编辑，用来区分"改过的"和"块里原有的"。
   Map<String, Map<String, dynamic>?> counterSaved = {};
   bool counterEditing = false;
+
   /// 防护（霸体/无敌/穿人）与自身状态（UState/Ustate/AddBuff）：渲染后的现状，
   /// 按状态分组；未编辑时就是块里原有的（多半是供体带来的）。
   List<Map<String, dynamic>> blockElements = [];
+
   /// 后端已保存的编辑：状态 → 元素标签 → 条目。
   Map<String, Map<String, List<Map<String, dynamic>>>> blockElementsSaved = {};
+
   /// 本次编辑改过的那部分，形状同上；某一个 (状态,标签) 出现即为「按这个列表写」，
   /// 空列表 = 删掉该标签。**没出现的一律不碰**。
   Map<String, Map<String, List<Map<String, dynamic>>>> blockElementsEdit = {};
+
   /// 可写元素的清单（后端 block_element_groups：分组 + 标签 + 中文名 + 是否单实例）。
   List<Map<String, dynamic>> blockElementGroups = [];
+
   /// 状态目录（ustate.xml）：id + 策划中文名，用来做下拉。
   List<Map<String, String>> ustateOptions = [];
   bool blockElementEditing = false;
   bool frameEditing = false;
+
   /// 「动作分支」：同一招在**持有某个状态时**换成另一套动作（多段 / 换伤害 / 换 Buff）。
   /// 机制是同名 <AnmDesc> 注册两条块，第二条头部带 <Condition><Ustate id="N"/>。
   /// 这份是**渲染后的现状**：状态号 → 该状态下已有的条件分支。
   Map<String, List<Map<String, dynamic>>> variants = {};
+
   /// 后端已保存的分支定义：状态号 → 分支列表（与渲染后现状可能不同，是作者态）。
   Map<String, List<Map<String, dynamic>>> variantsSaved = {};
+
   /// 本次编辑的**增量**：状态号 → 要写/要删的分支（出现即生效；不再出现=不碰）。
   /// 已有分支被改 = 覆盖同 condition；被删 = {condition, remove:true}；新增 = 完整定义。
   Map<String, List<Map<String, dynamic>>> variantsEdit = {};
   bool variantEditing = false;
+  List<Map<String, dynamic>>? _variantRulesSnapshot;
+  bool _variantDirtySnapshot = false;
+  Map<String, dynamic>? _variantOccupiedSnapshot;
+
+  Set<String> get localVariantIDs => {
+    for (final perState in variantsEdit.values)
+      for (final branch in perState)
+        for (final segment in (branch['segments'] as List? ?? const []))
+          if (isVariantSkillProID(
+                '${(segment as Map)['skillproid'] ?? ''}',
+                minimum: variantSkillProMin,
+                maximum: variantSkillProMax,
+              ) &&
+              !variantServerOccupiedIDs.contains('${segment['skillproid']}'))
+            '${segment['skillproid']}',
+  };
+
+  void syncVariantOccupiedIDs() {
+    variantOccupiedIDs = {...variantServerOccupiedIDs, ...localVariantIDs};
+  }
+
   /// 各状态**无条件块**的动作段（照抄本招 / 回填参考）：状态号 → 段列表。
   Map<String, List<Map<String, dynamic>>> variantBases = {};
+  Set<String> variantOccupiedIDs = {};
+  Set<String> variantServerOccupiedIDs = {};
+  int variantSkillProMin = 910000000;
+  int variantSkillProMax = 910999999;
+
   /// 帧轨道（weapon_stage_track 的结果）：状态 → 该招式的片断/标记/真实帧数。
   /// 打开某个招式的「帧轨道与攻击范围」弹窗时按武器一次性拉取，然后按状态缓存。
   Map<String, Map<String, dynamic>> stageTracks = {};
+
   /// 已保存的攻击范围编辑：状态 → 片断编号 → 六个盒尺寸属性。
   Map<String, Map<String, List<Map<String, dynamic>>>> scopeSaved = {};
 
@@ -372,9 +626,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   List<Map<String, dynamic>> comboRuleMaxDraft = [];
   List<Map<String, dynamic>> comboRuleBlackDraft = [];
   List<Map<String, dynamic>> comboRuleWhiteDraft = [];
+
   /// 下拉框用 initialValue 只在创建时生效，草稿整体换掉时必须换 key，
   /// 否则取消编辑后界面还留着被丢弃的选择。
   int comboRuleVersion = 0;
+
   /// 读取失败的原因。以前这里静默清空 comboRuleInfo，卡片直接消失，看起来
   /// 和「这把武器没有限制」一模一样——后端还是旧二进制（不认识
   /// weapon_combo_rule）时会这样，极难自查。现在把原因留在卡片上。
@@ -409,17 +665,40 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   List<Map<String, String>> get usableKeys =>
       comboKeys.isNotEmpty ? comboKeys : chainKeys;
 
-  Future<void> refreshChain(dynamic weaponId) async {
+  Future<void> refreshChain(
+    dynamic weaponId, {
+    Map<String, dynamic>? snapshot,
+  }) async {
+    final generation = _selectionGeneration;
     try {
-      final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_combo_chain', 'weapon': weaponId}),
-      );
-      if (!mounted || weapon?['id'] != weaponId) return;
+      final result =
+          snapshot ??
+          Map<String, dynamic>.from(
+            await widget.api({
+              'operation': 'weapon_combo_chain',
+              'weapon': weaponId,
+            }),
+          );
+      if (!mounted ||
+          generation != _selectionGeneration ||
+          weapon?['id'] != weaponId)
+        return;
       setState(() {
         comboChain = [
           for (final e in (result['chain'] as List? ?? []))
             Map<String, String>.from(e as Map),
         ];
+        variantServerOccupiedIDs = {
+          for (final id in (result['variant_occupied_ids'] as List? ?? []))
+            '$id',
+        };
+        variantOccupiedIDs = {...variantServerOccupiedIDs};
+        variantSkillProMin =
+            int.tryParse('${result['variant_skillpro_min'] ?? ''}') ??
+            variantSkillProMin;
+        variantSkillProMax =
+            int.tryParse('${result['variant_skillpro_max'] ?? ''}') ??
+            variantSkillProMax;
         comboDeadEnds = [
           for (final e in (result['dead_ends'] as List? ?? []))
             Map<String, String>.from(e as Map),
@@ -429,7 +708,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             Map<String, dynamic>.from(e as Map),
         ];
         frameSaved = {
-          for (final e in (result['frame_switches_saved'] as Map? ?? {}).entries)
+          for (final e
+              in (result['frame_switches_saved'] as Map? ?? {}).entries)
             '${e.key}': [
               for (final sw in (e.value as List? ?? []))
                 Map<String, dynamic>.from(sw as Map),
@@ -456,7 +736,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             Map<String, dynamic>.from(e as Map),
         ];
         blockElementsSaved = _decodeBlockElements(
-            result['block_elements_saved'] as Map? ?? {});
+          result['block_elements_saved'] as Map? ?? {},
+        );
         blockElementsEdit = {};
         blockElementEditing = false;
         blockElementGroups = [
@@ -465,6 +746,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ];
         variants = _decodeVariants(result['variants'] as Map? ?? {});
         variantsSaved = _decodeVariants(result['variants_saved'] as Map? ?? {});
+        variantServerOccupiedIDs = {
+          for (final id in (result['variant_occupied_ids'] as List? ?? []))
+            '$id',
+        };
+        variantOccupiedIDs = {...variantServerOccupiedIDs};
+        variantSkillProMin =
+            int.tryParse('${result['variant_skillpro_min'] ?? ''}') ??
+            910000000;
+        variantSkillProMax =
+            int.tryParse('${result['variant_skillpro_max'] ?? ''}') ??
+            910999999;
         variantBases = _decodeBases(result['variant_bases'] as Map? ?? {});
         variantsEdit = {};
         variantEditing = false;
@@ -478,8 +770,14 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         stageTracks = {};
         scopeSaved = {};
       });
-    } catch (_) {
-      if (mounted && weapon?['id'] == weaponId) {
+    } catch (error) {
+      if (mounted &&
+          generation == _selectionGeneration &&
+          weapon?['id'] == weaponId) {
+        setState(() {
+          failed = true;
+          message = '动作分支与连招读取失败：$error';
+        });
         setState(() => comboChain = []);
         setState(() => comboDeadEnds = []);
         setState(() => frameSwitches = []);
@@ -582,9 +880,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       context: context,
       builder: (_) => _FrameSwitchDialog(
         state: state,
-        states: [
-          for (final s in (data?['states'] as List? ?? [])) '$s',
-        ],
+        states: [for (final s in (data?['states'] as List? ?? [])) '$s'],
         keys: frameKeys,
       ),
     );
@@ -593,44 +889,30 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     setState(() => frameEdits[state] = list);
   }
 
-  /// 保存：整把武器一次性替换。没动过的状态原样带上，后端按 map 里有什么写什么。
+  /// 将模块编辑合并到当前内存 workspace；真正的持久化统一由 saveWorkspace 完成。
+  void _markWorkspaceDirty(String text) {
+    workspace = _snapshotWorkspace();
+    dirty = true;
+    busy = false;
+    failed = false;
+    message = text;
+  }
+
+  /// 保存帧级连招只更新内存，不调用旧模块 RPC，也不重读后端。
   Future<void> saveFrameSwitches() async {
-    final payload = <String, dynamic>{};
-    for (final entry in frameSaved.entries) {
-      payload[entry.key] = _encodeFrameList(entry.value);
-    }
-    for (final entry in frameEdits.entries) {
-      payload[entry.key] = _encodeFrameList(entry.value);
-    }
-    final prefer = weapon!['id'] as int?;
+    if (frameEdits.isEmpty) return;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在保存帧级连招…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_frame_switch_set',
-        'weapon': weapon!['id'],
-        'frame_switches': payload,
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        frameEditing = false;
-        frameEdits = {};
-        message = '${result['message'] ?? '已保存帧级连招'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
+      for (final entry in frameEdits.entries) {
+        frameSaved[entry.key] = _encodeFrameList(entry.value);
       }
-    }
+      frameSwitches = [
+        for (final entry in frameSaved.entries)
+          for (final item in entry.value) {'state': entry.key, ...item},
+      ];
+      frameEditing = false;
+      frameEdits = {};
+      _markWorkspaceDirty('帧级连招已更新到当前内存工作区；点击“保存方案”提交暂存。');
+    });
   }
 
   /// 清掉这把武器的全部帧级连招定制，动作块回到原样。
@@ -663,35 +945,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     )) {
       return;
     }
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在清除帧级连招定制…';
+      frameSaved = {};
+      frameSwitches = [];
+      frameEdits = {};
+      frameEditing = false;
+      _markWorkspaceDirty('帧级连招定制已在当前内存工作区清除；点击“保存方案”提交暂存。');
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_frame_switch_set',
-        'weapon': weapon!['id'],
-        'frame_switches': <String, dynamic>{},
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        frameEditing = false;
-        frameEdits = {};
-        message = '${result['message'] ?? '已清除'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   List<Map<String, dynamic>> _encodeFrameList(
@@ -701,46 +961,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       {
         'attrs': [
           for (final attr in (item['attrs'] as List? ?? []))
-            {
-              'key': '${(attr as Map)['key']}',
-              'value': '${attr['value']}',
-            },
+            {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
         ],
       },
   ];
 
   Future<void> saveChain() async {
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在保存连招链…';
+      comboChain = [
+        for (final e in chainDraft)
+          {'old': e['old']!, 'new': e['new']!, 'key': e['key']!},
+      ];
+      chainDraft = [];
+      chainEditing = false;
+      _markWorkspaceDirty('连招链已更新到当前内存工作区；点击“保存方案”提交暂存。');
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_combo_chain_set',
-        'weapon': weapon!['id'],
-        'transitions': [
-          for (final e in chainDraft)
-            {'old': e['old'], 'new': e['new'], 'key': e['key']},
-        ],
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        chainEditing = false;
-        message = '${result['message'] ?? '已保存'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   Future<void> clearChain() async {
@@ -762,44 +997,34 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在清除连招链…';
+      comboChain = [];
+      chainDraft = [];
+      chainEditing = false;
+      _markWorkspaceDirty('连招链定制已在当前内存工作区清除；点击“保存方案”提交暂存。');
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_combo_chain_set',
-        'weapon': weapon!['id'],
-        'transitions': const [],
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        chainEditing = false;
-        message = '${result['message'] ?? '已清除'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   /// 读取某把武器在 comborule.xml 里的限制。只在选中武器时调用：
   /// 选项表（本武器动作块真正用到的被动编号）只有服务端解得出来。
-  Future<void> refreshComboRule(dynamic weaponId) async {
+  Future<void> refreshComboRule(
+    dynamic weaponId, {
+    Map<String, dynamic>? snapshot,
+  }) async {
+    final generation = _selectionGeneration;
     try {
-      final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_combo_rule', 'weapon': weaponId}),
-      );
-      if (!mounted || weapon?['id'] != weaponId) return;
+      final result =
+          snapshot ??
+          Map<String, dynamic>.from(
+            await widget.api({
+              'operation': 'weapon_combo_rule',
+              'weapon': weaponId,
+            }),
+          );
+      if (!mounted ||
+          generation != _selectionGeneration ||
+          weapon?['id'] != weaponId)
+        return;
       setState(() {
         comboRuleInfo = result;
         comboRuleFailure = '';
@@ -809,7 +1034,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     } catch (error) {
       // 读不出来时不再静默隐藏：把原因显示在卡片上。否则「后端是旧二进制」
       // 和「这把武器本来就没有限制」在界面上完全一样，只能靠猜。
-      if (mounted && weapon?['id'] == weaponId) {
+      if (mounted &&
+          generation == _selectionGeneration &&
+          weapon?['id'] == weaponId) {
         setState(() {
           comboRuleInfo = {};
           comboRuleFailure = '$error';
@@ -877,57 +1104,42 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     });
   }
 
-  /// 保存（或清空）本武器的连招限制。清空走同一接口：后端收到空规则集就
-  /// 把编辑器自己写的那一块整体删掉，官方块仍然原样保留。
+  /// 保存（或清空）连招限制到当前内存 workspace。
   Future<void> saveComboRule({bool clear = false}) async {
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = clear ? '正在清除连招限制…' : '正在保存连招限制…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_combo_rule_set',
-        'weapon': weapon!['id'],
-        'combo_rule': clear
-            ? const {'max': [], 'black': [], 'white': []}
-            : {
-                'max': [
-                  for (final e in comboRuleMaxDraft)
-                    {
-                      'skill': e['skill'],
-                      'max_combo': e['max_combo'],
-                      'exceed_state': e['exceed_state'] ?? '',
-                      'exceed_skill_pro_id': e['exceed_skill_pro_id'] ?? '',
-                    },
-                ],
-                'black': [
-                  for (final e in comboRuleBlackDraft)
-                    {'prev': e['prev'], 'cur': e['cur']},
-                ],
-                'white': [
-                  for (final e in comboRuleWhiteDraft)
-                    {'prev': e['prev'], 'cur': e['cur']},
-                ],
-              },
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        comboRuleEditing = false;
-        message = '${result['message'] ?? '已保存'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
+      if (clear) {
+        comboRuleInfo = {
+          ...comboRuleInfo,
+          'rules': const {'max': [], 'black': [], 'white': []},
+          'overridden': true,
+        };
+      } else {
+        comboRuleInfo = {
+          ...comboRuleInfo,
+          'rules': {
+            'max': [
+              for (final e in comboRuleMaxDraft) Map<String, dynamic>.from(e),
+            ],
+            'black': [
+              for (final e in comboRuleBlackDraft) Map<String, dynamic>.from(e),
+            ],
+            'white': [
+              for (final e in comboRuleWhiteDraft) Map<String, dynamic>.from(e),
+            ],
+          },
+          'overridden': true,
+        };
       }
-    }
+      // Draft 必须反映最新的已提交内存值；取消中的 draft 不能随 workspace
+      // 一起被后端当作待应用规则覆盖 combo_rule_info。
+      syncComboRuleDraft();
+      comboRuleEditing = false;
+      _markWorkspaceDirty(
+        clear
+            ? '连招限制已在当前内存工作区清除；点击“保存方案”提交暂存。'
+            : '连招限制已更新到当前内存工作区；点击“保存方案”提交暂存。',
+      );
+    });
   }
 
   /// 招式下拉选项。编号不是状态号也不是武器号，而是动作块里 <Anm> 上的
@@ -987,7 +1199,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 自建武器即使一条转移都没有也要显示这张卡片，否则没法从零开始编连招。
   Widget comboChainCard() {
     final editable = weapon != null && canEdit(weapon!['id']);
-    if (comboChain.isEmpty && frameSwitches.isEmpty && !chainEditing && !editable) {
+    if (comboChain.isEmpty &&
+        frameSwitches.isEmpty &&
+        !chainEditing &&
+        !editable) {
       return const SizedBox.shrink();
     }
     final states = [for (final s in (data?['states'] as List? ?? [])) '$s'];
@@ -1201,18 +1416,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               hint: '某一招打满几次后不再命中',
               editing: editing,
               count: maxRows.length,
-              onAdd: () => setState(() => comboRuleMaxDraft.add({
-                'skill': '',
-                'max_combo': '1',
-                'exceed_state': '',
-                'exceed_skill_pro_id': '',
-              })),
+              onAdd: () => setState(
+                () => comboRuleMaxDraft.add({
+                  'skill': '',
+                  'max_combo': '1',
+                  'exceed_state': '',
+                  'exceed_skill_pro_id': '',
+                }),
+              ),
               rows: [
                 if (editing)
                   for (var i = 0; i < maxRows.length; i++)
                     comboRuleMaxRow(i, maxRows[i], skillItems),
                 if (!editing)
-                  for (final e in maxRows) comboRuleBullet(comboRuleMaxSummary(e)),
+                  for (final e in maxRows)
+                    comboRuleBullet(comboRuleMaxSummary(e)),
               ],
             ),
             comboRuleGroup(
@@ -1300,10 +1518,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         color: tone.shade50,
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 12, color: tone.shade900),
-      ),
+      child: Text(text, style: TextStyle(fontSize: 12, color: tone.shade900)),
     );
   }
 
@@ -1406,7 +1621,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 onPressed: busy
                     ? null
                     : () => setState(() => comboRuleMaxDraft.removeAt(index)),
-                icon: const Icon(Icons.close, size: 16, color: Colors.deepOrange),
+                icon: const Icon(
+                  Icons.close,
+                  size: 16,
+                  color: Colors.deepOrange,
+                ),
                 tooltip: '删除这一条',
               ),
             ],
@@ -1524,9 +1743,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           Expanded(
             child: DropdownButtonFormField<String>(
               key: ValueKey('crf-$kind-cur-$comboRuleVersion-$index'),
-              initialValue: cur.isEmpty
-                  ? (kind == 'white' ? '' : null)
-                  : cur,
+              initialValue: cur.isEmpty ? (kind == 'white' ? '' : null) : cur,
               isExpanded: true,
               decoration: const InputDecoration(
                 labelText: '后一招',
@@ -1563,8 +1780,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.warning_amber,
-                    size: 16, color: Colors.deepOrange.shade700),
+                Icon(
+                  Icons.warning_amber,
+                  size: 16,
+                  color: Colors.deepOrange.shade700,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   '断链（连到这里就不能继续连）',
@@ -1584,7 +1804,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 for (final d in comboDeadEnds)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 3),
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.orange.shade100,
                       borderRadius: BorderRadius.circular(6),
@@ -1625,13 +1847,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.animation, size: 16, color: Colors.blueGrey.shade700),
+                Icon(
+                  Icons.animation,
+                  size: 16,
+                  color: Colors.blueGrey.shade700,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     frameEditing
                         ? '帧级按键切换 · 编辑中'
-                            '${frameEdits.isEmpty ? '' : '（改过 ${frameEdits.length} 个状态）'}'
+                              '${frameEdits.isEmpty ? '' : '（改过 ${frameEdits.length} 个状态）'}'
                         : '帧级按键切换 · ${frameSwitches.length} 条',
                     style: TextStyle(
                       fontSize: 12,
@@ -1664,7 +1890,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 frameEditing
                     ? '点下面「给某个状态添加帧级连招」开始：播到第几帧按下哪个键 → 跳到哪个状态。'
                     : '动作块里没有帧级连招。连招也可能走上面那张连招链（delayacttable）表；'
-                        '这里加的是动作播放中的按键切换。',
+                          '这里加的是动作播放中的按键切换。',
                 style: const TextStyle(fontSize: 12, color: Colors.black54),
               ),
             ],
@@ -1724,9 +1950,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     if (edit == null) return '（保存后这个状态没有招架）';
     final attrs = counterAttrMap(edit);
     final box = counterBoxMap(edit);
-    final size = ['length', 'width', 'heigth']
-        .map((k) => box[k] ?? '?')
-        .join('×');
+    final size = [
+      'length',
+      'width',
+      'heigth',
+    ].map((k) => box[k] ?? '?').join('×');
     final half = attrs['anglehalfrange'] ?? '?';
     final offset = attrs['angleoffset'] ?? '0';
     return '第 ${attrs['startframe'] ?? '?'}-${attrs['endframe'] ?? '?'} 帧被攻击 → '
@@ -1734,25 +1962,25 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   static Map<String, String> counterAttrMap(Map<String, dynamic> edit) => {
-        for (final a in (edit['attrs'] as List? ?? []))
-          '${(a as Map)['key']}': '${a['value']}',
-      };
+    for (final a in (edit['attrs'] as List? ?? []))
+      '${(a as Map)['key']}': '${a['value']}',
+  };
 
   static Map<String, String> counterBoxMap(Map<String, dynamic> edit) => {
-        for (final a in (edit['box'] as List? ?? []))
-          '${(a as Map)['key']}': '${a['value']}',
-      };
+    for (final a in (edit['box'] as List? ?? []))
+      '${(a as Map)['key']}': '${a['value']}',
+  };
 
   static Map<String, dynamic> encodeCounter(Map<String, dynamic> edit) => {
-        'attrs': [
-          for (final a in (edit['attrs'] as List? ?? []))
-            {'key': '${(a as Map)['key']}', 'value': '${a['value']}'},
-        ],
-        'box': [
-          for (final a in (edit['box'] as List? ?? []))
-            {'key': '${(a as Map)['key']}', 'value': '${a['value']}'},
-        ],
-      };
+    'attrs': [
+      for (final a in (edit['attrs'] as List? ?? []))
+        {'key': '${(a as Map)['key']}', 'value': '${a['value']}'},
+    ],
+    'box': [
+      for (final a in (edit['box'] as List? ?? []))
+        {'key': '${(a as Map)['key']}', 'value': '${a['value']}'},
+    ],
+  };
 
   void startCounterEdit() {
     setState(() {
@@ -1781,46 +2009,23 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     setState(() => counterEdits[state] = result.isEmpty ? null : result);
   }
 
-  /// 保存：整把武器一次性替换。没动过的状态原样带上；值为 null = 该状态没有招架。
+  /// 保存招架只更新内存 workspace，不调用旧模块 RPC。
   Future<void> saveCounters() async {
-    final payload = <String, dynamic>{};
-    for (final entry in counterSaved.entries) {
-      payload[entry.key] =
-          entry.value == null ? null : encodeCounter(entry.value!);
-    }
-    for (final entry in counterEdits.entries) {
-      payload[entry.key] =
-          entry.value == null ? null : encodeCounter(entry.value!);
-    }
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在保存招架…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_counter_set',
-        'weapon': weapon!['id'],
-        'counters': payload,
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        counterEditing = false;
-        counterEdits = {};
-        message = '${result['message'] ?? '已保存招架'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
+      for (final entry in counterEdits.entries) {
+        counterSaved[entry.key] = entry.value == null
+            ? null
+            : Map<String, dynamic>.from(entry.value!);
       }
-    }
+      counters = [
+        for (final entry in counterSaved.entries)
+          if (entry.value != null)
+            {'state': entry.key, ...encodeCounter(entry.value!)},
+      ];
+      counterEditing = false;
+      counterEdits = {};
+      _markWorkspaceDirty('招架已更新到当前内存工作区；点击“保存方案”提交暂存。');
+    });
   }
 
   /// 清掉这把武器的全部招架定制，动作块回到原样。
@@ -1831,35 +2036,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     )) {
       return;
     }
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在清除招架定制…';
+      counterSaved = {};
+      counters = [];
+      counterEdits = {};
+      counterEditing = false;
+      _markWorkspaceDirty('招架定制已在当前内存工作区清除；点击“保存方案”提交暂存。');
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_counter_set',
-        'weapon': weapon!['id'],
-        'counters': <String, dynamic>{},
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        counterEditing = false;
-        counterEdits = {};
-        message = '${result['message'] ?? '已清除招架定制'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   /// 招架编辑卡：第三条连招通道 —— **被对手攻击触发**（不是按键）。
@@ -1881,14 +2064,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.shield_outlined,
-                    size: 16, color: Colors.deepOrange.shade700),
+                Icon(
+                  Icons.shield_outlined,
+                  size: 16,
+                  color: Colors.deepOrange.shade700,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     counterEditing
                         ? '招架（被攻击触发） · 编辑中'
-                            '${counterEdits.isEmpty ? '' : '（改过 ${counterEdits.length} 个状态）'}'
+                              '${counterEdits.isEmpty ? '' : '（改过 ${counterEdits.length} 个状态）'}'
                         : '招架（被攻击触发） · ${states.length} 个状态',
                     style: TextStyle(
                       fontSize: 12,
@@ -1966,7 +2152,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           ),
           if (touched) ...[
             const SizedBox(width: 6),
-            const Text('已改动', style: TextStyle(fontSize: 11, color: Colors.teal)),
+            const Text(
+              '已改动',
+              style: TextStyle(fontSize: 11, color: Colors.teal),
+            ),
           ],
           const SizedBox(width: 8),
           Expanded(
@@ -2023,9 +2212,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   /// 解码后端的 block_elements_saved：状态 → 元素标签 → 条目。
-  static Map<String, Map<String, List<Map<String, dynamic>>>> _decodeBlockElements(
-    Map raw,
-  ) {
+  static Map<String, Map<String, List<Map<String, dynamic>>>>
+  _decodeBlockElements(Map raw) {
     final out = <String, Map<String, List<Map<String, dynamic>>>>{};
     raw.forEach((state, perTag) {
       final tags = <String, List<Map<String, dynamic>>>{};
@@ -2054,15 +2242,32 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   // 动作分支（按状态切换招式形态）
   // -------------------------------------------------------------------------
 
-  /// 一份动作段的归一化（name/start/end[/damage/skillproid/buff]）。
+  /// 一份动作段的归一化
+  /// （name/start/end[/damage/skillproid/replay_times/anm_id/buff]）。
+  ///
+  /// `skillproid` / `replay_times` / `anm_id` 都必须原样留住并在保存时回发：
+  /// 后端靠它们判断「这段还是原来那段、号不变」，丢掉任何一个都会让保存变成
+  /// 「重建」——每存一次就换一批新命中编号（旧号成孤儿），卡帧也会被抹掉。
+  static dynamic _normalizeDamage(dynamic value) {
+    if (value is num) return value;
+    final text = '$value'.trim();
+    final parsed = num.tryParse(text);
+    return parsed ?? value;
+  }
+
   static List<Map<String, dynamic>> _decodeSegments(List? list) => [
     for (final s in (list ?? const []))
       {
         'name': '${(s as Map)['name'] ?? ''}',
         'start': int.tryParse('${s['start'] ?? 0}') ?? 0,
         'end': int.tryParse('${s['end'] ?? 0}') ?? 0,
-        if (s['damage'] != null) 'damage': s['damage'],
+        if (s['damage'] != null) 'damage': _normalizeDamage(s['damage']),
         if (s['skillproid'] != null) 'skillproid': '${s['skillproid']}',
+        if (s['template_skillproid'] != null)
+          'template_skillproid': '${s['template_skillproid']}',
+        if (s['replay_times'] != null)
+          'replay_times': int.tryParse('${s['replay_times']}') ?? 0,
+        if (s['anm_id'] != null) 'anm_id': '${s['anm_id']}',
         if (s['buff'] != null) 'buff': '${s['buff']}',
       },
   ];
@@ -2075,7 +2280,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       out['$state'] = [
         for (final e in (list as List? ?? []))
           {
-            'condition': '${(e as Map)['condition'] ?? ''}',
+            'condition': int.parse('${(e as Map)['condition']}'),
             'remove': (e['remove'] as bool?) ?? false,
             'segments': _decodeSegments(e['segments'] as List?),
           },
@@ -2100,14 +2305,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ...variants.keys,
       ...variantsSaved.keys,
     }.toList();
-    states.sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+    states.sort(
+      (a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0),
+    );
     return states;
   }
 
   /// 某状态本次编辑里「要删掉」的 condition 集合。
   Set<String> variantRemovedConditions(String state) => {
-    for (final v in variantsEdit[state] ?? const [])
-      if ((v['remove'] as bool?) == true) '${v['condition']}',
+    for (final source in [
+      variants[state] ?? const <Map<String, dynamic>>[],
+      variantsSaved[state] ?? const <Map<String, dynamic>>[],
+      variantsEdit[state] ?? const <Map<String, dynamic>>[],
+    ])
+      for (final v in source)
+        if ((v['remove'] as bool?) == true) '${v['condition']}',
   };
 
   /// 某状态本次编辑里「新增/覆盖」的分支。
@@ -2136,6 +2348,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       });
       seen.add(cond);
     }
+    for (final v in variantsSaved[state] ?? const <Map<String, dynamic>>[]) {
+      final cond = '${v['condition']}';
+      if (removed.contains(cond) ||
+          seen.contains(cond) ||
+          v['remove'] == true) {
+        continue;
+      }
+      final replaced = edits[cond];
+      rows.add({
+        'condition': cond,
+        'segments': replaced != null ? replaced['segments'] : v['segments'],
+        'origin': replaced != null ? 'edit' : 'saved',
+      });
+      seen.add(cond);
+    }
     for (final v in variantPendingFor(state)) {
       final cond = '${v['condition']}';
       if (seen.contains(cond)) continue;
@@ -2144,16 +2371,181 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     return rows;
   }
 
-  void variantPut(String state, int condition, List<Map<String, dynamic>> segments) {
+  /// 一个状态当前**仍被引用**的命中属性号：无条件块 + 所有分支段（含本次编辑）。
+  /// 分支里删掉一段、或换掉某段的命中属性后，旧号的数值不该继续挂在规则里。
+  Set<String> referencedHitIDs(String state) {
+    final ids = <String>{};
+    for (final s in variantBaseSegments(state)) {
+      final id = '${(s as Map)['skillproid'] ?? ''}'.trim();
+      if (id.isNotEmpty) ids.add(id);
+    }
+    for (final row in variantRowsFor(state)) {
+      for (final s in (row['segments'] as List? ?? const [])) {
+        final id = '${(s as Map)['skillproid'] ?? ''}'.trim();
+        if (id.isNotEmpty) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /// 动作分支对话框需要的联动上下文（命中属性明细 / 当前数值覆盖 / 已进包的号）。
+  _VariantHitContext variantHitContext(String state) {
+    final stages = weapon?['stages'] as List? ?? const [];
+    final index = stages.indexWhere((s) => '${(s as Map)['state']}' == state);
+    if (index < 0) {
+      return _VariantHitContext(
+        const <String, Map<String, dynamic>>{},
+        const <String, dynamic>{},
+        const <String>{},
+        {...variantOccupiedIDs, ...localVariantIDs},
+        {...localVariantIDs},
+        variantSkillProMin,
+        variantSkillProMax,
+      );
+    }
+    final stage = Map<String, dynamic>.from(stages[index] as Map);
+    final hits = <String, Map<String, dynamic>>{};
+    for (final h in (stage['hits'] as List? ?? const [])) {
+      final hit = Map<String, dynamic>.from(h as Map);
+      final id = '${hit['id']}';
+      hits[id] = {
+        ...hit,
+        'values': hitProperties[id] is Map
+            ? _hitValues(hitProperties[id])
+            : _hitValues(hit),
+      };
+    }
+    for (final branch in variantRowsFor(state)) {
+      for (final segment in (branch['segments'] as List? ?? const [])) {
+        final row = segment as Map;
+        final id = '${row['skillproid'] ?? ''}'.trim();
+        if (id.isEmpty || hits.containsKey(id)) continue;
+        final template = '${row['template_skillproid'] ?? id}';
+        final source = hits[template];
+        final canonical = hitProperties[id] ?? source ?? hitProperties[template];
+        hits[id] = {
+          if (canonical is Map) ...Map<String, dynamic>.from(canonical),
+          'id': id,
+          'variant': '${branch['condition']}',
+          'buff': source?['buff'] ?? '0',
+          'values': Map<String, dynamic>.from(
+            (canonical is Map ? canonical['values'] : null) as Map? ??
+                const <String, dynamic>{},
+          ),
+        };
+      }
+    }
+    final rule = index < rules.length ? rules[index] : null;
+    return _VariantHitContext(
+      hits,
+      {
+        for (final entry in ((rule?['properties'] as Map?) ?? const {}).entries)
+          '${entry.key}': _ruleValues(entry.value),
+        for (final entry in hitProperties.entries)
+          '${entry.key}': _hitValues(entry.value),
+      },
+      {for (final id in (stage['property_ids'] as List? ?? const [])) '$id'},
+      {...variantOccupiedIDs},
+      {...localVariantIDs},
+      variantSkillProMin,
+      variantSkillProMax,
+    );
+  }
+
+  /// 把动作分支里改过的命中属性数值写进该状态的规则，并按「仍被引用」清掉废弃号。
+  ///
+  /// 走的是 `rule['properties'][id]` —— 和「连招与命中效果」页里的命中属性编辑
+  /// **同一份数据**，所以两处显示联动、两处生效；分支里删掉的号也在这里一起撤掉。
+  void applyHitProperties(String state, Map<String, dynamic> values) {
+    values.forEach((id, value) {
+      if (value is Map && value.isNotEmpty) {
+        hitProperties['$id'] = _hitValues(value);
+      } else {
+        hitProperties.remove('$id');
+      }
+    });
+    final referenced = <String>{};
+    for (final stage in (weapon?['stages'] as List? ?? const [])) {
+      final state = '${stage['state']}';
+      referenced.addAll(referencedHitIDs(state));
+      final liveBranchIDs = referencedHitIDs(state);
+      for (final id in (stage['property_ids'] as List? ?? const [])) {
+        if (!isVariantSkillProID(
+          '$id',
+          minimum: variantSkillProMin,
+          maximum: variantSkillProMax,
+        )) {
+          referenced.add('$id');
+        }
+      }
+      for (final hit in (stage['hits'] as List? ?? const [])) {
+        final id = '${(hit as Map)['id']}';
+        if (!isVariantSkillProID(
+              id,
+              minimum: variantSkillProMin,
+              maximum: variantSkillProMax,
+            ) ||
+            liveBranchIDs.contains(id)) {
+          referenced.add(id);
+        }
+      }
+    }
+    hitProperties.removeWhere((id, _) => !referenced.contains(id));
+    _projectHitPropertiesToRules();
+    editorVersion++;
+    dirty = true;
+  }
+
+  void _projectHitPropertiesToRules() {
+    for (final rule in rules) {
+      final properties = rule['properties'] as Map?;
+      final keep = <String>{};
+      final ruleStage = '${rule['stage']}';
+      final stage = (weapon?['stages'] as List? ?? const []).cast<Map>().where(
+        (s) => '${s['state']}' == ruleStage || '${s['stage']}' == ruleStage,
+      );
+      if (stage.isNotEmpty) {
+        final stageRow = stage.first;
+        keep.addAll(
+          (stageRow['property_ids'] as List? ?? const []).map((id) => '$id'),
+        );
+        keep.addAll(
+          (stageRow['hits'] as List? ?? const []).map(
+            (hit) => '${(hit as Map)['id']}',
+          ),
+        );
+        keep.addAll(referencedHitIDs('${stageRow['state']}'));
+      }
+      if (properties != null) keep.addAll(properties.keys.map((id) => '$id'));
+      final current = <String, dynamic>{
+        for (final id in keep)
+          if (hitProperties[id] is Map) id: _ruleValues(hitProperties[id]),
+      };
+      if (current.isEmpty) {
+        rule.remove('properties');
+      } else {
+        rule['properties'] = current;
+      }
+    }
+  }
+
+  void variantPut(
+    String state,
+    int condition,
+    List<Map<String, dynamic>> segments, {
+    Map<String, dynamic>? hitProperties,
+  }) {
     setState(() {
       final list = [...(variantsEdit[state] ?? const <Map<String, dynamic>>[])];
       list.removeWhere((v) => '${v['condition']}' == '$condition');
       list.add({
-        'condition': '$condition',
+        'condition': condition,
         'segments': segments,
         if (segments.isEmpty) 'copy_base': true,
       });
       variantsEdit[state] = list;
+      syncVariantOccupiedIDs();
+      if (hitProperties != null) applyHitProperties(state, hitProperties);
     });
   }
 
@@ -2162,19 +2554,44 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final list = [...(variantsEdit[state] ?? const <Map<String, dynamic>>[])];
       list.removeWhere((v) => '${v['condition']}' == condition);
       final exists =
-          (variants[state] ?? const []).any((v) => '${v['condition']}' == condition) ||
-              (variantsSaved[state] ?? const [])
-                  .any((v) => '${v['condition']}' == condition);
+          (variants[state] ?? const []).any(
+            (v) => '${v['condition']}' == condition,
+          ) ||
+          (variantsSaved[state] ?? const []).any(
+            (v) => '${v['condition']}' == condition,
+          );
       if (exists) {
-        list.add({'condition': condition, 'remove': true, 'segments': const []});
+        list.add({
+          'condition': int.parse(condition),
+          'remove': true,
+          'segments': const [],
+        });
       }
       variantsEdit[state] = list;
+      syncVariantOccupiedIDs();
+      // 分支删了，它独占的命中属性数值也一起撤掉（仍被无条件块或别的分支引用的保留）。
+      applyHitProperties(state, const <String, dynamic>{});
     });
   }
 
   void startVariantEdit() {
     setState(() {
       variantsEdit = {};
+      _variantRulesSnapshot = [
+        for (final rule in rules)
+          {
+            ...rule,
+            if (rule['properties'] is Map)
+              'properties': {
+                for (final entry in (rule['properties'] as Map).entries)
+                  '${entry.key}': Map<String, dynamic>.from(entry.value as Map),
+              },
+          },
+      ];
+      _variantDirtySnapshot = dirty;
+      _variantOccupiedSnapshot = {
+        for (final id in variantOccupiedIDs) id: true,
+      };
       variantEditing = true;
     });
   }
@@ -2182,8 +2599,32 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   void cancelVariantEdit() {
     setState(() {
       variantsEdit = {};
+      if (_variantRulesSnapshot != null) {
+        rules = _variantRulesSnapshot!;
+        dirty = _variantDirtySnapshot;
+      }
+      if (_variantOccupiedSnapshot != null) {
+        variantOccupiedIDs = _variantOccupiedSnapshot!.keys.toSet();
+      }
+      _variantRulesSnapshot = null;
+      _variantOccupiedSnapshot = null;
+      editorVersion++;
       variantEditing = false;
     });
+  }
+
+  dynamic _variantSegmentDamage(Map<String, dynamic> segment) {
+    final id = '${segment['skillproid'] ?? ''}'.trim();
+    if (id.isEmpty) return segment['damage'];
+    final values = hitProperties[id];
+    if (values is Map) {
+      final canonical = values['values'];
+      if (canonical is Map && canonical['SkillDamage'] != null) {
+        return canonical['SkillDamage'];
+      }
+      if (values['SkillDamage'] != null) return values['SkillDamage'];
+    }
+    return segment['damage'];
   }
 
   /// 一条分支的可读描述。
@@ -2197,16 +2638,33 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     }
     final head = '持有 ${ustateLabel(cond)} 时';
     if (segs.isEmpty) return '$head → 照抄本招动作段（只换命中编号）';
-    return '$head → ${segs.length} 段：'
+    // 段分三类：带命中编号的（造成伤害）、卡帧的（画面定格，用来把多段判定挤进
+    // 几帧）、纯动作的（既不打人也不定格）。只报「N 段」看不出它们的差别，而
+    // 这三类的多寡恰恰决定这一招打几下。
+    final hits = segs
+        .where((s) => '${s['skillproid'] ?? ''}'.isNotEmpty)
+        .length;
+    final holds = segs
+        .where((s) => (int.tryParse('${s['replay_times'] ?? 0}') ?? 0) > 0)
+        .length;
+    final idle = segs.length - hits - holds;
+    final parts = <String>['命中 $hits 段'];
+    if (holds > 0) parts.add('卡帧 $holds 段');
+    if (idle > 0) parts.add('纯动作 $idle 段');
+    return '$head → ${segs.length} 段（${parts.join('，')}）：'
         '${segs.map((s) {
-          final dmg = s['damage'];
+          final dmg = _variantSegmentDamage(s);
+          final sp = '${s['skillproid'] ?? ''}';
+          final hold = (int.tryParse('${s['replay_times'] ?? 0}') ?? 0) > 0;
           return '${s['name'] ?? '?'}[${s['start'] ?? '?'}–${s['end'] ?? '?'}]'
+              '${sp.isNotEmpty ? ' 命中属性$sp' : (hold ? ' 卡帧' : '')}'
               '${dmg != null && '$dmg'.isNotEmpty ? ' 伤害$dmg' : ''}';
         }).join('，')}';
   }
 
   /// 给某状态添加/修改一条分支：先选状态，再编辑条件与段。
   Future<void> variantAddFor(String state) async {
+    final ctx = variantHitContext(state);
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _VariantBranchDialog(
@@ -2214,6 +2672,22 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         stateLabel: chainStateLabel(state),
         initial: null,
         baseSegments: variantBaseSegments(state),
+        api: widget.api,
+        hits: ctx.hits,
+        hitOverrides: ctx.overrides,
+        fields: (data?['fields'] as List? ?? const []),
+        effects: (data?['effects'] as List? ?? const []),
+        hitOptions: Map<String, dynamic>.from(
+          data?['hit_options'] as Map? ?? const <String, dynamic>{},
+        ),
+        allowed: Map<String, dynamic>.from(
+          weapon?['allowed_values'] as Map? ?? const <String, dynamic>{},
+        ),
+        applied: ctx.applied,
+        occupied: ctx.occupied,
+        localReserved: ctx.localReserved,
+        minimum: ctx.minimum,
+        maximum: ctx.maximum,
       ),
     );
     if (result == null || !mounted) return;
@@ -2225,11 +2699,15 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       (result['segments'] as List? ?? [])
           .map((s) => Map<String, dynamic>.from(s as Map))
           .toList(),
+      hitProperties: Map<String, dynamic>.from(
+        result['hit_properties'] as Map? ?? const <String, dynamic>{},
+      ),
     );
   }
 
   /// 编辑已有的某条分支（current / new / edit 都走这里，先回填现值）。
   Future<void> variantEditRow(String state, Map<String, dynamic> row) async {
+    final ctx = variantHitContext(state);
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _VariantBranchDialog(
@@ -2237,6 +2715,22 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         stateLabel: chainStateLabel(state),
         initial: row,
         baseSegments: variantBaseSegments(state),
+        api: widget.api,
+        hits: ctx.hits,
+        hitOverrides: ctx.overrides,
+        fields: (data?['fields'] as List? ?? const []),
+        effects: (data?['effects'] as List? ?? const []),
+        hitOptions: Map<String, dynamic>.from(
+          data?['hit_options'] as Map? ?? const <String, dynamic>{},
+        ),
+        allowed: Map<String, dynamic>.from(
+          weapon?['allowed_values'] as Map? ?? const <String, dynamic>{},
+        ),
+        applied: ctx.applied,
+        occupied: ctx.occupied,
+        localReserved: ctx.localReserved,
+        minimum: ctx.minimum,
+        maximum: ctx.maximum,
       ),
     );
     if (result == null || !mounted) return;
@@ -2248,6 +2742,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       (result['segments'] as List? ?? [])
           .map((s) => Map<String, dynamic>.from(s as Map))
           .toList(),
+      hitProperties: Map<String, dynamic>.from(
+        result['hit_properties'] as Map? ?? const <String, dynamic>{},
+      ),
     );
   }
 
@@ -2273,7 +2770,58 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     await variantAddFor(picked);
   }
 
-  /// 保存：只发本次改过的状态（后端整把替换该状态列表）。
+  void _applyVariantPayloadToMemory(Map<String, dynamic> payload) {
+    for (final entry in payload.entries) {
+      final state = entry.key;
+      final current = [
+        for (final value in (variants[state] ?? const []))
+          Map<String, dynamic>.from(value),
+      ];
+      for (final value in (entry.value as List? ?? const [])) {
+        final edit = Map<String, dynamic>.from(value as Map);
+        final condition = '${edit['condition']}';
+        current.removeWhere((row) => '${row['condition']}' == condition);
+        if ((edit['remove'] as bool?) != true) {
+          current.add({
+            'condition': int.parse(condition),
+            'segments': [
+              for (final segment in (edit['segments'] as List? ?? const []))
+                Map<String, dynamic>.from(segment as Map),
+            ],
+          });
+        }
+      }
+      current.sort(
+        (a, b) => '${a['condition']}'.compareTo('${b['condition']}'),
+      );
+      // Keep deletion tombstones in the workspace snapshot.  The live rows are
+      // removed from the editor, but dropping the marker here would make the
+      // next "save plan/apply" indistinguishable from "no change".
+      final tombstones = [
+        for (final edit in (entry.value as List? ?? const []))
+          if ((edit as Map)['remove'] == true)
+            {
+              'condition': int.parse('${edit['condition']}'),
+              'remove': true,
+              'segments': const <Map<String, dynamic>>[],
+            },
+      ];
+      variants[state] = [
+        ...current,
+        ...tombstones,
+      ];
+      variantsSaved[state] = [
+        for (final row in variants[state]!) Map<String, dynamic>.from(row),
+      ];
+    }
+  }
+
+  /// 阶段 2：保存动作分支只提交到当前 WeaponWorkspace，不触发正式 RPC。
+  dynamic _normalizeVariantDamage(dynamic value) {
+    if (value is num) return value;
+    return num.tryParse('$value'.trim()) ?? value;
+  }
+
   Future<void> saveVariants() async {
     if (variantsEdit.isEmpty) {
       setState(() => message = '没有改动，无需保存');
@@ -2297,7 +2845,28 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 'name': '${(s as Map)['name']}',
                 'start': s['start'],
                 'end': s['end'],
-                if (s['damage'] != null) 'damage': s['damage'],
+                if (variantHitContext(state)
+                            .overrides['${s['skillproid']}']?['SkillDamage'] !=
+                        null ||
+                    s['damage'] != null)
+                  'damage': _normalizeVariantDamage(
+                    variantHitContext(state)
+                            .overrides['${s['skillproid']}']?['SkillDamage'] ??
+                        s['damage'],
+                  ),
+                // 这三个是「原位编辑」的凭据：后端拿 skillproid 判这一段是不是
+                // 上一轮分的号（是就原样保留、不换号），拿 anm_id 保住片断编号，
+                // 拿 replay_times 保住卡帧。不回发 = 每次保存都重铸一批新号。
+                if ('${s['skillproid'] ?? ''}'.isNotEmpty)
+                  'skillproid': '${s['skillproid']}',
+                if ('${s['template_skillproid'] ?? ''}'.isNotEmpty)
+                  'template_skillproid': '${s['template_skillproid']}',
+                if ('${s['skillproid'] ?? ''}'.trim().isNotEmpty ||
+                    (int.tryParse('${s['replay_times'] ?? 0}') ?? 0) > 0)
+                  'replay_times':
+                      int.tryParse('${s['replay_times'] ?? 0}') ?? 0,
+                if ('${s['anm_id'] ?? ''}'.isNotEmpty)
+                  'anm_id': '${s['anm_id']}',
               },
           ],
         });
@@ -2308,35 +2877,51 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       setState(() => message = '没有有效的分支改动');
       return;
     }
-    final prefer = weapon!['id'] as int?;
+    if (!mounted) return;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在保存动作分支…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_variant_set',
-        'weapon': weapon!['id'],
-        'variants': payload,
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        variantEditing = false;
-        variantsEdit = {};
-        message = '${result['message'] ?? '已保存'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
+      _applyVariantPayloadToMemory(payload);
+      for (final state in payload.keys) {
+        final stages = List<dynamic>.from(weapon?['stages'] as List? ?? const []);
+        final index = stages.indexWhere((row) => '${row['state']}' == state);
+        if (index < 0) continue;
+        final stage = Map<String, dynamic>.from(stages[index] as Map);
+        final context = variantHitContext(state);
+        final ids = referencedHitIDs(state);
+        final hits = <String, Map<String, dynamic>>{
+          for (final hit in (stage['hits'] as List? ?? const []))
+            '${(hit as Map)['id']}': {
+              ...Map<String, dynamic>.from(hit),
+              if (hitProperties['${hit['id']}'] is Map)
+                'values': _hitValues(hitProperties['${hit['id']}']),
+            },
+        };
+        for (final id in ids) {
+          final source = context.hits[id];
+          if (source == null) continue;
+          hits[id] = {
+            ...source,
+            'id': id,
+            'values': hitProperties[id] is Map
+                ? _hitValues(hitProperties[id])
+                : _hitValues(source['values']),
+          };
+        }
+        stage['hits'] = hits.values.toList();
+        stage['property_ids'] = ids.toList();
+        stages[index] = stage;
+        weapon = {...weapon!, 'stages': stages};
       }
-    }
+      _projectHitPropertiesToRules();
+      variantEditing = false;
+      variantsEdit = {};
+      _variantRulesSnapshot = null;
+      _variantOccupiedSnapshot = null;
+      dirty = true;
+      busy = false;
+      failed = false;
+      message = '动作分支已写入当前武器内存；点击“保存方案”后才会生成暂存副本。';
+      workspace = _snapshotWorkspace();
+    });
   }
 
   Future<void> clearVariants() async {
@@ -2346,35 +2931,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     )) {
       return;
     }
-    final prefer = weapon!['id'] as int?;
+    if (!mounted) return;
     setState(() {
-      busy = true;
+      variants = {};
+      variantsSaved = {};
+      variantsEdit = {};
+      variantOccupiedIDs = {...variantServerOccupiedIDs};
+      variantEditing = false;
+      _variantRulesSnapshot = null;
+      _variantOccupiedSnapshot = null;
+      dirty = true;
       failed = false;
-      message = '正在清除动作分支定制…';
+      busy = false;
+      message = '动作分支已在当前武器内存中清除；点击“保存方案”后才会生成暂存副本。';
+      workspace = _snapshotWorkspace();
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_variant_set',
-        'weapon': weapon!['id'],
-        'variants': <String, dynamic>{},
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        variantEditing = false;
-        variantsEdit = {};
-        message = '${result['message'] ?? '已清除'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   /// 「动作分支」编辑卡：同一招在持有某状态时改成另一套动作段。
@@ -2384,6 +2955,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Container(
+        key: const ValueKey('weapon-variants'),
         width: double.infinity,
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(
@@ -2401,7 +2973,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   child: Text(
                     variantEditing
                         ? '动作分支 · 编辑中'
-                            '${variantsEdit.isEmpty ? '' : '（改过 ${variantsEdit.length} 个状态）'}'
+                              '${variantsEdit.isEmpty ? '' : '（改过 ${variantsEdit.length} 个状态）'}'
                         : '动作分支 · ${states.length} 个状态',
                     style: TextStyle(
                       fontSize: 12,
@@ -2434,7 +3006,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 variantEditing
                     ? '点下面「给某个状态添加」：该状态生效时这一招换成另一套动作段。'
                     : '没有按状态切换形态的招式。持有指定状态时，同一招可换成另一套'
-                        '动作段（多打几下 / 改伤害 / 挂别的 Buff）。',
+                          '动作段（多打几下 / 改伤害 / 挂别的 Buff）。',
                 style: const TextStyle(fontSize: 12, color: Colors.black54),
               ),
             ],
@@ -2485,8 +3057,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   onTap: busy ? null : () => variantAddFor(state),
                   child: const Padding(
                     padding: EdgeInsets.only(right: 2),
-                    child: Icon(Icons.add_circle_outline,
-                        size: 15, color: Colors.teal),
+                    child: Icon(
+                      Icons.add_circle_outline,
+                      size: 15,
+                      color: Colors.teal,
+                    ),
                   ),
                 ),
               ],
@@ -2520,19 +3095,27 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   ),
                   if (variantEditing) ...[
                     GestureDetector(
-                      onTap: busy ? null : () => variantRemove(state, '${row['condition']}'),
+                      onTap: busy
+                          ? null
+                          : () => variantRemove(state, '${row['condition']}'),
                       child: const Padding(
                         padding: EdgeInsets.only(left: 6),
-                        child:
-                            Icon(Icons.close, size: 13, color: Colors.deepOrange),
+                        child: Icon(
+                          Icons.close,
+                          size: 13,
+                          color: Colors.deepOrange,
+                        ),
                       ),
                     ),
                     GestureDetector(
                       onTap: busy ? null : () => variantEditRow(state, row),
                       child: const Padding(
                         padding: EdgeInsets.only(left: 8, right: 2),
-                        child:
-                            Icon(Icons.edit, size: 13, color: Colors.blueGrey),
+                        child: Icon(
+                          Icons.edit,
+                          size: 13,
+                          color: Colors.blueGrey,
+                        ),
                       ),
                     ),
                   ],
@@ -2550,7 +3133,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ...blockElementsSaved.keys,
       for (final e in blockElements) '${e['state']}',
     }.toList();
-    states.sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
+    states.sort(
+      (a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0),
+    );
     return states;
   }
 
@@ -2561,7 +3146,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ...?blockElementsSaved[state]?.keys,
       for (final e in blockElements)
         if ('${e['state']}' == state)
-          for (final el in (e['elements'] as List? ?? [])) '${(el as Map)['tag']}',
+          for (final el in (e['elements'] as List? ?? []))
+            '${(el as Map)['tag']}',
     }.toList();
     tags.sort((a, b) => blockElementOrder(a).compareTo(blockElementOrder(b)));
     return tags;
@@ -2713,11 +3299,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     for (final g in blockElementGroups) {
       for (final e in (g['elements'] as List? ?? [])) {
         final placement = '${(e as Map)['placement'] ?? ''}';
+        // <Condition><Ustate> 是动作分支的触发条件，不是自身状态。
+        // 动作执行时给自己挂状态必须通过直属 <AddBuff> 新建；已有条件
+        // 分支仍在状态卡里展示并允许编辑，但不能从“添加元素”入口伪造。
+        if (placement == 'condition') continue;
         var hint = '';
         if (placement == 'hit') {
           hint = '（写进命中判定点，仅当块里已有）';
-        } else if (placement == 'condition') {
-          hint = '（写进触发条件，仅当块里已有）';
         }
         options.add({
           'value': '${e['tag']}',
@@ -2727,105 +3315,61 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     }
     final tag = await showDialog<String>(
       context: context,
-      builder: (_) => _SimplePickDialog(
-        title: '添加哪种元素',
-        hint: '搜索名称',
-        options: options,
-      ),
+      builder: (_) =>
+          _SimplePickDialog(title: '添加哪种元素', hint: '搜索名称', options: options),
     );
     if (tag == null || !mounted) return;
     await blockElementEditOne(state, tag);
   }
 
-  /// 保存：**只发本次改过的 (状态,标签)**（后端合并，其余不动）；空列表 = 删掉该标签。
-  /// 没有任何改动时不发请求（空 map 会被当成「清空全部」）。
+  /// 将本次防护编辑合并到当前武器内存，不写正式作者态或客户端归档。
   Future<void> saveBlockElements() async {
     if (blockElementsEdit.isEmpty) {
       setState(() => message = '没有改动，无需保存');
       return;
     }
-    final payload = <String, dynamic>{};
-    blockElementsEdit.forEach((state, tags) {
-      final out = <String, dynamic>{};
-      tags.forEach((tag, list) {
-        out[tag] = [
-          for (final e in list)
-            {
-              'tag': tag,
-              'attrs': e['attrs'],
-              if ((e['box'] as List? ?? []).isNotEmpty) 'box': e['box'],
-            },
-        ];
-      });
-      payload[state] = out;
-    });
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在保存防护/自身状态…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_block_elements_set',
-        'weapon': weapon!['id'],
-        'block_elements': payload,
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        blockElementEditing = false;
-        blockElementsEdit = {};
-        message = '${result['message'] ?? '已保存'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
+      final merged = _decodeBlockElements(blockElementsSaved);
+      blockElementsEdit.forEach((state, tags) {
+        final target = merged.putIfAbsent(state, () => {});
+        tags.forEach((tag, list) {
+          target[tag] = [
+            for (final e in list)
+              {
+                'tag': tag,
+                'attrs': e['attrs'],
+                if ((e['box'] as List? ?? []).isNotEmpty) 'box': e['box'],
+              },
+          ];
         });
-      }
-    }
+      });
+      blockElementsSaved = merged;
+      blockElementsEdit = {};
+      blockElementEditing = false;
+      dirty = true;
+      failed = false;
+      message = '防护/自身状态已写入当前武器内存；点击“保存方案”后才生成暂存副本。';
+      workspace = _snapshotWorkspace();
+    });
   }
 
   Future<void> clearBlockElements() async {
     if (!await confirmDestructive(
       '清除防护/自身状态定制？',
-      '这会删掉该武器已保存的霸体/无敌/穿人/自身状态等编辑，动作块回到原样。此操作不可撤销（会留一份快照备份）。',
+      '这会删掉该武器已保存的霸体/无敌/穿人/自身状态等编辑，动作块回到原样。此操作只修改当前内存工作区。',
     )) {
       return;
     }
-    final prefer = weapon!['id'] as int?;
+    if (!mounted) return;
     setState(() {
-      busy = true;
+      blockElementsSaved = {};
+      blockElementsEdit = {};
+      blockElementEditing = false;
+      dirty = true;
       failed = false;
-      message = '正在清除防护/自身状态定制…';
+      message = '防护/自身状态已在当前武器内存中清除；点击“保存方案”后才生成暂存副本。';
+      workspace = _snapshotWorkspace();
     });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_block_elements_set',
-        'weapon': weapon!['id'],
-        'block_elements': <String, dynamic>{},
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        blockElementEditing = false;
-        blockElementsEdit = {};
-        message = '${result['message'] ?? '已清除'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
   }
 
   /// 防护（霸体/无敌/穿人）与自身状态（UState/AddBuff）编辑卡。
@@ -2847,14 +3391,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.security_outlined,
-                    size: 16, color: Colors.deepPurple.shade700),
+                Icon(
+                  Icons.security_outlined,
+                  size: 16,
+                  color: Colors.deepPurple.shade700,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     blockElementEditing
                         ? '防护与自身状态 · 编辑中'
-                            '${blockElementsEdit.isEmpty ? '' : '（改过 ${blockElementsEdit.length} 个状态）'}'
+                              '${blockElementsEdit.isEmpty ? '' : '（改过 ${blockElementsEdit.length} 个状态）'}'
                         : '防护与自身状态 · ${states.length} 个状态',
                     style: TextStyle(
                       fontSize: 12,
@@ -2887,7 +3434,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 blockElementEditing
                     ? '点下面「给某个状态添加」：霸体/无敌/穿人，或给这一招挂状态。'
                     : '动作块里没有额外防护，也没有状态元素。霸体/无敌/穿人是按帧生效的；'
-                        '给自己挂状态用的是 AddBuff。命中给目标、触发条件只在块里本来就有对应结构时可改。',
+                          '给自己挂状态用的是 AddBuff。命中给目标、触发条件只在块里本来就有对应结构时可改。',
                 style: const TextStyle(fontSize: 12, color: Colors.black54),
               ),
             ],
@@ -2931,9 +3478,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             ),
           ),
           for (final tag in tags)
-            for (var index = 0;
-                index < blockListFor(state, tag).length;
-                index++)
+            for (
+              var index = 0;
+              index < blockListFor(state, tag).length;
+              index++
+            )
               Padding(
                 padding: const EdgeInsets.only(left: 10, top: 1),
                 child: Row(
@@ -2944,7 +3493,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                         width: 76,
                         child: Text(
                           blockElementTagLabel(tag),
-                          style: const TextStyle(fontSize: 11, color: Colors.black54),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.black54,
+                          ),
                         ),
                       )
                     else
@@ -2971,15 +3523,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                         onTap: busy
                             ? null
                             : () {
-                                final list =
-                                    [...blockListFor(state, tag)]
-                                      ..removeAt(index);
+                                final list = [...blockListFor(state, tag)]
+                                  ..removeAt(index);
                                 blockSet(state, tag, list);
                               },
                         child: const Padding(
                           padding: EdgeInsets.only(left: 6),
-                          child: Icon(Icons.close,
-                              size: 13, color: Colors.deepOrange),
+                          child: Icon(
+                            Icons.close,
+                            size: 13,
+                            color: Colors.deepOrange,
+                          ),
                         ),
                       ),
                       GestureDetector(
@@ -2988,8 +3542,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                             : () => blockElementEditOne(state, tag),
                         child: const Padding(
                           padding: EdgeInsets.only(left: 8, right: 2),
-                          child: Icon(Icons.edit,
-                              size: 13, color: Colors.blueGrey),
+                          child: Icon(
+                            Icons.edit,
+                            size: 13,
+                            color: Colors.blueGrey,
+                          ),
                         ),
                       ),
                     ],
@@ -3139,15 +3696,20 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               runSpacing: 4,
               children: [
                 for (var i = 0; i < edges.length; i++)
-                  comboEdgeChip(edges[i], editing
-                      ? () => setState(() => chainDraft.removeWhere(
-                          (e) =>
-                              identical(e, edges[i]) ||
-                              (e['old'] == edges[i]['old'] &&
-                                  e['new'] == edges[i]['new'] &&
-                                  e['key'] == edges[i]['key']),
-                        ))
-                      : null),
+                  comboEdgeChip(
+                    edges[i],
+                    editing
+                        ? () => setState(
+                            () => chainDraft.removeWhere(
+                              (e) =>
+                                  identical(e, edges[i]) ||
+                                  (e['old'] == edges[i]['old'] &&
+                                      e['new'] == edges[i]['new'] &&
+                                      e['key'] == edges[i]['key']),
+                            ),
+                          )
+                        : null,
+                  ),
               ],
             ),
           ),
@@ -3157,7 +3719,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Widget comboEdgeChip(Map<String, String> edge, VoidCallback? onDelete) {
-    final text = '${edge['key_label'] ?? keyName(edge['key'] ?? '')} → ${edge['new']}';
+    final text =
+        '${edge['key_label'] ?? keyName(edge['key'] ?? '')} → ${edge['new']}';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -3167,7 +3730,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(text, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+          Text(
+            text,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+          ),
           if (onDelete != null)
             GestureDetector(
               onTap: onDelete,
@@ -3213,8 +3779,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   key: ValueKey('chain-old-$chainEditing'),
                   initialValue: chainOld,
                   isExpanded: true,
-                  decoration:
-                      const InputDecoration(labelText: '老状态', isDense: true),
+                  decoration: const InputDecoration(
+                    labelText: '老状态',
+                    isDense: true,
+                  ),
                   items: [
                     for (final s in states)
                       DropdownMenuItem(value: s, child: Text(s)),
@@ -3228,8 +3796,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   key: ValueKey('chain-key-$chainEditing'),
                   initialValue: chainKey,
                   isExpanded: true,
-                  decoration:
-                      const InputDecoration(labelText: '按键', isDense: true),
+                  decoration: const InputDecoration(
+                    labelText: '按键',
+                    isDense: true,
+                  ),
                   // 带上编号：客户端表里有几个编号的注释是同一个按键序列
                   // （12 与 31 都是 Z+X+C），只显示注释会分不清。
                   items: [
@@ -3248,8 +3818,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   key: ValueKey('chain-new-$chainEditing'),
                   initialValue: chainNew,
                   isExpanded: true,
-                  decoration:
-                      const InputDecoration(labelText: '新状态', isDense: true),
+                  decoration: const InputDecoration(
+                    labelText: '新状态',
+                    isDense: true,
+                  ),
                   items: [
                     for (final s in states)
                       DropdownMenuItem(value: s, child: Text(s)),
@@ -3289,31 +3861,290 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     );
   }
 
-  void select(Map<String, dynamic> value) {
+  void _restoreWorkspace(WeaponWorkspace restored) {
+    restored = WeaponWorkspace.fromJson(restored.toJson());
+    weapon = Map<String, dynamic>.from(restored.weapon);
+    data = Map<String, dynamic>.from(restored.data);
+    remaps = restored.remaps;
+    cleared = restored.cleared;
+    extraProperties = restored.extraProperties;
+    hitProperties = {
+      for (final entry in restored.hitProperties.entries)
+        '${entry.key}': _hitValues(entry.value),
+    };
+    _structureBaseline = Map<String, dynamic>.from(
+      restored.extra['structure_baseline'] as Map? ?? restored.weapon,
+    );
+    rules = [for (final row in restored.rules) Map<String, dynamic>.from(row)];
+    comboChain = [
+      for (final row in restored.comboChain) Map<String, String>.from(row),
+    ];
+    comboDeadEnds = [
+      for (final row in restored.comboDeadEnds) Map<String, String>.from(row),
+    ];
+    frameSwitches = [
+      for (final row in restored.frameSwitches) Map<String, dynamic>.from(row),
+    ];
+    frameEdits = restored.frameEdits;
+    frameSaved = restored.frameSaved;
+    counters = [
+      for (final row in restored.counters) Map<String, dynamic>.from(row),
+    ];
+    counterEdits = restored.counterEdits;
+    counterSaved = restored.counterSaved;
+    blockElements = [
+      for (final row in restored.blockElements) Map<String, dynamic>.from(row),
+    ];
+    blockElementsSaved = restored.blockElementsSaved;
+    blockElementsEdit = restored.blockElementsEdit;
+    variants = restored.variants;
+    variantsSaved = restored.variantsSaved;
+    variantsEdit = restored.variantsEdit;
+    variantBases = restored.variantBases;
+    variantOccupiedIDs = {...restored.variantOccupiedIDs};
+    final serverIDs = restored.extra['variant_server_occupied_ids'];
+    variantServerOccupiedIDs = {
+      for (final id in (serverIDs is List ? serverIDs : const [])) '$id',
+    };
+    stageTracks = restored.stageTracks;
+    scopeSaved = restored.scopeSaved;
+    effectRows = restored.effectRows == null
+        ? null
+        : [
+            for (final row in restored.effectRows!)
+              Map<String, dynamic>.from(row),
+          ];
+    stageEffects = {
+      for (final entry in restored.stageEffects.entries)
+        entry.key: [
+          for (final row in entry.value) Map<String, dynamic>.from(row),
+        ],
+    };
+    comboRuleInfo = restored.comboRuleInfo;
+    comboRuleMaxDraft = restored.comboRuleMaxDraft;
+    comboRuleBlackDraft = restored.comboRuleBlackDraft;
+    comboRuleWhiteDraft = restored.comboRuleWhiteDraft;
+    variantSkillProMin =
+        int.tryParse('${restored.extra['variant_skillpro_min'] ?? ''}') ??
+        variantSkillProMin;
+    variantSkillProMax =
+        int.tryParse('${restored.extra['variant_skillpro_max'] ?? ''}') ??
+        variantSkillProMax;
+    comboRuleVersion++;
+    ustateOptions = [
+      for (final row in (restored.extra['ustate_options'] as List? ?? const []))
+        Map<String, String>.from(row as Map),
+    ];
+    comboKeys = [
+      for (final row in (restored.extra['combo_keys'] as List? ?? const []))
+        Map<String, String>.from(row as Map),
+    ];
     editorVersion++;
+  }
+
+  WeaponWorkspace _snapshotWorkspace() {
+    final selected = weapon;
+    if (selected == null) {
+      throw StateError('Cannot snapshot an empty weapon workspace');
+    }
+    return WeaponWorkspace.fromPage(
+      weapon: selected,
+      data: data ?? const {},
+      rules: rules,
+      comboChain: comboChain,
+      comboDeadEnds: comboDeadEnds,
+      frameSwitches: frameSwitches,
+      frameEdits: frameEdits,
+      frameSaved: frameSaved,
+      counters: counters,
+      counterEdits: counterEdits,
+      counterSaved: counterSaved,
+      blockElements: blockElements,
+      blockElementsSaved: blockElementsSaved,
+      blockElementsEdit: blockElementsEdit,
+      variants: variants,
+      variantsSaved: variantsSaved,
+      variantsEdit: variantsEdit,
+      variantBases: variantBases,
+      variantOccupiedIDs: variantOccupiedIDs,
+      stageTracks: stageTracks,
+      scopeSaved: scopeSaved,
+      comboRuleInfo: comboRuleInfo,
+      comboRuleMaxDraft: comboRuleMaxDraft,
+      comboRuleBlackDraft: comboRuleBlackDraft,
+      comboRuleWhiteDraft: comboRuleWhiteDraft,
+      effectRows: effectRows,
+      stageEffects: stageEffects,
+      remaps: remaps,
+      cleared: cleared,
+      extraProperties: extraProperties,
+      hitProperties: hitProperties,
+      extra: {
+        'structure_baseline': _structureBaseline,
+        'variant_server_occupied_ids': variantServerOccupiedIDs.toList()
+          ..sort(),
+        'variant_skillpro_min': variantSkillProMin,
+        'variant_skillpro_max': variantSkillProMax,
+        'ustate_options': ustateOptions,
+        'combo_keys': comboKeys,
+      },
+    );
+  }
+
+  void clearWeaponDetails() {
+    editorVersion++;
+    workspace = null;
+    remaps = {};
+    cleared = {};
+    extraProperties = {};
+    hitProperties = {};
+    _structureBaseline = {};
     selectedAction = null;
-    weapon = value;
     editUnlocked = false;
-    final stored = data!['drafts']['${value['id']}'] as List? ?? [];
-    rules = (value['stages'] as List).map((stage) {
-      final saved = stored.where((r) => r['stage'] == stage['stage']);
-      return saved.isEmpty
-          ? <String, dynamic>{
-              'stage': stage['stage'],
-              'buff': 0,
-              'level': 1,
-              'duration': 3000,
-            }
-          : Map<String, dynamic>.from(saved.first);
-    }).toList();
-    dirty = false;
-    // 帧轨道是按武器拉的，换武器就得重新读。
+    comboChain = [];
+    comboDeadEnds = [];
+    comboKeys = [];
+    chainEditing = false;
+    chainDraft = [];
+    chainOld = chainKey = chainNew = null;
+    addStatePick = null;
+    frameSwitches = [];
+    frameSaved = {};
+    frameEdits = {};
+    frameKeys = [];
+    frameEditing = false;
+    counters = [];
+    counterSaved = {};
+    counterEdits = {};
+    counterEditing = false;
+    blockElements = [];
+    blockElementsSaved = {};
+    blockElementsEdit = {};
+    blockElementGroups = [];
+    blockElementEditing = false;
+    variants = {};
+    variantsSaved = {};
+    variantsEdit = {};
+    variantBases = {};
+    variantEditing = false;
+    variantServerOccupiedIDs = {};
+    variantOccupiedIDs = {};
+    _variantRulesSnapshot = null;
+    _variantOccupiedSnapshot = null;
+    _variantDirtySnapshot = false;
     stageTracks = {};
     scopeSaved = {};
-    refreshChain(value['id']);
-    // 换武器时先清掉上一把的读取失败，免得旧报错挂在新武器上。
+    comboRuleInfo = {};
     comboRuleFailure = '';
-    refreshComboRule(value['id']);
+    comboRuleEditing = false;
+    syncComboRuleDraft();
+    _effectThumbs = {};
+    effectRows = null;
+    stageEffects = {};
+  }
+
+  Future<void> select(Map<String, dynamic> value) async {
+    final generation = ++_selectionGeneration;
+    setState(() {
+      clearWeaponDetails();
+      weapon = null;
+      rules = [];
+      busy = true;
+      failed = false;
+    });
+    try {
+      final result = Map<String, dynamic>.from(
+        await widget.api({'operation': 'weapon_detail', 'weapon': value['id']}),
+      );
+      if (!mounted || generation != _selectionGeneration) return;
+      final detail = Map<String, dynamic>.from(result['weapon'] as Map);
+      setState(() {
+        final weapons = [
+          for (final row in (data?['weapons'] as List? ?? []))
+            row['id'] == detail['id'] ? detail : row,
+        ];
+        data = {...?data, ...result, 'weapons': weapons};
+        data!.remove('chain_info');
+        data!.remove('combo_rule_info');
+        data!.remove('remap_error');
+        data!.remove('counter_warnings');
+        if (result.containsKey('remap_error')) {
+          data!['remap_error'] = result['remap_error'];
+        }
+        if (result.containsKey('counter_warnings')) {
+          data!['counter_warnings'] = result['counter_warnings'];
+        }
+        weapon = detail;
+        _structureBaseline = Map<String, dynamic>.from(
+          jsonDecode(jsonEncode(detail)) as Map,
+        );
+        remaps = Map<String, dynamic>.from(
+          jsonDecode(jsonEncode(result['remaps'] ?? const {})) as Map,
+        );
+        cleared = Map<String, dynamic>.from(
+          jsonDecode(jsonEncode(result['cleared'] ?? const {})) as Map,
+        );
+        extraProperties = Map<String, dynamic>.from(
+          jsonDecode(jsonEncode(result['extra_properties'] ?? const {})) as Map,
+        );
+        hitProperties = {
+          for (final entry
+              in ((result['hit_properties'] as Map?) ?? const {}).entries)
+            '${entry.key}': _hitValues(entry.value),
+        };
+        final stored = data!['drafts']['${detail['id']}'] as List? ?? [];
+        rules = (detail['stages'] as List).map((stage) {
+          final saved = stored.where((r) => r['stage'] == stage['stage']);
+          final rule = saved.isEmpty
+              ? <String, dynamic>{
+                  'stage': stage['stage'],
+                  'buff': 0,
+                  'level': 1,
+                  'duration': 3000,
+                }
+              : Map<String, dynamic>.from(saved.first);
+          for (final entry
+              in ((rule['properties'] as Map?) ?? const {}).entries) {
+            hitProperties.putIfAbsent(
+              '${entry.key}',
+              () => _hitValues(entry.value),
+            );
+          }
+          return rule;
+        }).toList();
+        ustateOptions = [
+          for (final u in (result['ustates'] as List? ?? []))
+            {'id': '${(u as Map)['id']}', 'name': '${u['name'] ?? ''}'},
+        ];
+        dirty = false;
+      });
+      await refreshChain(
+        detail['id'],
+        snapshot: Map<String, dynamic>.from(result['chain_info'] as Map),
+      );
+      if (!mounted || generation != _selectionGeneration) return;
+      await refreshComboRule(
+        detail['id'],
+        snapshot: Map<String, dynamic>.from(result['combo_rule_info'] as Map),
+      );
+      if (!mounted || generation != _selectionGeneration) return;
+      setState(() {
+        workspace = _snapshotWorkspace();
+        workspaceExists = false;
+        workspaceSavedAt = '';
+      });
+    } catch (error) {
+      if (mounted && generation == _selectionGeneration) {
+        setState(() {
+          failed = true;
+          message = '武器 ${value['id']} 配置读取失败：$error';
+        });
+      }
+    } finally {
+      if (mounted && generation == _selectionGeneration) {
+        setState(() => busy = false);
+      }
+    }
   }
 
   Future<bool> discard() async {
@@ -3324,25 +4155,71 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         title: const Text('有未保存的修改'),
         content: const Text('先保存方案可以保留当前修改；保存方案不会直接修改游戏。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('继续编辑')),
-          TextButton(onPressed: () => Navigator.pop(context, 'discard'), child: const Text('丢弃修改')),
-          FilledButton(onPressed: () => Navigator.pop(context, 'save'), child: const Text('保存后继续')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('继续编辑'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text('丢弃修改'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'save'),
+            child: const Text('保存后继续'),
+          ),
         ],
       ),
     );
     if (!mounted || action == null) return false;
-    if (action == 'save') { await execute('weapon_save'); return !dirty; }
+    if (action == 'save') {
+      await execute('weapon_save');
+      return !dirty;
+    }
     return true;
   }
 
   /// 特效视图（含缩略图 data URI）缓存：编号 → 图。
   Map<String, String> _effectThumbs = {};
 
+  /// null means inherit the backend/common registration; an empty list is explicit.
+  List<Map<String, dynamic>>? effectRows;
+
+  /// State -> authoritative stage effects; an empty list explicitly removes them.
+  Map<String, List<Map<String, dynamic>>> stageEffects = {};
+
   Future<Map<String, dynamic>> _loadEffectView(int id) async {
-    final view = Map<String, dynamic>.from(await widget.api({
-      'operation': 'weapon_effect_view',
-      'weapon': id,
-    }));
+    final view = Map<String, dynamic>.from(
+      await widget.api({'operation': 'weapon_effect_view', 'weapon': id}),
+    );
+    final baseRegistered = <String, Map<String, dynamic>>{
+      for (final row in (view['registered'] as List? ?? []))
+        '${(row as Map)['effect_id']}': Map<String, dynamic>.from(row),
+    };
+    final registered = effectRows == null
+        ? baseRegistered.values.toList()
+        : [
+            for (final row in effectRows!)
+              {
+                ...?baseRegistered['${row['effect_id']}'],
+                ...Map<String, dynamic>.from(row),
+              },
+          ];
+    view['registered'] = registered;
+    if (effectRows != null) {
+      view['unregistered'] = <dynamic>[];
+      view['common_count'] = registered.length;
+    }
+    final references = [
+      for (final ref in (view['references'] as List? ?? []))
+        Map<String, dynamic>.from(ref as Map),
+    ];
+    for (final entry in stageEffects.entries) {
+      references.removeWhere((row) => '${row['state']}' == entry.key);
+      references.addAll([
+        for (final row in entry.value) {'state': entry.key, ...row},
+      ]);
+    }
+    view['references'] = references;
     final thumbs = <String, String>{};
     for (final entry in (view['registered'] as List? ?? [])) {
       final map = Map<String, dynamic>.from(entry as Map);
@@ -3368,16 +4245,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           title: '${selected['name']}',
           editable: canEdit(selected['id']),
           view: view,
-          onSubmit: (rows) => widget.api({
-            'operation': 'weapon_effect_ledger_set',
-            'weapon': selected['id'],
-            'effect_rows': rows,
-          }),
+          onSubmit: (rows) async {
+            if (!canEdit(selected['id'])) return;
+            setState(() {
+              effectRows = [
+                for (final row in rows) Map<String, dynamic>.from(row),
+              ];
+              dirty = true;
+              workspace = _snapshotWorkspace();
+              message = '特效登记已写入当前武器内存；点击“保存方案”提交暂存。';
+            });
+          },
         ),
       );
       if (saved == true && mounted) {
-        setState(() => message = '特效登记已保存；点「应用到游戏」写入客户端配置包');
-        await load(prefer: selected['id'] as int?);
+        setState(() => message = '特效登记已写入当前武器内存；点击“保存方案”提交暂存。');
       }
     } catch (e) {
       if (mounted) {
@@ -3401,11 +4283,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       if (!mounted) return;
       setState(() => busy = false);
       final state = '${stage['state']}';
-      final current = [
-        for (final ref in (view['references'] as List? ?? []))
-          if ('${(ref as Map)['state']}' == state)
-            Map<String, dynamic>.from(ref),
-      ];
+      Map<String, dynamic> stageEffectRow(Map row) => {
+        'kind': '${row['kind'] ?? 'effect'}',
+        'effect_id': '${row['effect_id']}',
+        'start': row['start'] ?? 0,
+        'end': row['end'] ?? 0,
+        'bind_type': '${row['bind_type'] ?? ''}',
+        'bind_index': '${row['bind_index'] ?? ''}',
+        'break': '${row['break'] ?? ''}',
+      };
+      final current = stageEffects.containsKey(state)
+          ? [for (final row in stageEffects[state]!) stageEffectRow(row)]
+          : [
+              for (final ref in (view['references'] as List? ?? []))
+                if ('${(ref as Map)['state']}' == state) stageEffectRow(ref),
+            ];
       final saved = await showDialog<bool>(
         context: context,
         builder: (_) => _StageEffectDialog(
@@ -3413,17 +4305,21 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           editable: canEdit(selected['id']),
           rows: current,
           thumbs: _effectThumbs,
-          onSubmit: (rows) => widget.api({
-            'operation': 'weapon_effect_stage_set',
-            'weapon': selected['id'],
-            'stage': stage['stage'],
-            'stage_effects': rows,
-          }),
+          onSubmit: (rows) async {
+            if (!canEdit(selected['id'])) return;
+            setState(() {
+              stageEffects[state] = [
+                for (final row in rows) Map<String, dynamic>.from(row),
+              ];
+              dirty = true;
+              workspace = _snapshotWorkspace();
+              message = '招式特效已写入当前武器内存；点击“保存方案”提交暂存。';
+            });
+          },
         ),
       );
       if (saved == true && mounted) {
-        setState(() => message = '招式特效已保存；点「应用到游戏」写入客户端配置包');
-        await load(prefer: selected['id'] as int?);
+        setState(() => message = '招式特效已写入当前武器内存；点击“保存方案”提交暂存。');
       }
     } catch (e) {
       if (mounted) {
@@ -3438,11 +4334,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> repairEffects() async {
     final selected = weapon;
     if (selected == null || busy) return;
-    setState(() { busy = true; message = ''; });
+    setState(() {
+      busy = true;
+      message = '';
+    });
     try {
-      final preview = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_effects_preview', 'weapon': selected['id'],
-      }));
+      final preview = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_effects_preview',
+          'weapon': selected['id'],
+        }),
+      );
       if (!mounted) return;
       final additions = preview['additions'] as List;
       final issues = preview['issues'] as List;
@@ -3450,28 +4352,58 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         context: context,
         builder: (context) => AlertDialog(
           title: Text('${selected['name']} · 攻击特效'),
-          content: SizedBox(width: 560, child: SingleChildScrollView(child: Text([
-            '读取：${preview['path']}',
-            additions.isEmpty ? '没有可自动补齐的特效。' : '可补齐 ${additions.length} 条：',
-            ...additions.map((e) => '${e['id']} → ${e['file']}'),
-            if (issues.isNotEmpty) '\n以下项目需要手动处理：',
-            ...issues.map((e) => '$e'),
-            '\n仅补充特效加载登记，不修改招式、伤害和 BUFF。写入前自动备份，重启游戏后生效；不会自动发布到线上。',
-          ].join('\n')))),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Text(
+                [
+                  '读取：${preview['path']}',
+                  additions.isEmpty
+                      ? '没有可自动补齐的特效。'
+                      : '可补齐 ${additions.length} 条：',
+                  ...additions.map((e) => '${e['id']} → ${e['file']}'),
+                  if (issues.isNotEmpty) '\n以下项目需要手动处理：',
+                  ...issues.map((e) => '$e'),
+                  '\n仅补充特效加载登记，不修改招式、伤害和 BUFF。写入前自动备份，重启游戏后生效；不会自动发布到线上。',
+                ].join('\n'),
+              ),
+            ),
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('关闭')),
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('关闭'),
+            ),
             if (additions.isNotEmpty)
-              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('备份并补齐')),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('备份并补齐'),
+              ),
           ],
         ),
       );
       if (confirm != true || !mounted) return;
-      final result = await widget.api({
-        'operation': 'weapon_effects_apply', 'weapon': selected['id'],
-        'revision': preview['revision'],
+      final view = await _loadEffectView(selected['id'] as int);
+      final merged = <String, Map<String, dynamic>>{
+        for (final row in (view['registered'] as List? ?? []))
+          '${(row as Map)['effect_id']}': {
+            'effect_id': '${row['effect_id']}',
+            'file': '${row['file']}',
+          },
+      };
+      for (final row in additions) {
+        final map = Map<String, dynamic>.from(row as Map);
+        final id = '${map['id']}';
+        if (id.isNotEmpty) {
+          merged[id] = {'effect_id': id, 'file': '${map['file'] ?? id}'};
+        }
+      }
+      setState(() {
+        effectRows = merged.values.toList();
+        dirty = true;
+        workspace = _snapshotWorkspace();
+        message = '已将 ${additions.length} 条攻击特效登记合并到当前内存；点击“保存方案”提交暂存。';
       });
-      await load();
-      if (mounted) setState(() => message = '${result['message']}');
     } catch (e) {
       if (mounted) setState(() => message = '$e');
     } finally {
@@ -3480,6 +4412,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> execute(String operation) async {
+    if (operation == 'weapon_save') {
+      await saveWorkspace();
+      return;
+    }
     if (!(form.currentState?.validate() ?? false)) return;
     if (operation != 'weapon_save') {
       final confirmed = await showDialog<bool>(
@@ -3489,8 +4425,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           content: Text(
             operation == 'weapon_apply'
                 ? '将应用「${weapon!['name']}」当前配置的招式伤害、BUFF 和受击效果。修改对使用此客户端的角色生效，不限当前账号。\n\n'
-                    '写入 ${_clientInfo['directory'] ?? '当前客户端'}；写前自动备份。\n\n'
-                    '请先退出游戏。重启后加载，实战效果尚待验证。'
+                      '写入 ${_clientInfo['directory'] ?? '当前客户端'}；写前自动备份。\n\n'
+                      '请先退出游戏。重启后加载，实战效果尚待验证。'
                 : '恢复「${weapon!['name']}」的原始招式伤害、BUFF 和受击效果，其他武器配置保留。请先退出游戏。',
           ),
           actions: [
@@ -3507,6 +4443,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       );
       if (confirmed != true || !mounted) return;
     }
+    if (weapon != null) {
+      workspace = _snapshotWorkspace();
+    }
     setState(() {
       busy = true;
       failed = false;
@@ -3517,6 +4456,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         'operation': operation,
         'weapon': weapon!['id'],
         'rules': rules,
+        'workspace': workspace?.toJson(),
         'revision': data!['revision'],
       });
       if (!mounted) return;
@@ -3524,7 +4464,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         dirty = false;
         message = result['message'];
       });
-      await load();
+      await reloadSelectedWeapon();
+      if (operation != 'weapon_save') await reloadClient();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -3577,7 +4518,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       setState(() {
         exportResult = result;
         busy = false;
-        message = '已导出 ${result['name']}（${sizeText(result['size'])}，'
+        message =
+            '已导出 ${result['name']}（${sizeText(result['size'])}，'
             '${(result['files'] as List? ?? []).length} 个素材文件）。'
             '把包解压后覆盖到客户端根目录即可。';
       });
@@ -3633,7 +4575,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       setState(() {
         exportResult = result;
         busy = false;
-        message = '已导出合并包 ${result['name']}（${sizeText(result['size'])}，'
+        message =
+            '已导出合并包 ${result['name']}（${sizeText(result['size'])}，'
             '${(result['files'] as List? ?? []).length} 个素材文件）。'
             '把它发到目标机器，在 GM 里点「导入武器包」选择该 zip 即可合并，'
             '目标客户端的其他配置不会被改动。';
@@ -3652,9 +4595,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 导入武器包：选一个合并包 zip，只合并包里武器的配置条目，其余条目不动。
   Future<void> importMergePackage() async {
     if (!await discard() || !mounted) return;
-    final applied = await Navigator.push<bool>(context, MaterialPageRoute(
-      builder: (_) => WeaponMergePage(api: widget.api),
-    ));
+    final applied = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => WeaponMergePage(api: widget.api)),
+    );
     if (applied == true && mounted) await load();
   }
 
@@ -3664,7 +4608,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       for (final f in (exportResult['files'] as List? ?? []))
         Map<String, dynamic>.from(f as Map),
     ];
-    final missing = [for (final m in (exportResult['missing'] as List? ?? [])) '$m'];
+    final missing = [
+      for (final m in (exportResult['missing'] as List? ?? [])) '$m',
+    ];
     final config = [
       for (final c in (exportResult['config_changes'] as List? ?? [])) '$c',
     ];
@@ -3672,12 +4618,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       for (final p in (exportResult['plans'] as List? ?? []))
         Map<String, dynamic>.from(p as Map),
     ];
-    final counts = Map<String, dynamic>.from(exportResult['counts'] as Map? ?? {});
+    final counts = Map<String, dynamic>.from(
+      exportResult['counts'] as Map? ?? {},
+    );
     final byKind = <String, List<Map<String, dynamic>>>{};
     for (final file in files) {
       byKind.putIfAbsent('${file['kind']}', () => []).add(file);
     }
-    final kinds = [for (final k in packageSections.keys) if (byKind.containsKey(k)) k];
+    final kinds = [
+      for (final k in packageSections.keys)
+        if (byKind.containsKey(k)) k,
+    ];
     for (final k in byKind.keys) {
       if (!kinds.contains(k)) kinds.add(k);
     }
@@ -3750,7 +4701,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               for (final m in missing)
                 Text(
                   '  · $m',
-                  style: const TextStyle(fontSize: 11, color: Colors.deepOrange),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Colors.deepOrange,
+                  ),
                 ),
             ],
             if (config.isNotEmpty) ...[
@@ -3767,7 +4721,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   for (final c in config)
                     Text(
                       c,
-                      style: const TextStyle(fontSize: 11, color: Colors.black54),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.black54,
+                      ),
                     ),
                 ],
               ),
@@ -3859,7 +4816,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                     (newWeapons.isEmpty && modified.isEmpty)
                         ? '合并导入 · 包里没有武器'
                         : '合并导入 · 新增 ${newWeapons.length} 把'
-                            '${modified.isEmpty ? '' : '、覆盖已有 ${modified.length} 把'}',
+                              '${modified.isEmpty ? '' : '、覆盖已有 ${modified.length} 把'}',
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -3953,9 +4910,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         minID: data?['blueprint_min'] as int? ?? 253000,
         maxID: data?['blueprint_max'] as int? ?? 253999,
         suggestedID: suggestID(),
-        usedIDs: {
-          for (final id in usedIDs) '$id',
-        },
+        usedIDs: {for (final id in usedIDs) '$id'},
         onUploadIcon: (sourcePath) async {
           final r = await widget.api({
             'operation': 'weapon_icon_upload',
@@ -4155,7 +5110,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   String reactionChoice(dynamic hit, Map<String, dynamic> rule) {
     final original = Map<String, dynamic>.from(hit['values']);
-    final current = {...original, ...?rule['properties']?[hit['id']] as Map?};
+    final current = {...original, ...?hitProperties['${hit['id']}'] as Map?};
     final fields = (data?['fields'] as List? ?? []).where(
       (f) => f['key'] != 'SkillDamage' && f['key'] != 'SkillEnhanceDamage',
     );
@@ -4199,7 +5154,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final id = buff['id'];
     final desc = '${buff['desc'] ?? ''}';
     final title = id == 0 ? '默认（${originalDebuff(stage)}）' : '${buff['name']}';
-    final risky = desc.contains('操作键') ||
+    final risky =
+        desc.contains('操作键') ||
         desc.contains('乱掉') ||
         desc.contains('无效') ||
         desc.contains('被动状态');
@@ -4233,7 +5189,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final value = option['value'];
     final label = '${option['label'] ?? ''}';
     final detail = '${option['detail'] ?? ''}';
-    final risky = label.contains('勿用') ||
+    final risky =
+        label.contains('勿用') ||
         label.contains('错配') ||
         label.contains('无受击') ||
         label.contains('无动作') ||
@@ -4262,10 +5219,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 客户端在用、但选项表没收录的值。不能悄悄丢掉，否则一打开这个招式
   /// 下拉框就会把原值改掉。
-  List<Map<String, dynamic>> extraHitOptions(
-    dynamic field,
-    int current,
-  ) {
+  List<Map<String, dynamic>> extraHitOptions(dynamic field, int current) {
     final known = (data?['hit_options']?[field['key']] as List? ?? [])
         .map((o) => o['value'] as int)
         .toSet();
@@ -4313,15 +5267,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         onChanged: !enabled
             ? null
             : (value) => setState(() {
-                final changes = rule.putIfAbsent(
-                  'properties',
-                  () => <String, dynamic>{},
-                ) as Map;
-                final values = changes.putIfAbsent(
-                  hit['id'],
-                  () => <String, dynamic>{},
-                ) as Map;
-                values[field['key']] = value;
+                final values = Map<String, dynamic>.from(
+                  hitProperties['${hit['id']}'] as Map? ?? const {},
+                );
+                values['${field['key']}'] = value;
+                hitProperties['${hit['id']}'] = values;
+                _projectHitPropertiesToRules();
                 editorVersion++;
                 dirty = true;
               }),
@@ -4352,7 +5303,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               enabled,
               field,
               int.tryParse(
-                    '${rule['properties']?[hit['id']]?[field['key']] ?? hit['values'][field['key']]}',
+                    '${hitProperties['${hit['id']}']?[field['key']] ?? hit['values'][field['key']]}',
                   ) ??
                   0,
             )
@@ -4364,7 +5315,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   '$editorVersion-${rule['stage']}-${hit['id']}-${field['key']}',
                 ),
                 initialValue:
-                    '${rule['properties']?[hit['id']]?[field['key']] ?? hit['values'][field['key']]}',
+                    '${hitProperties['${hit['id']}']?[field['key']] ?? hit['values'][field['key']]}',
                 enabled: enabled,
                 decoration: InputDecoration(
                   labelText: field['name'],
@@ -4387,15 +5338,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                       : null;
                 },
                 onChanged: (text) => setState(() {
-                  final changes = rule.putIfAbsent(
-                    'properties',
-                    () => <String, dynamic>{},
-                  ) as Map;
-                  final values = changes.putIfAbsent(
-                    hit['id'],
-                    () => <String, dynamic>{},
-                  ) as Map;
+                  final values = Map<String, dynamic>.from(
+                    hitProperties['${hit['id']}'] as Map? ?? const {},
+                  );
                   values[field['key']] = num.tryParse(text) ?? -1;
+                  hitProperties['${hit['id']}'] = values;
+                  _projectHitPropertiesToRules();
                   dirty = true;
                 }),
               ),
@@ -4409,13 +5357,65 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     Map<String, dynamic> rule,
     bool enabled,
   ) {
+    final stageState = '${stage['state']}';
+    final ctx = variantHitContext(stageState);
+    final hits = [
+      ...(stage['hits'] as List? ?? []),
+      for (final branch in variantPendingFor(stageState))
+        for (final segment in (branch['segments'] as List? ?? const []))
+          if ('${(segment as Map)['skillproid'] ?? ''}'.isNotEmpty &&
+              !(stage['hits'] as List? ?? const []).any(
+                (hit) => '${(hit as Map)['id']}' == '${segment['skillproid']}',
+              ))
+            {
+              'id': '${segment['skillproid']}',
+              'variant': '${branch['condition']}',
+              'buff': '0',
+              'values': Map<String, dynamic>.from(
+                (ctx.hits['${segment['template_skillproid'] ?? segment['skillproid']}']?['values']
+                        as Map?) ??
+                    const <String, dynamic>{},
+              ),
+            },
+    ];
     return [
-      for (final hit in (stage['hits'] as List? ?? []))
+      for (final hit in hits)
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if ((stage['hits'] as List).length > 1)
-              Text('命中 ${(stage['hits'] as List).indexOf(hit) + 1}'),
+            Row(
+              children: [
+                if (hits.length > 1) Text('命中 ${hits.indexOf(hit) + 1}'),
+                const SizedBox(width: 8),
+                Text(
+                  '命中属性 ${hit['id']}',
+                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                ),
+                if ('${hit['variant'] ?? ''}'.isNotEmpty) ...[
+                  if (hits.length > 1) const SizedBox(width: 8),
+                  // 这条命中属性只在该分支下生效（动作块里的 <Condition><Ustate id>）。
+                  // 同一个动作分了几套形态时，靠它分辨哪条是哪套。
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurple.shade50,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      '分支 ${ustateLabel('${hit['variant']}')}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.deepPurple.shade700,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
             Padding(
               padding: const EdgeInsets.all(8),
               child: DropdownButtonFormField<String>(
@@ -4484,8 +5484,379 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     ];
   }
 
-  Map<String, dynamic> get remaps =>
-      Map<String, dynamic>.from(data?['remaps'] as Map? ?? const {});
+  Map<String, dynamic> _stateMap(Map<String, dynamic> source) =>
+      Map<String, dynamic>.from(source['${weapon!['id']}'] as Map? ?? const {});
+
+  String _allocateTemplateProperty(String template, Object? hit) {
+    final source = template.trim();
+    if (source.isEmpty) return '';
+    final owner = '${weapon!['id']}';
+    for (final entry in extraProperties.entries) {
+      final row = entry.value;
+      if (row is Map &&
+          '${row['template']}' == source &&
+          '${row['owner_weapon'] ?? owner}' == owner) {
+        return '${entry.key}';
+      }
+    }
+    final used = <String>{
+      ...hitProperties.keys,
+      ...extraProperties.keys,
+      ...variantOccupiedIDs,
+      for (final stage in (weapon!['stages'] as List? ?? const []))
+        for (final id in ((stage as Map)['property_ids'] as List? ?? const []))
+          '$id',
+    };
+    final id = nextVariantSkillProID(
+      used,
+      minimum: 800000001,
+      maximum: 899999999,
+    );
+    if (id == null) throw StateError('命中属性编号空间不足');
+    extraProperties[id] = {'template': source, 'owner_weapon': owner};
+    hitProperties[id] = _hitValues(hit);
+    return id;
+  }
+
+  List<Map<String, dynamic>> _copyRows(Object? value) => [
+    for (final row in (value as List? ?? const []))
+      Map<String, dynamic>.from(jsonDecode(jsonEncode(row)) as Map),
+  ];
+
+  List<Map<String, dynamic>> _copyAttrsRows(Object? value) => [
+    for (final row in (value as List? ?? const []))
+      {
+        'attrs': [
+          for (final attr in ((row as Map)['attrs'] as List? ?? const []))
+            {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+        ],
+      },
+  ];
+
+  void _migrateTemplateModules(String targetState, Map<String, dynamic> value) {
+    final sourceState = '${value['template_state'] ?? ''}';
+    final frame = value['template_frame_switches'];
+    if (frame is List && frame.isNotEmpty) {
+      frameSaved[targetState] = _copyAttrsRows(frame);
+      frameSwitches = [
+        for (final entry in frameSaved.entries)
+          for (final item in entry.value) {'state': entry.key, ...item},
+      ];
+    }
+    final templateCounters = value['template_counters'];
+    if (templateCounters is List && templateCounters.isNotEmpty) {
+      final source = Map<String, dynamic>.from(templateCounters.first as Map);
+      counterSaved[targetState] = {
+        'attrs': [
+          for (final attr in (source['attrs'] as List? ?? const []))
+            {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+        ],
+        'box': [
+          for (final attr in (source['box'] as List? ?? const []))
+            {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+        ],
+      };
+      counters = [
+        for (final entry in counterSaved.entries)
+          if (entry.value != null)
+            {'state': entry.key, ...encodeCounter(entry.value!)},
+      ];
+    }
+    final blocks = value['template_block_elements'];
+    if (blocks is List && blocks.isNotEmpty) {
+      final source = Map<String, dynamic>.from(blocks.first as Map);
+      final elements = <String, List<Map<String, dynamic>>>{};
+      for (final raw in (source['elements'] as List? ?? const [])) {
+        final row = Map<String, dynamic>.from(raw as Map);
+        final tag = '${row['tag']}';
+        elements.putIfAbsent(tag, () => []).add({
+          'tag': tag,
+          'attrs': [
+            for (final attr in (row['attrs'] as List? ?? const []))
+              {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+          ],
+          'box': [
+            for (final attr in (row['box'] as List? ?? const []))
+              {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+          ],
+        });
+      }
+      if (elements.isNotEmpty) blockElementsSaved[targetState] = elements;
+      blockElements = [
+        for (final entry in blockElementsSaved.entries)
+          for (final tag in entry.value.entries)
+            for (final row in tag.value) {'state': entry.key, ...row},
+      ];
+    }
+    final scope = value['template_scope_saved'];
+    if (scope is Map && scope.isNotEmpty) {
+      scopeSaved[targetState] = {
+        for (final entry in scope.entries)
+          '${entry.key}': [
+            for (final attr in (entry.value as List? ?? const []))
+              {'key': '${(attr as Map)['key']}', 'value': '${attr['value']}'},
+          ],
+      };
+    }
+    final effects = value['template_stage_effects'];
+    if (effects is List && effects.isNotEmpty) {
+      stageEffects[targetState] = _copyRows(effects);
+    }
+    final track = value['template_track'];
+    if (track is Map) {
+      final copied = Map<String, dynamic>.from(
+        jsonDecode(jsonEncode(track)) as Map,
+      );
+      copied['state'] = targetState;
+      copied['action'] = '${value['action'] ?? copied['action'] ?? ''}';
+      stageTracks[targetState] = copied;
+    }
+    final templateVariants = value['template_variants'];
+    final templateVariantsSaved = value['template_variants_saved'];
+    if (sourceState.isNotEmpty) {
+      final sourceVariants = templateVariants is Map
+          ? templateVariants[sourceState]
+          : null;
+      final sourceSaved = templateVariantsSaved is Map
+          ? templateVariantsSaved[sourceState]
+          : null;
+      final rows = sourceVariants is List
+          ? _copyRows(sourceVariants)
+          : sourceSaved is List
+              ? _copyRows(sourceSaved)
+              : const <Map<String, dynamic>>[];
+      if (rows.isNotEmpty) {
+        variants[targetState] = rows;
+        variantsSaved[targetState] = [
+          for (final row in rows) Map<String, dynamic>.from(row),
+        ];
+      }
+    }
+    final templateBases = value['template_variant_bases'];
+    if (templateBases is Map && sourceState.isNotEmpty) {
+      final sourceBase = templateBases[sourceState];
+      if (sourceBase is List) {
+        variantBases[targetState] = _copyRows(sourceBase);
+      }
+    }
+    final chain = value['template_chain'];
+    if (chain is List && sourceState.isNotEmpty && sourceState != targetState) {
+      final migrated = [
+        for (final raw in chain)
+          if ('${(raw as Map)['old']}' == sourceState ||
+              '${raw['new']}' == sourceState)
+            {
+              'old': '${raw['old']}' == sourceState
+                  ? targetState
+                  : '${raw['old']}',
+              'new': '${raw['new']}' == sourceState
+                  ? targetState
+                  : '${raw['new']}',
+              'key': '${raw['key']}',
+            },
+      ];
+      final merged = [for (final row in comboChain) Map<String, String>.from(row)];
+      for (final row in migrated) {
+        if (!merged.any(
+          (existing) => existing['old'] == row['old'] &&
+              existing['new'] == row['new'] &&
+              existing['key'] == row['key'],
+        )) {
+          merged.add(Map<String, String>.from(row));
+        }
+      }
+      comboChain = merged;
+    }
+  }
+
+  void _clearStateEdits(String stateKey) {
+    for (final entries in [
+      frameSaved,
+      frameEdits,
+      counterSaved,
+      counterEdits,
+      blockElementsSaved,
+      blockElementsEdit,
+      variants,
+      variantsSaved,
+      variantsEdit,
+      variantBases,
+      stageTracks,
+      scopeSaved,
+      stageEffects,
+    ]) {
+      entries.remove(stateKey);
+    }
+    for (final rows in [frameSwitches, counters, blockElements]) {
+      rows.removeWhere((row) => '${row['state']}' == stateKey);
+    }
+  }
+
+  void commitRemap(String stateKey, Map<String, dynamic> value) {
+    setState(() {
+      final key = '${weapon!['id']}';
+      final per = _stateMap(remaps);
+      final action = '${value['action'] ?? ''}'.trim();
+      var property = '${value['property_id'] ?? ''}'.trim();
+      if (value['allocate_property'] == true && property.isNotEmpty) {
+        final template = '${value['property_id']}';
+        property = _allocateTemplateProperty(template, value['hit']);
+        value = {
+          ...value,
+          'template_property_id': template,
+          'property_id': property,
+        };
+      }
+      if (action.isEmpty && property.isEmpty) {
+        _clearStateEdits(stateKey);
+        per.remove(stateKey);
+      } else {
+        per[stateKey] = {...value, 'action': action, 'property_id': property};
+        final deleted = _stateMap(cleared)..remove(stateKey);
+        cleared[key] = deleted;
+      }
+      remaps[key] = per;
+      _migrateTemplateModules(stateKey, value);
+      final stages = List<dynamic>.from(weapon!['stages'] as List);
+      final index = stages.indexWhere((s) => '${s['state']}' == stateKey);
+      final baseline = (_structureBaseline['stages'] as List? ?? const [])
+          .where((s) => '${s['state']}' == stateKey);
+      final previous = index >= 0
+          ? Map<String, dynamic>.from(stages[index] as Map)
+          : <String, dynamic>{};
+      final templateStage = value['template_stage_data'] is Map
+          ? Map<String, dynamic>.from(value['template_stage_data'] as Map)
+          : <String, dynamic>{};
+
+      if (action.isEmpty && property.isEmpty) {
+        if (baseline.isNotEmpty) {
+          final original = jsonDecode(jsonEncode(baseline.first));
+          if (index >= 0) {
+            stages[index] = original;
+          } else {
+            stages.add(original);
+          }
+        } else if (index >= 0) {
+          stages.removeAt(index);
+        }
+      } else {
+        final number = int.parse(stateKey);
+        final suppliedHit = value['hit'] is Map
+            ? Map<String, dynamic>.from(value['hit'] as Map)
+            : null;
+        final templateProperty = '${value['template_property_id'] ?? ''}';
+        final templateHit = templateProperty.isNotEmpty
+            ? hitProperties[templateProperty]
+            : null;
+        final hit = property.isEmpty
+            ? null
+            : {
+                ...?suppliedHit,
+                'id': property,
+                'buff': suppliedHit?['buff'] ??
+                    (templateHit is Map ? templateHit['buff'] : '0') ??
+                    '0',
+                'values': Map<String, dynamic>.from(
+                  (suppliedHit?['values'] as Map?) ??
+                      (templateHit is Map && templateHit['values'] is Map
+                          ? templateHit['values'] as Map
+                          : const <String, dynamic>{}),
+                ),
+              };
+          if (property.isNotEmpty && hit != null) {
+          hitProperties[property] = _hitValues(hit);
+        }
+        final row = <String, dynamic>{
+          if (baseline.isNotEmpty)
+            ...Map<String, dynamic>.from(baseline.first as Map),
+          ...templateStage,
+          'action': '',
+          'stage': number >= 2011 && number <= 2016 ? number - 2010 : number,
+          'state': stateKey,
+          'label': value['label'] == null || '${value['label']}'.isEmpty
+              ? (index >= 0 ? stages[index]['label'] : stateKey)
+              : value['label'],
+          'supported': true, 'reason': '',
+          if (action.isNotEmpty) 'action': action,
+          'property_ids': List<dynamic>.from(
+            templateStage['property_ids'] as List? ??
+                (property.isNotEmpty
+                    ? [property]
+                    : previous['property_ids'] as List? ?? const []),
+          ),
+          'hits': [
+            for (final oldHit in (templateStage['hits'] as List? ?? const []))
+              Map<String, dynamic>.from(oldHit as Map),
+            if ((templateStage['hits'] as List? ?? const []).isEmpty &&
+                hit != null)
+              hit,
+          ],
+        };
+        if (index >= 0) {
+          stages[index] = row;
+        } else {
+          stages.add(row);
+        }
+      }
+      weapon = {...weapon!, 'stages': stages};
+      final oldRules = {for (final r in rules) '${r['stage']}': r};
+      final changed = int.parse(stateKey);
+      final ruleStage = changed >= 2011 && changed <= 2016
+          ? changed - 2010
+          : changed;
+      rules = [
+        for (final s in stages)
+          {
+            'buff': 0,
+            'level': 1,
+            'duration': 3000,
+            ...?oldRules['${s['stage']}'],
+            'stage': s['stage'],
+            if (s['stage'] == ruleStage && action.isNotEmpty) ...{
+              'buff': 0,
+              'level': 1,
+              'duration': 3000,
+            },
+          },
+      ];
+      _projectHitPropertiesToRules();
+      editorVersion++;
+      _markWorkspaceDirty('重映射已更新到内存工作区；点击“保存方案”提交暂存。');
+    });
+  }
+
+  String allocateProperty(String template, List<Map<String, dynamic>> catalog) {
+    final used = {
+      for (final p in catalog) '${p['id']}',
+      ...extraProperties.keys,
+      ...variantOccupiedIDs,
+    };
+    final id = nextVariantSkillProID(
+      used,
+      minimum: 800000001,
+      maximum: 899999999,
+    );
+    if (id == null) throw StateError('命中属性编号空间不足');
+    setState(() {
+      extraProperties[id] = {
+        'template': template,
+        'owner_weapon': '${weapon!['id']}',
+      };
+      final templateHit = hitProperties[template];
+      final catalogHit = catalog
+          .where((row) => '${row['id']}' == template)
+          .firstOrNull;
+      hitProperties[id] = templateHit is Map
+          ? _hitValues(templateHit)
+          : catalogHit != null
+              ? Map<String, dynamic>.from(
+                  catalogHit['values'] as Map? ?? const {},
+                )
+              : <String, dynamic>{};
+      _markWorkspaceDirty('命中属性节点已新增到内存工作区。');
+    });
+    return id;
+  }
 
   Map<String, dynamic> remapFor(String state) {
     final per = remaps['${weapon!['id']}'];
@@ -4506,17 +5877,66 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ),
     );
     if (picked == null || !mounted) return;
-    await _callRemap(
-      stateKey,
-      params: {
-        'operation': 'weapon_remap',
-        'weapon': weapon!['id'],
-        'stage': int.parse(stateKey),
+    final resolved = Map<String, dynamic>.from(
+      await widget.api({
+        'operation': 'weapon_template_resolve',
         'template_weapon': picked['weapon'],
         'template_stage': picked['state'],
-      },
-      busyText: '正在复用动作与命中属性…',
+      }),
     );
+    if (!mounted) return;
+    final value = <String, dynamic>{
+      ...resolved,
+      'template_state': '${picked['state']}',
+      'allocate_property': true,
+    };
+    final templateStage = resolved['template_stage_data'];
+    if (templateStage is Map) {
+      final stage = Map<String, dynamic>.from(
+        jsonDecode(jsonEncode(templateStage)) as Map,
+      );
+      final propertyMap = <String, String>{};
+      for (final rawHit in (stage['hits'] as List? ?? const [])) {
+        final hit = Map<String, dynamic>.from(rawHit as Map);
+        final sourceID = '${hit['id'] ?? ''}'.trim();
+        if (sourceID.isEmpty) continue;
+        final allocated = _allocateTemplateProperty(sourceID, hit);
+        propertyMap[sourceID] = allocated;
+        hit['id'] = allocated;
+        stage['hits'] = [
+          for (final existing in (stage['hits'] as List? ?? const []))
+            '${(existing as Map)['id']}' == sourceID ? hit : existing,
+        ];
+      }
+      for (final rawID in (stage['property_ids'] as List? ?? const [])) {
+        final sourceID = '$rawID'.trim();
+        if (sourceID.isEmpty || propertyMap.containsKey(sourceID)) continue;
+        final allocated = _allocateTemplateProperty(
+          sourceID,
+          {'id': sourceID, 'values': const <String, dynamic>{}},
+        );
+        propertyMap[sourceID] = allocated;
+      }
+      if (propertyMap.isNotEmpty) {
+        stage['property_ids'] = [
+          for (final rawID in (stage['property_ids'] as List? ?? const []))
+            propertyMap['$rawID'] ?? '$rawID',
+        ];
+        value['property_map'] = propertyMap;
+        final sourceProperty = '${resolved['property_id'] ?? ''}';
+        final allocatedPrimary = propertyMap[sourceProperty];
+        if (allocatedPrimary != null) {
+          value['property_id'] = allocatedPrimary;
+          value['template_property_id'] = sourceProperty;
+          final primary = (stage['hits'] as List? ?? const [])
+              .where((raw) => '${(raw as Map)['id']}' == allocatedPrimary);
+          if (primary.isNotEmpty) value['hit'] = primary.first;
+        }
+        value['template_stage_data'] = stage;
+        value['allocate_property'] = false;
+      }
+    }
+    commitRemap(stateKey, value);
   }
 
   /// 新增命中属性节点：克隆一个模板节点到全新编号，再指定给本段。
@@ -4527,6 +5947,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await widget.api({'operation': 'weapon_remap_options'}),
       );
     } catch (_) {}
+    if (!mounted) return;
     final properties = [
       for (final p in (catalog['properties'] as List? ?? []))
         Map<String, dynamic>.from(p as Map),
@@ -4536,59 +5957,32 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       builder: (_) => _PropertyPickerDialog(properties: properties),
     );
     if (template == null || !mounted) return;
-    final prefer = weapon!['id'] as int?;
-    setState(() {
-      busy = true;
-      failed = false;
-      message = '正在新增命中属性节点…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_property_add', 'template': template}),
-      );
-      final newId = '${result['property_id'] ?? ''}';
-      if (!mounted) return;
-      if (newId.isEmpty) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '${result['message'] ?? '新增失败'}';
-        });
-        return;
-      }
-      final remap = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_remap',
-        'weapon': weapon!['id'],
-        'stage': int.parse(stateKey),
+    final newId = allocateProperty(template, properties);
+    final source = hitProperties[template];
+    final templateRow = properties.firstWhere((row) => '${row['id']}' == template);
+    remaps['${weapon!['id']}'] = {
+      ..._stateMap(remaps),
+      stateKey: {
+        ...remapFor(stateKey),
         'property_id': newId,
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        message = '${remap['message'] ?? '已指定命中属性'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
+        'template_property_id': template,
+        'hit': {
+          'id': newId,
+          'buff': templateRow['buff'] ?? '0',
+          'values': source is Map
+              ? Map<String, dynamic>.from(source)
+              : Map<String, dynamic>.from(
+                  templateRow['values'] as Map? ?? const <String, dynamic>{},
+                ),
+        },
+      },
+    };
+    _markWorkspaceDirty('命中属性 ID 已分配；提交重映射后生成可编辑节点。');
+    setState(() {});
   }
 
   Future<void> clearRemap(String stateKey) async {
-    await _callRemap(
-      stateKey,
-      params: {
-        'operation': 'weapon_remap',
-        'weapon': weapon!['id'],
-        'stage': int.parse(stateKey),
-      },
-      busyText: '正在取消重映射…',
-    );
+    commitRemap(stateKey, const {});
   }
 
   /// 自建武器尚未使用的状态列：定义新状态时可选。
@@ -4683,6 +6077,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 for (final w in (data?['weapons'] as List? ?? []))
                   Map<String, dynamic>.from(w as Map),
               ],
+              onCommit: (value) => commitRemap(stateKey, value),
+              onAddProperty: allocateProperty,
               onSaved: () async {
                 Navigator.of(dialogContext).pop(true);
               },
@@ -4699,7 +6095,6 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     );
     if (!mounted) return;
     setState(() => addStatePick = null);
-    await load(prefer: weapon!['id']);
   }
 
   /// 删除自建武器的一个状态：清零该动作列，移除重映射与已保存的效果编辑，
@@ -4726,33 +6121,81 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    final prefer = weapon!['id'] as int?;
     setState(() {
-      busy = true;
-      failed = false;
-      message = '正在删除状态…';
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_state_clear',
-        'weapon': weapon!['id'],
-        'stage': int.parse(stateKey),
-      }));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        message = '${result['message'] ?? '已删除状态'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
+      final key = '${weapon!['id']}';
+      remaps[key] = _stateMap(remaps)..remove(stateKey);
+      cleared[key] = _stateMap(cleared)..[stateKey] = true;
+      _clearStateEdits(stateKey);
+      final stages = List<dynamic>.from(weapon!['stages'] as List);
+      final removed = stages.where((s) => '${s['state']}' == stateKey).toList();
+      final removedIDs = {
+        for (final s in removed)
+          for (final id in (s['property_ids'] as List? ?? const [])) '$id',
+      };
+      final retainedIDs = {
+        for (final s in stages)
+          if ('${s['state']}' != stateKey)
+            for (final id in (s['property_ids'] as List? ?? const [])) '$id',
+      };
+      removedIDs.removeAll(retainedIDs);
+      bool orphanProperty(Map row) => [
+        'skill',
+        'prev',
+        'cur',
+        'exceed_skill_pro_id',
+      ].any((field) => removedIDs.contains('${row[field]}'));
+      comboRuleMaxDraft.removeWhere(orphanProperty);
+      comboRuleBlackDraft.removeWhere(orphanProperty);
+      comboRuleWhiteDraft.removeWhere(orphanProperty);
+      rules.removeWhere((r) => removed.any((s) => s['stage'] == r['stage']));
+      stages.removeWhere((s) => '${s['state']}' == stateKey);
+      weapon = {...weapon!, 'stages': stages};
+      bool touches(Map row) =>
+          [
+            'old',
+            'new',
+            'state',
+            'nextstate',
+            'next',
+          ].any((field) => '${row[field]}' == stateKey) ||
+          (row['attrs'] as List? ?? const []).any(
+            (a) =>
+                ['nextstate', 'next'].contains(a['key']) &&
+                '${a['value']}' == stateKey,
+          );
+      comboChain.removeWhere(touches);
+      comboDeadEnds.removeWhere(touches);
+      chainDraft.removeWhere(touches);
+      frameSwitches.removeWhere(touches);
+      counters.removeWhere(touches);
+      for (final groups in [frameSaved, frameEdits]) {
+        for (final rows in groups.values) {
+          rows.removeWhere(touches);
+        }
       }
-    }
+      for (final groups in [counterSaved, counterEdits]) {
+        for (final entry in groups.entries.toList()) {
+          if (entry.value != null && touches(entry.value!))
+            groups[entry.key] = null;
+        }
+      }
+      comboRuleMaxDraft.removeWhere((r) => '${r['exceed_state']}' == stateKey);
+      final savedLimits = Map<String, dynamic>.from(
+        comboRuleInfo['rules'] as Map? ?? const {},
+      );
+      for (final group in ['max', 'black', 'white']) {
+        savedLimits[group] = [
+          for (final row in (savedLimits[group] as List? ?? const []))
+            if (!orphanProperty(row as Map) &&
+                (group != 'max' || '${row['exceed_state']}' != stateKey))
+              row,
+        ];
+      }
+      comboRuleInfo = {...comboRuleInfo, 'rules': savedLimits};
+      selectedAction = null;
+      editorVersion++;
+      _markWorkspaceDirty('状态已从内存工作区删除；点击“保存方案”提交暂存。');
+    });
   }
 
   /// 自建武器的状态管理卡片：新增状态列（从零定义）与提示。
@@ -4829,36 +6272,6 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     );
   }
 
-  Future<void> _callRemap(
-    String stateKey, {
-    required Map<String, dynamic> params,
-    required String busyText,
-  }) async {
-    final prefer = weapon!['id'] as int?;
-    setState(() {
-      busy = true;
-      failed = false;
-      message = busyText;
-    });
-    try {
-      final result = Map<String, dynamic>.from(await widget.api(params));
-      if (!mounted) return;
-      setState(() {
-        busy = false;
-        message = '${result['message'] ?? '已更新'}';
-      });
-      await load(prefer: prefer);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          failed = true;
-          message = '$e';
-        });
-      }
-    }
-  }
-
   /// 重映射失效告警：某个状态的映射指向了不存在的动作或命中属性，此时招式
   /// 列表退回未映射前的结构，需要先修好或取消该映射。
   /// 招架提示：某个状态的 `<Counter>` 指向本武器不存在的状态 —— 架住之后切不到
@@ -4884,8 +6297,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.error_outline,
-                    size: 16, color: Colors.deepOrange.shade700),
+                Icon(
+                  Icons.error_outline,
+                  size: 16,
+                  color: Colors.deepOrange.shade700,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   '招架目标状态为空（只影响那一招）',
@@ -4931,8 +6347,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           children: [
             Row(
               children: [
-                Icon(Icons.error_outline,
-                    size: 16, color: Colors.deepOrange.shade700),
+                Icon(
+                  Icons.error_outline,
+                  size: 16,
+                  color: Colors.deepOrange.shade700,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   '状态重映射暂不可用',
@@ -4959,7 +6378,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Widget remapSection(int index, Map<String, dynamic> stage) {
     final stateKey = '${stage['state']}';
     return _RemapEditor(
-      key: ValueKey('remap-${weapon!['id']}-$stateKey'),
+      key: ValueKey('remap-$editorVersion-${weapon!['id']}-$stateKey'),
       stateKey: stateKey,
       weaponId: weapon!['id'] as int,
       initial: remapFor(stateKey),
@@ -4969,10 +6388,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         for (final w in (data?['weapons'] as List? ?? []))
           Map<String, dynamic>.from(w as Map),
       ],
-      onSaved: () => load(prefer: weapon!['id']),
+      onCommit: (value) => commitRemap(stateKey, value),
+      onAddProperty: allocateProperty,
+      onSaved: () async {},
     );
   }
-
 
   Widget stageEditor(int index) {
     final rule = rules[index], stage = weapon!['stages'][index];
@@ -5003,6 +6423,30 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               Text(
                 stage['reason'],
                 style: const TextStyle(color: Colors.deepOrange),
+              ),
+            if (stage['notice'] != null && '${stage['notice']}'.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 14,
+                      color: Colors.amber.shade800,
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        '${stage['notice']}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.amber.shade900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             const SizedBox(height: 8),
             remapSection(index, Map<String, dynamic>.from(stage as Map)),
@@ -5065,8 +6509,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                     initialValue: _levelText(rule['level']),
                     enabled: enabled && rule['buff'] != 0,
                     decoration: const InputDecoration(labelText: '等级/倍率'),
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
                     validator: (v) {
                       final n = double.tryParse(v ?? '');
                       return n == null || n < 0.1 || n > 999
@@ -5115,7 +6560,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// itemact.txt points at, and both are what you need when cross-checking the
   /// tables by hand.
   String stageIdentity(int? index) {
-    if (index == null || index < 0 || index >= (weapon!['stages'] as List).length) {
+    if (index == null ||
+        index < 0 ||
+        index >= (weapon!['stages'] as List).length) {
       return '';
     }
     final stage = weapon!['stages'][index];
@@ -5140,7 +6587,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final next = '${counter['next_state'] ?? ''}';
     final half = (counter['angle_half_range'] as num?)?.toInt() ?? 0;
     final size = '${counter['trigger_box'] ?? ''}';
-    final head = '招架：帧 ${counter['start_frame']}–${counter['end_frame']} → 状态 $next'
+    final head =
+        '招架：帧 ${counter['start_frame']}–${counter['end_frame']} → 状态 $next'
         '${half == 0 ? '' : '（±$half°）'}${size.isEmpty ? '' : ' · 判定盒 $size'}';
     final dead = counter['next_unreachable'] == true;
     return Container(
@@ -5189,7 +6637,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                         onPressed: busy
                             ? null
                             : () => clearState(
-                                '${(weapon!['stages'][index!] as Map)['state']}'),
+                                '${(weapon!['stages'][index!] as Map)['state']}',
+                              ),
                       ),
                     IconButton(
                       tooltip: '帧轨道与攻击范围',
@@ -5230,7 +6679,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     final directory = '${_clientInfo['directory'] ?? ''}';
     final hash = clientConfigHash;
     final baselineState = '${(data?['client'] as Map?)?['state'] ?? ''}';
-    final rebaseNeeded = baselineState == '有差异' ||
+    final rebaseNeeded =
+        baselineState == '有差异' ||
         baselineState == '未采集基线' ||
         baselineState == '客户端缺失';
     return Card(
@@ -5283,8 +6733,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   ),
                   TextButton(
                     onPressed: busy ? null : rebaseClient,
-                    child: const Text('重新采集基线',
-                        style: TextStyle(fontSize: 12)),
+                    child: const Text('重新采集基线', style: TextStyle(fontSize: 12)),
                   ),
                 ],
                 const Spacer(),
@@ -5307,7 +6756,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   child: SelectableText(
                     hash.isEmpty ? '(读不到)' : hash,
                     maxLines: 1,
-                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
                   ),
                 ),
                 TextButton.icon(
@@ -5408,8 +6860,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                       registered == null
                           ? '缺少连招表：进游戏后只能出第一段，按键不会推进到下一段'
                           : rows == 0
-                              ? '参考武器「${weaponName(reference)}」没有连招表，未复制连招；它有的动作特效等登记仍会照常复制'
-                              : '连招表已补齐：借用「${weaponName(reference)}」的 $rows 条转移',
+                          ? '参考武器「${weaponName(reference)}」没有连招表，未复制连招；它有的动作特效等登记仍会照常复制'
+                          : '连招表已补齐：借用「${weaponName(reference)}」的 $rows 条转移',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
                         color: registered == null
@@ -5480,8 +6932,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           padding: const EdgeInsets.all(12),
           child: Row(
             children: [
-              const Icon(Icons.lock_open_outlined,
-                  size: 18, color: Colors.deepOrange),
+              const Icon(
+                Icons.lock_open_outlined,
+                size: 18,
+                color: Colors.deepOrange,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -5657,12 +7112,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                           return;
                                         }
                                         if (await discard() && mounted) {
-                                          setState(() {
-                                            select(
-                                              Map<String, dynamic>.from(value),
-                                            );
-                                            message = '';
-                                          });
+                                          setState(() => message = '');
+                                          await select(
+                                            Map<String, dynamic>.from(value),
+                                          );
                                         }
                                       },
                               );
@@ -5675,7 +7128,15 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   const VerticalDivider(width: 1),
                   Expanded(
                     child: weapon == null
-                        ? Center(child: Text(busy ? '读取武器动作配置…' : '没有可读取的武器'))
+                        ? Center(
+                            child: Text(
+                              busy
+                                  ? '正在读取武器配置…'
+                                  : allWeapons.isEmpty
+                                  ? '没有可读取的武器'
+                                  : '请从左侧选择武器查看配置',
+                            ),
+                          )
                         : Padding(
                             padding: const EdgeInsets.all(20),
                             child: Column(
@@ -5714,11 +7175,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                                       Expanded(
                                                         child: Text(
                                                           '复用模型 ${weapon!['model'] ?? '未知'} · ${donorSummary(weapon!['id'])}',
-                                                          style: Theme.of(context)
-                                                              .textTheme
-                                                              .bodySmall,
-                                                          overflow:
-                                                              TextOverflow.ellipsis,
+                                                          style: Theme.of(
+                                                            context,
+                                                          ).textTheme.bodySmall,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
                                                         ),
                                                       ),
                                                     ],
@@ -5876,27 +7337,28 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                               '选择招式，设置 DEBUFF、受击动作和伤害。',
                                               style: TextStyle(fontSize: 12),
                                             ),
-                                            if ((weapon!['combos'] as List? ?? [])
+                                            if ((weapon!['combos'] as List? ??
+                                                    [])
                                                 .isEmpty)
                                               const Text(
                                                 '未收录按键提示，按动作名称选择。',
-                                                style:
-                                                    TextStyle(fontSize: 12),
+                                                style: TextStyle(fontSize: 12),
                                               ),
                                             if (weapon!['id'] == 253013)
                                               Align(
-                                                alignment:
-                                                    Alignment.centerLeft,
+                                                alignment: Alignment.centerLeft,
                                                 child: TextButton.icon(
                                                   onPressed: busy
                                                       ? null
                                                       : () => setState(() {
                                                           editorVersion++;
-                                                          for (final r in rules) {
+                                                          for (final r
+                                                              in rules) {
                                                             r['buff'] =
                                                                 r['stage'] == 1
                                                                 ? 1
-                                                                : r['stage'] == 2
+                                                                : r['stage'] ==
+                                                                      2
                                                                 ? 37
                                                                 : 0;
                                                             r['level'] = 1;
@@ -5990,7 +7452,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                   crossAxisAlignment: WrapCrossAlignment.center,
                                   children: [
                                     OutlinedButton.icon(
-                                      onPressed: busy || dirty ? null : repairEffects,
+                                      onPressed: busy || dirty
+                                          ? null
+                                          : repairEffects,
                                       icon: const Icon(Icons.auto_fix_high),
                                       label: const Text('自动补齐攻击特效'),
                                     ),
@@ -6000,6 +7464,18 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                           : () => execute('weapon_save'),
                                       icon: const Icon(Icons.save_outlined),
                                       label: const Text('保存方案'),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: busy ? null : loadWorkspace,
+                                      icon: const Icon(Icons.restore),
+                                      label: const Text('加载暂存'),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: busy || !workspaceExists
+                                          ? null
+                                          : deleteWorkspace,
+                                      icon: const Icon(Icons.delete_outline),
+                                      label: const Text('删除暂存'),
                                     ),
                                     FilledButton.icon(
                                       onPressed: busy
@@ -6026,7 +7502,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                         label: const Text('编辑信息'),
                                       ),
                                     if (isCreated(weapon!['id']) &&
-                                        blueprintOf(weapon!['id'])['recovered'] !=
+                                        blueprintOf(
+                                              weapon!['id'],
+                                            )['recovered'] !=
                                             true)
                                       TextButton(
                                         onPressed: busy ? null : forget,
@@ -6040,13 +7518,19 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                                       label: const Text('导出发版包'),
                                     ),
                                     OutlinedButton.icon(
-                                      onPressed: busy ? null : exportMergePackage,
+                                      onPressed: busy
+                                          ? null
+                                          : exportMergePackage,
                                       icon: const Icon(Icons.call_merge),
                                       label: const Text('导出合并包'),
                                     ),
                                     OutlinedButton.icon(
-                                      onPressed: busy ? null : importMergePackage,
-                                      icon: const Icon(Icons.file_upload_outlined),
+                                      onPressed: busy
+                                          ? null
+                                          : importMergePackage,
+                                      icon: const Icon(
+                                        Icons.file_upload_outlined,
+                                      ),
                                       label: const Text('导入武器包'),
                                     ),
                                     if (dirty)
@@ -6164,12 +7648,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       });
       final track = tracks[state];
       if (track == null) {
-        setState(
-          () => message = '后端没有返回状态 $state 的轨道，请更新并重新编译管理后端。',
-        );
+        setState(() => message = '后端没有返回状态 $state 的轨道，请更新并重新编译管理后端。');
         return;
       }
-      final changed = await showDialog<bool>(
+      final changed = await showDialog<Map<String, List<Map<String, dynamic>>>>(
         context: context,
         builder: (_) => _StageTrackDialog(
           api: widget.api,
@@ -6180,15 +7662,20 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           ustates: ustateOptions,
         ),
       );
-      if (changed == true && mounted) {
-        // 保存改了编辑集，主页面的 revision 必须跟着更新：只清缓存不重拉的话，
-        // 下一次「保存方案」会带着旧 revision 提交，被"配置已被其他操作更新"拦下。
+      if (changed != null && mounted) {
         setState(() {
-          stageTracks = {};
-          scopeSaved = {};
-          message = '攻击范围已保存；点「应用到游戏」写入客户端配置包';
+          final stateScopes = <String, List<Map<String, dynamic>>>{
+            ...?scopeSaved[state],
+          };
+          for (final entry in changed.entries) {
+            stateScopes[entry.key] = [
+              for (final attr in entry.value) Map<String, dynamic>.from(attr),
+            ];
+          }
+          scopeSaved[state] = stateScopes;
+          stageTracks = {...stageTracks};
+          _markWorkspaceDirty('攻击范围已更新到当前内存工作区；点击“保存方案”提交暂存。');
         });
-        await load(prefer: weapon?['id'] as int?);
       }
     } catch (e) {
       if (mounted) {
@@ -6204,8 +7691,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 /// 招式「帧轨道 + 攻击范围」弹窗。左边是帧轨道（动作片断 + 特效/音效/接招窗口
 /// 等标记），右边编辑所选片断的攻击范围盒，并与人物受击盒一起预览（顶视 / 侧视）。
 ///
-/// 保存只落到编辑集（weapon_scope_set），要「应用到游戏」才写进客户端配置包 ——
-/// 和防护/招架那些卡片一致。
+/// 保存只返回当前弹窗的攻击范围编辑集，由父页面并入 WeaponWorkspace。
 class _StageTrackDialog extends StatefulWidget {
   const _StageTrackDialog({
     required this.api,
@@ -6271,8 +7757,10 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
   late List<Map<String, dynamic>> markers;
   late int frames;
   String? selected;
+
   /// 片断 → 六个属性（字符串）；saved 与块里自带的值合并后作为初值。
   final edits = <String, Map<String, String>>{};
+
   /// 真正改过的片断，只有这些会被提交（免得"打开就多出一个盒"）。
   final touched = <String>{};
   final defaults = <String, Map<String, String>>{};
@@ -6427,13 +7915,10 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
   }
 
   Future<void> save() async {
-    final payload = <String, dynamic>{};
+    final payload = <String, List<Map<String, dynamic>>>{};
     for (final key in touched) {
       final segment = _segmentByKey(key);
-      if (segment == null) continue;
-      // 条件分支的攻击范围不可保存：后端只改写动作块的第一份（无条件块），
-      // 强行回写会串到无条件片上。界面已把它做成只读，这里是第二道保险。
-      if (segmentConditional(segment)) continue;
+      if (segment == null || segmentConditional(segment)) continue;
       payload['${segment['id']}'] = [
         for (final entry in scopeFields.entries)
           {'key': entry.key, 'value': edits[key]![entry.key]!},
@@ -6443,44 +7928,41 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
       setState(() => message = '还没有改过任何片断。');
       return;
     }
-    setState(() {
-      busy = true;
-      message = '';
-    });
-    try {
-      await widget.api({
-        'operation': 'weapon_scope_set',
-        'weapon': widget.weapon,
-        'scopes': {'${widget.stage['state']}': payload},
-      });
-      if (!mounted) return;
-      Navigator.pop(context, true);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          message = '保存失败：$e';
-        });
-      }
-    }
+    closeDialog(payload);
+  }
+
+  void closeDialog([Map<String, List<Map<String, dynamic>>>? result]) {
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(result);
   }
 
   @override
   Widget build(BuildContext context) {
     final stage = widget.stage;
-    return AlertDialog(
-      title: Row(
-        children: [
-          const Icon(Icons.timeline, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              '帧轨道与攻击范围 · 状态 ${stage['state']} · ${stage['label'] ?? ''}',
-              style: const TextStyle(fontSize: 15),
+    return PopScope<Map<String, List<Map<String, dynamic>>>>(
+      canPop: !busy,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && !busy) closeDialog(result);
+      },
+      child: AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.timeline, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '帧轨道与攻击范围 · 状态 ${stage['state']} · ${stage['label'] ?? ''}',
+                style: const TextStyle(fontSize: 15),
+              ),
             ),
-          ),
-        ],
-      ),
+            IconButton(
+              tooltip: '关闭帧轨道与攻击范围',
+              visualDensity: VisualDensity.compact,
+              onPressed: busy ? null : () => closeDialog(),
+              icon: const Icon(Icons.close, size: 18),
+            ),
+          ],
+        ),
       contentPadding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
       content: SizedBox(
         width: 920,
@@ -6514,7 +7996,7 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: busy ? null : () => Navigator.pop(context, false),
+          onPressed: busy ? null : () => closeDialog(),
           child: const Text('关闭'),
         ),
         FilledButton(
@@ -6522,6 +8004,7 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
           child: Text(busy ? '保存中…' : '保存攻击范围'),
         ),
       ],
+      ),
     );
   }
 
@@ -6664,7 +8147,10 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
                 ),
                 child: Text(
                   '条件 · ${conditionLabel(cond)}',
-                  style: const TextStyle(fontSize: 10, color: Color(0xFF8A5A00)),
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF8A5A00),
+                  ),
                 ),
               ),
             ],
@@ -6836,10 +8322,7 @@ class _StageTrackDialogState extends State<_StageTrackDialog> {
               if (touched.contains(id))
                 Text(
                   '已修改',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.orange.shade900,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.orange.shade900),
                 ),
             ],
           ),
@@ -6939,7 +8422,11 @@ class _FrameTrackPainter extends CustomPainter {
       ..color = const Color(0xFF8794A0)
       ..strokeWidth = 1;
     const axisY = 16.0;
-    canvas.drawLine(const Offset(_pad, axisY), Offset(size.width - _pad, axisY), axis);
+    canvas.drawLine(
+      const Offset(_pad, axisY),
+      Offset(size.width - _pad, axisY),
+      axis,
+    );
     final step = span <= 40
         ? 5
         : span <= 120
@@ -6962,7 +8449,14 @@ class _FrameTrackPainter extends CustomPainter {
         ..color = const Color(0xFF087E83)
         ..strokeWidth = 1.4,
     );
-    _label(canvas, '真实 $total 帧', Offset(tail, axisY + 2), 9, const Color(0xFF087E83), 90);
+    _label(
+      canvas,
+      '真实 $total 帧',
+      Offset(tail, axisY + 2),
+      9,
+      const Color(0xFF087E83),
+      90,
+    );
 
     // 标记色带。
     for (final marker in markers) {
@@ -7000,7 +8494,8 @@ class _FrameTrackPainter extends CustomPainter {
               ? const Color(0xFF9CC7CA)
               : const Color(0xFFD8E0E6),
       );
-      final text = '${segment['name'] ?? ''}'
+      final text =
+          '${segment['name'] ?? ''}'
           '${conditional ? ' · 条件${segment['condition']}' : ''}'
           '${clip == 0 ? '' : ' · $clip帧'}'
           '${hasScope ? ' · 有攻击范围' : ''}';
@@ -7025,7 +8520,10 @@ class _FrameTrackPainter extends CustomPainter {
     double maxWidth,
   ) {
     final painter = TextPainter(
-      text: TextSpan(text: text, style: TextStyle(fontSize: size, color: color)),
+      text: TextSpan(
+        text: text,
+        style: TextStyle(fontSize: size, color: color),
+      ),
       textDirection: TextDirection.ltr,
       maxLines: 1,
       ellipsis: '…',
@@ -7047,6 +8545,7 @@ class PreviewBox {
   final String label;
   final Map<String, String> attrs;
   final Color color;
+
   /// 力场盒/投技盒按帧生效，这里带上窗口文字（空表示全程）。
   final String window;
 }
@@ -7086,8 +8585,10 @@ class _ScopePreviewPainter extends CustomPainter {
   String get _vSizeKey => side ? 'heigth' : 'length';
   String get _hName => side ? 'Z 前方' : 'X 左右';
   String get _vName => side ? 'Y 上下' : 'Z 前方';
+
   /// 垂直于屏幕、只能标注的那根轴。
   String get _depthName => side ? 'X 左右（指向屏幕内）' : 'Y 上下（指向屏幕外）';
+
   /// 纵轴是"地面"的那根轴时，v=0 就是地面。
   String get _groundName => side ? '地面 y=0' : '角色中轴 x=0';
 
@@ -7170,27 +8671,62 @@ class _ScopePreviewPainter extends CustomPainter {
     );
     // 轴线箭头。
     _arrow(canvas, Offset(origin.dx, top - 30), up: true, color: axis.color);
-    _arrow(canvas, Offset(size.width - right + 4, origin.dy), up: false, color: axis.color);
-    _label(canvas, _vName, Offset(origin.dx + 4, top - 42), 10,
-        const Color(0xFF37474F), 150);
-    _label(canvas, '$_hName →', Offset(size.width - right - 76, origin.dy + 3), 10,
-        const Color(0xFF37474F), 90);
+    _arrow(
+      canvas,
+      Offset(size.width - right + 4, origin.dy),
+      up: false,
+      color: axis.color,
+    );
+    _label(
+      canvas,
+      _vName,
+      Offset(origin.dx + 4, top - 42),
+      10,
+      const Color(0xFF37474F),
+      150,
+    );
+    _label(
+      canvas,
+      '$_hName →',
+      Offset(size.width - right - 76, origin.dy + 3),
+      10,
+      const Color(0xFF37474F),
+      90,
+    );
     // 垂直于屏幕的那根轴只能标字（放右上角，避开纵轴标签与刻度）。
-    _label(canvas, _depthName, Offset(size.width - right - 240, 6), 9,
-        const Color(0xFF78909C), 230);
+    _label(
+      canvas,
+      _depthName,
+      Offset(size.width - right - 240, 6),
+      9,
+      const Color(0xFF78909C),
+      230,
+    );
 
     // 刻度：横轴写在轴线下方，纵轴写在轴线左侧。
     for (var h = (hMin / step).floor() * step; h <= hMax; h += step) {
       if (h.abs() < step / 2) continue;
       final at = point(h, 0);
-      _label(canvas, _trim(h), Offset(at.dx - 10, origin.dy + 3), 8,
-          const Color(0xFF90A4AE), 24);
+      _label(
+        canvas,
+        _trim(h),
+        Offset(at.dx - 10, origin.dy + 3),
+        8,
+        const Color(0xFF90A4AE),
+        24,
+      );
     }
     for (var v = (vMin / step).floor() * step; v <= vMax; v += step) {
       if (v.abs() < step / 2) continue;
       final at = point(0, v);
-      _label(canvas, _trim(v), Offset(origin.dx - 42, at.dy - 5), 8,
-          const Color(0xFF90A4AE), 30);
+      _label(
+        canvas,
+        _trim(v),
+        Offset(origin.dx - 42, at.dy - 5),
+        8,
+        const Color(0xFF90A4AE),
+        30,
+      );
     }
     // 地面/中轴加粗标注。
     canvas.drawLine(
@@ -7200,8 +8736,14 @@ class _ScopePreviewPainter extends CustomPainter {
         ..color = const Color(0xFFB0BEC5)
         ..strokeWidth = 2,
     );
-    _label(canvas, _groundName, Offset(origin.dx + 4, origin.dy + 3), 9,
-        const Color(0xFF607D8B), 120);
+    _label(
+      canvas,
+      _groundName,
+      Offset(origin.dx + 4, origin.dy + 3),
+      9,
+      const Color(0xFF607D8B),
+      120,
+    );
 
     // ---- 盒子（按上面的画序，后画的压在上面） ----
     for (final box in list) {
@@ -7214,15 +8756,17 @@ class _ScopePreviewPainter extends CustomPainter {
         point(h + halfH, v - halfV),
       );
       if (rect.right - rect.left < 2) {
-        rect = Rect.fromLTRB(rect.left - 1, rect.top, rect.left + 1, rect.bottom);
+        rect = Rect.fromLTRB(
+          rect.left - 1,
+          rect.top,
+          rect.left + 1,
+          rect.bottom,
+        );
       }
       if (rect.bottom - rect.top < 2) {
         rect = Rect.fromLTRB(rect.left, rect.top - 1, rect.right, rect.top + 1);
       }
-      canvas.drawRect(
-        rect,
-        Paint()..color = box.color.withValues(alpha: .13),
-      );
+      canvas.drawRect(rect, Paint()..color = box.color.withValues(alpha: .13));
       canvas.drawRect(
         rect,
         Paint()
@@ -7261,7 +8805,12 @@ class _ScopePreviewPainter extends CustomPainter {
     return value.toStringAsFixed(1);
   }
 
-  void _arrow(Canvas canvas, Offset tip, {required bool up, required Color color}) {
+  void _arrow(
+    Canvas canvas,
+    Offset tip, {
+    required bool up,
+    required Color color,
+  }) {
     final paint = Paint()
       ..color = color
       ..style = PaintingStyle.fill;
@@ -7291,7 +8840,11 @@ class _ScopePreviewPainter extends CustomPainter {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(fontSize: size, color: color, fontWeight: FontWeight.w600),
+        style: TextStyle(
+          fontSize: size,
+          color: color,
+          fontWeight: FontWeight.w600,
+        ),
       ),
       textDirection: TextDirection.ltr,
       maxLines: 1,
@@ -7352,9 +8905,7 @@ class _ExportDialogState extends State<_ExportDialog> {
                 controlAffinity: ListTileControlAffinity.leading,
                 title: Text('导出全部自建武器（${widget.createdCount} 把）'),
                 subtitle: Text(
-                  all
-                      ? '包里带上每一把自建武器的素材'
-                      : '不勾则只导出「${widget.weaponName}」',
+                  all ? '包里带上每一把自建武器的素材' : '不勾则只导出「${widget.weaponName}」',
                   style: const TextStyle(fontSize: 11),
                 ),
               ),
@@ -7384,7 +8935,10 @@ class _ExportDialogState extends State<_ExportDialog> {
                   dense: true,
                   contentPadding: EdgeInsets.zero,
                   controlAffinity: ListTileControlAffinity.leading,
-                  title: Text(entry.value, style: const TextStyle(fontSize: 13)),
+                  title: Text(
+                    entry.value,
+                    style: const TextStyle(fontSize: 13),
+                  ),
                 ),
               if (disabled)
                 const Padding(
@@ -7409,7 +8963,10 @@ class _ExportDialogState extends State<_ExportDialog> {
               : () => Navigator.pop(context, {
                   'all': all,
                   'applied_only': appliedOnly,
-                  'include': [for (final k in packageSections.keys) if (selected.contains(k)) k],
+                  'include': [
+                    for (final k in packageSections.keys)
+                      if (selected.contains(k)) k,
+                  ],
                 }),
           child: const Text('导出'),
         ),
@@ -7427,14 +8984,7 @@ String frameKeyName(String code) {
     release = true;
     value = value.substring(1);
   }
-  const names = {
-    '7': 'X',
-    '8': 'C',
-    '9': 'Z',
-    '5': '跳',
-    '20': '前',
-    '21': '后',
-  };
+  const names = {'7': 'X', '8': 'C', '9': 'Z', '5': '跳', '20': '前', '21': '后'};
   final name = names[value] ?? '键$value';
   return release ? '松开$name' : name;
 }
@@ -7453,23 +9003,59 @@ String frameKeyLabelOf(String keycode) {
 /// 其余是整数框（`min`/`max` 与后端校验一致）。
 const _blockElementFields = <String, List<Map<String, dynamic>>>{
   'FakeUnAttack': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '0'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '0',
+    },
     {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '20'},
   ],
   'DirectionalInvc': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '0'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '0',
+    },
     {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '20'},
-    {'key': 'angleoffset', 'label': '朝向角度', 'min': -180, 'max': 180, 'default': '0'},
-    {'key': 'anglehalfrange', 'label': '半角范围（180=全身）', 'min': 0, 'max': 180, 'default': '55'},
+    {
+      'key': 'angleoffset',
+      'label': '朝向角度',
+      'min': -180,
+      'max': 180,
+      'default': '0',
+    },
+    {
+      'key': 'anglehalfrange',
+      'label': '半角范围（180=全身）',
+      'min': 0,
+      'max': 180,
+      'default': '55',
+    },
   ],
   'BodyGraze': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '0'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '0',
+    },
     {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '20'},
   ],
   'UState': [
     {'key': 'id', 'label': '状态', 'pick': 'ustate'},
     {'key': 'level', 'label': '等级', 'min': -999, 'max': 999, 'default': '1'},
-    {'key': 'duration', 'label': '时长(ms)', 'min': 0, 'max': 9999999, 'default': '1500'},
+    {
+      'key': 'duration',
+      'label': '时长(ms)',
+      'min': 0,
+      'max': 9999999,
+      'default': '1500',
+    },
   ],
   'Ustate': [
     {'key': 'id', 'label': '状态', 'pick': 'ustate'},
@@ -7477,40 +9063,125 @@ const _blockElementFields = <String, List<Map<String, dynamic>>>{
   'AddBuff': [
     {'key': 'frame', 'label': '触发帧', 'min': 0, 'max': 9999, 'default': '0'},
     {'key': 'UnNormalState', 'label': '状态', 'pick': 'ustate'},
-    {'key': 'UStateLevel', 'label': '等级', 'min': -999, 'max': 999, 'default': '1'},
-    {'key': 'UStateLastCycle', 'label': '时长(ms)', 'min': 0, 'max': 9999999, 'default': '1500'},
-    {'key': 'Scope', 'label': '作用对象', 'pick': 'scope', 'min': 0, 'max': 255, 'default': '1'},
+    {
+      'key': 'UStateLevel',
+      'label': '等级',
+      'min': -999,
+      'max': 999,
+      'default': '1',
+    },
+    {
+      'key': 'UStateLastCycle',
+      'label': '时长(ms)',
+      'min': 0,
+      'max': 9999999,
+      'default': '1500',
+    },
+    {
+      'key': 'Scope',
+      'label': '作用对象',
+      'pick': 'scope',
+      'min': 0,
+      'max': 255,
+      'default': '1',
+    },
     {'key': 'Param1', 'label': '范围（作用对象=3/5 时有效）', 'default': ''},
   ],
   'SelfControl': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '0'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '0',
+    },
     {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '30'},
-    {'key': 'turnspeed', 'label': '转向速度', 'min': 0, 'max': 9999, 'default': '90'},
-    {'key': 'movespeed', 'label': '移动速度', 'min': 0, 'max': 9999, 'default': '1'},
+    {
+      'key': 'turnspeed',
+      'label': '转向速度',
+      'min': 0,
+      'max': 9999,
+      'default': '90',
+    },
+    {
+      'key': 'movespeed',
+      'label': '移动速度',
+      'min': 0,
+      'max': 9999,
+      'default': '1',
+    },
     {'key': 'turnadd', 'label': '附加转向', 'min': 0, 'max': 999, 'default': '0'},
   ],
   'HideBody': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '3'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '3',
+    },
     {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '13'},
     {'key': 'type', 'label': '类型', 'min': 0, 'max': 9, 'default': '1'},
   ],
   'ForceField': [
-    {'key': 'startframe', 'label': '起始帧', 'min': 0, 'max': 9999, 'default': '0'},
-    {'key': 'endframe', 'label': '结束帧', 'min': 0, 'max': 9999, 'default': '999'},
+    {
+      'key': 'startframe',
+      'label': '起始帧',
+      'min': 0,
+      'max': 9999,
+      'default': '0',
+    },
+    {
+      'key': 'endframe',
+      'label': '结束帧',
+      'min': 0,
+      'max': 9999,
+      'default': '999',
+    },
     {'key': 'pushspeed', 'label': '推开速度', 'min': 0, 'max': 999, 'default': '5'},
-    {'key': 'friendlyfire', 'label': '误伤队友', 'min': 0, 'max': 1, 'default': '1'},
+    {
+      'key': 'friendlyfire',
+      'label': '误伤队友',
+      'min': 0,
+      'max': 1,
+      'default': '1',
+    },
   ],
 };
 
 /// 力场（ForceField）的子元素 <ScopeBox> 要填的字段。
 const _blockElementChildFields = <String, List<Map<String, dynamic>>>{
   'ForceField': [
-    {'key': 'centerx', 'label': '盒心 x', 'min': -9999, 'max': 9999, 'default': '0'},
-    {'key': 'centery', 'label': '盒心 y', 'min': -9999, 'max': 9999, 'default': '70'},
-    {'key': 'centerz', 'label': '盒心 z', 'min': -9999, 'max': 9999, 'default': '10'},
+    {
+      'key': 'centerx',
+      'label': '盒心 x',
+      'min': -9999,
+      'max': 9999,
+      'default': '0',
+    },
+    {
+      'key': 'centery',
+      'label': '盒心 y',
+      'min': -9999,
+      'max': 9999,
+      'default': '70',
+    },
+    {
+      'key': 'centerz',
+      'label': '盒心 z',
+      'min': -9999,
+      'max': 9999,
+      'default': '10',
+    },
     {'key': 'length', 'label': '长', 'min': -9999, 'max': 9999, 'default': '80'},
     {'key': 'width', 'label': '宽', 'min': -9999, 'max': 9999, 'default': '80'},
-    {'key': 'heigth', 'label': '高', 'min': -9999, 'max': 9999, 'default': '160'},
+    {
+      'key': 'heigth',
+      'label': '高',
+      'min': -9999,
+      'max': 9999,
+      'default': '160',
+    },
   ],
 };
 
@@ -7563,14 +9234,15 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
       for (final a in (widget.initial?['attrs'] as List? ?? []))
         '${(a as Map)['key']}': '${a['value']}',
     };
-    final firstUstate = widget.ustates.isNotEmpty ? widget.ustates.first['id'] : '';
+    final firstUstate = widget.ustates.isNotEmpty
+        ? widget.ustates.first['id']
+        : '';
     for (final field in _blockElementFields[widget.tag] ?? const []) {
       final key = '${field['key']}';
       final fallback = field['pick'] == 'ustate'
           ? '${firstUstate ?? ''}'
           : '${field['default'] ?? '0'}';
-      values[key] =
-          attrs.containsKey(key) ? attrs[key]! : fallback;
+      values[key] = attrs.containsKey(key) ? attrs[key]! : fallback;
     }
     final boxAttrs = <String, String>{
       for (final a in (widget.initial?['box'] as List? ?? []))
@@ -7633,8 +9305,10 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                   for (final field in fields) ...[
                     if (field['pick'] == 'ustate')
                       DropdownButtonFormField<String>(
-                        value: widget.ustates
-                                .any((u) => u['id'] == values['${field['key']}'])
+                        value:
+                            widget.ustates.any(
+                              (u) => u['id'] == values['${field['key']}'],
+                            )
                             ? values['${field['key']}']
                             : null,
                         decoration: InputDecoration(
@@ -7650,8 +9324,7 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                         ],
                         onChanged: (v) =>
                             setState(() => values['${field['key']}'] = v ?? ''),
-                        validator: (v) =>
-                            (v ?? '').isEmpty ? '请选择状态' : null,
+                        validator: (v) => (v ?? '').isEmpty ? '请选择状态' : null,
                       )
                     else if (field['pick'] == 'scope')
                       DropdownButtonFormField<String>(
@@ -7663,7 +9336,8 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                           labelText: '作用对象（谁吃到这个状态）',
                           isDense: true,
                           helperMaxLines: 2,
-                          helperText: '1 自己 / 2 自己+队友 / 3 自己+队友+范围 / '
+                          helperText:
+                              '1 自己 / 2 自己+队友 / 3 自己+队友+范围 / '
                               '4 敌人 / 5 敌人+范围 / 6 阵亡队友中等级最高者',
                         ),
                         items: [
@@ -7677,7 +9351,8 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                             DropdownMenuItem(
                               value: values['${field['key']}'],
                               child: Text(
-                                  '${values['${field['key']}']} · 未收录（原样保留）'),
+                                '${values['${field['key']}']} · 未收录（原样保留）',
+                              ),
                             ),
                         ],
                         onChanged: (v) => setState(() {
@@ -7685,13 +9360,13 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                           // （数据里确实存在 Scope=1 + Param1="0" 的写法）。
                           values['${field['key']}'] = v ?? '1';
                         }),
-                        validator: (v) =>
-                            (v ?? '').isEmpty ? '请选择作用对象' : null,
+                        validator: (v) => (v ?? '').isEmpty ? '请选择作用对象' : null,
                       )
                     else
                       TextFormField(
                         initialValue: values['${field['key']}'],
-                        enabled: field['key'] != 'Param1' ||
+                        enabled:
+                            field['key'] != 'Param1' ||
                             scopeUsesParam(values['Scope'] ?? ''),
                         decoration: InputDecoration(
                           labelText: '${field['label']}',
@@ -7700,15 +9375,22 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                         onChanged: (v) => values['${field['key']}'] = v,
                         validator: field['min'] == null
                             ? null
-                            : (v) => number(v, '${field['label']}',
-                                field['min'] as int, field['max'] as int),
+                            : (v) => number(
+                                v,
+                                '${field['label']}',
+                                field['min'] as int,
+                                field['max'] as int,
+                              ),
                       ),
                     const SizedBox(height: 8),
                   ],
-                if ((_blockElementChildFields[widget.tag] ?? const []).isNotEmpty) ...[
+                if ((_blockElementChildFields[widget.tag] ?? const [])
+                    .isNotEmpty) ...[
                   const SizedBox(height: 4),
-                  const Text('作用盒（子元素）',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  const Text(
+                    '作用盒（子元素）',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
                   const SizedBox(height: 4),
                   for (final field
                       in _blockElementChildFields[widget.tag] ?? const []) ...[
@@ -7720,8 +9402,11 @@ class _BlockElementDialogState extends State<_BlockElementDialog> {
                       ),
                       onChanged: (v) => values['${field['key']}'] = v,
                       validator: (v) => number(
-                          v, '${field['label']}',
-                          field['min'] as int, field['max'] as int),
+                        v,
+                        '${field['label']}',
+                        field['min'] as int,
+                        field['max'] as int,
+                      ),
                     ),
                     const SizedBox(height: 8),
                   ],
@@ -7804,8 +9489,18 @@ class _CounterDialogState extends State<_CounterDialog> {
 
   @override
   void dispose() {
-    for (final c in [start, end, offset, half, centerX, centerY, centerZ,
-      length, width, heigth]) {
+    for (final c in [
+      start,
+      end,
+      offset,
+      half,
+      centerX,
+      centerY,
+      centerZ,
+      length,
+      width,
+      heigth,
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -7841,8 +9536,13 @@ class _CounterDialogState extends State<_CounterDialog> {
     Navigator.pop(context, {'attrs': attrs, 'box': box});
   }
 
-  Widget numberField(TextEditingController controller, String label,
-      int min, int max, {double width = 108}) {
+  Widget numberField(
+    TextEditingController controller,
+    String label,
+    int min,
+    int max, {
+    double width = 108,
+  }) {
     return SizedBox(
       width: width,
       child: TextFormField(
@@ -7882,7 +9582,10 @@ class _CounterDialogState extends State<_CounterDialog> {
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
                   value: next.isEmpty ? null : next,
-                  decoration: const InputDecoration(labelText: '目标状态', isDense: true),
+                  decoration: const InputDecoration(
+                    labelText: '目标状态',
+                    isDense: true,
+                  ),
                   items: [
                     for (final s in widget.states)
                       DropdownMenuItem(value: s, child: Text(s)),
@@ -8218,45 +9921,150 @@ class _FrameSwitchDialogState extends State<_FrameSwitchDialog> {
 }
 
 /// 通用单选对话框：下拉太长时的搜索式挑选。
-/// 「动作分支」里的一段动作（动画名 + 帧区间 + 可选伤害）。
+/// 判断一个命中属性号是否属于服务端分配给动作分支的范围。
+bool isVariantSkillProID(
+  String value, {
+  int minimum = 910000000,
+  int maximum = 910999999,
+}) {
+  final number = int.tryParse(value.trim());
+  return number != null && number >= minimum && number <= maximum;
+}
+
+/// 在服务端给定范围内返回第一个未占用的动作分支命中属性号。
+String? nextVariantSkillProID(
+  Set<String> occupied, {
+  int minimum = 910000000,
+  int maximum = 910999999,
+}) {
+  for (var value = minimum; value <= maximum; value++) {
+    if (!occupied.contains('$value')) return '$value';
+  }
+  return null;
+}
+
+/// 「动作分支」里的一段动作（动画名 + 帧区间）。
+///
+/// skillproid / replayTimes / anmId 不在这里编辑，但要**原样带回**：它们是
+/// 「这一段还是原来那段」的凭据，丢了就等于把整段重建一遍（换号、丢卡帧）。
+/// skillproid 可变：用户可以在分支里给这一段增加命中属性，选完立刻显示 id。
+bool _isVariantSkillProID(String value) => isVariantSkillProID(value);
+
 class _VariantRow {
   _VariantRow({
     String name = '',
     String start = '0',
     String end = '0',
-    String damage = '',
-  })  : nameCtrl = TextEditingController(text: name),
-        startCtrl = TextEditingController(text: start),
-        endCtrl = TextEditingController(text: end),
-        damageCtrl = TextEditingController(text: damage);
+    this.segmentDamage = '',
+    this.skillproid = '',
+    this.templateSkillproid = '',
+    this.replayTimes = 0,
+    this.anmId = '',
+  }) : nameCtrl = TextEditingController(text: name),
+       startCtrl = TextEditingController(text: start),
+       endCtrl = TextEditingController(text: end),
+       replayCtrl = TextEditingController(text: '$replayTimes');
 
   final TextEditingController nameCtrl;
   final TextEditingController startCtrl;
   final TextEditingController endCtrl;
-  final TextEditingController damageCtrl;
+  final TextEditingController replayCtrl;
+  String segmentDamage;
+
+  /// 最终写入动作段的 ID。新段在点击“增加命中属性”时立即预分配。
+  String skillproid;
+
+  /// 创建该最终 ID 时复制的模板属性 ID；旧数据没有该字段时兼容回退。
+  String templateSkillproid;
+  int replayTimes;
+  final String anmId;
+
+  /// 这一段打不打人（挂没挂命中属性）。纯动作段 / 卡帧段不挂。
+  bool get hasHit => skillproid.trim().isNotEmpty;
 
   void dispose() {
     nameCtrl.dispose();
     startCtrl.dispose();
     endCtrl.dispose();
-    damageCtrl.dispose();
+    replayCtrl.dispose();
   }
+}
+
+/// 动作分支对话框要用的联动上下文（只读的三件套）。
+class _VariantHitContext {
+  const _VariantHitContext(
+    this.hits,
+    this.overrides,
+    this.applied,
+    this.occupied,
+    this.localReserved,
+    this.minimum,
+    this.maximum,
+  );
+
+  /// 本状态（含分支）的命中属性明细：id → {values, buff, variant}。
+  final Map<String, Map<String, dynamic>> hits;
+
+  /// 该状态当前的命中属性数值覆盖（rule['properties']）。
+  final Map<String, dynamic> overrides;
+
+  /// 已经写进配置包的命中属性号；不在里面的要先「应用到游戏」才能改数值。
+  final Set<String> applied;
+  final Set<String> occupied;
+  final Set<String> localReserved;
+  final int minimum;
+  final int maximum;
 }
 
 /// 编辑某状态的一条动作分支：选触发状态 + 定义动作段。
 /// 段列表留空 = 交给后端照抄无条件块，只换命中编号（skillproid）。
+///
+/// 增加命中属性时预占最终编号并直接编辑；数值保存在 rule['properties'][id]，
+/// 与连招命中编辑器共享。取消对话框不会改动父级草稿。
 class _VariantBranchDialog extends StatefulWidget {
   const _VariantBranchDialog({
     required this.ustates,
     required this.stateLabel,
     required this.initial,
     required this.baseSegments,
+    required this.api,
+    required this.hits,
+    required this.hitOverrides,
+    required this.fields,
+    required this.effects,
+    required this.hitOptions,
+    required this.allowed,
+    required this.applied,
+    required this.occupied,
+    required this.localReserved,
+    required this.minimum,
+    required this.maximum,
   });
 
   final List<Map<String, String>> ustates;
   final String stateLabel;
   final Map<String, dynamic>? initial;
   final List<Map<String, dynamic>> baseSegments;
+
+  /// 客户端里现成的命中属性目录按需拉取（weapon_remap_options），用来给某一段挑模板。
+  final Future<dynamic> Function(Map<String, dynamic>) api;
+
+  /// 本状态（含分支）的命中属性明细：id → {values, buff, variant}。
+  final Map<String, Map<String, dynamic>> hits;
+
+  /// 本状态当前的命中属性数值覆盖（rule['properties']）。
+  final Map<String, dynamic> hitOverrides;
+  final List fields;
+  final List effects;
+  final Map<String, dynamic> hitOptions;
+  final Map<String, dynamic> allowed;
+
+  /// 已经写进配置包的命中属性号；仅用于标注待应用状态，不限制草稿编辑。
+  final Set<String> applied;
+  final Set<String> occupied;
+  final Set<String> localReserved;
+  final int minimum;
+  final int maximum;
 
   @override
   State<_VariantBranchDialog> createState() => _VariantBranchDialogState();
@@ -8266,22 +10074,85 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
   String condition = '';
   final rows = <_VariantRow>[];
   final dropped = <_VariantRow>[];
+  final overrides = <String, Map<String, dynamic>>{};
+  final reservedIDs = <String>{};
+  final sessionReservedIDs = <String>{};
+  late int nextReservedID;
   String error = '';
 
   @override
   void initState() {
     super.initState();
+    reservedIDs.addAll(widget.occupied);
+    reservedIDs.addAll(widget.hits.keys.where(_isVariantSkillProID));
+    reservedIDs.addAll(widget.applied.where(_isVariantSkillProID));
+    nextReservedID = widget.minimum;
     final initial = widget.initial;
     if (initial != null) {
       condition = '${initial['condition'] ?? ''}';
-      for (final s in (initial['segments'] as List? ?? [])) {
+      final initialSegments = initial['segments'] as List? ?? const [];
+      for (final s in initialSegments) {
         final map = Map<String, dynamic>.from(s as Map);
-        rows.add(_VariantRow(
-          name: '${map['name'] ?? ''}',
-          start: '${map['start'] ?? 0}',
-          end: '${map['end'] ?? 0}',
-          damage: map['damage'] == null ? '' : '${map['damage']}',
-        ));
+        final rawID = '${map['skillproid'] ?? ''}'.trim();
+        final legacy =
+            initial['origin'] == 'saved' &&
+            '${map['template_skillproid'] ?? ''}'.trim().isEmpty &&
+            rawID.isNotEmpty &&
+            !_isVariantSkillProID(rawID);
+        if (!legacy && rawID.isNotEmpty) reservedIDs.add(rawID);
+      }
+      for (final s in initialSegments) {
+        final map = Map<String, dynamic>.from(s as Map);
+        var finalID = '${map['skillproid'] ?? ''}'.trim();
+        var templateID = '${map['template_skillproid'] ?? ''}'.trim();
+        // 仅后端明确标记为已保存的旧作者态才把旧字段解释为模板号。
+        if (initial['origin'] == 'saved' &&
+            templateID.isEmpty &&
+            finalID.isNotEmpty &&
+            !_isVariantSkillProID(finalID)) {
+          templateID = finalID;
+          final allocated = reserveID();
+          if (allocated.isNotEmpty) finalID = allocated;
+          if (allocated.isNotEmpty && widget.hitOverrides[templateID] is Map) {
+            overrides[finalID] = Map<String, dynamic>.from(
+              widget.hitOverrides[templateID] as Map,
+            );
+          }
+        }
+        if (finalID.isNotEmpty) {
+          reservedIDs.add(finalID);
+          if (widget.localReserved.contains(finalID)) {
+            sessionReservedIDs.add(finalID);
+          }
+        }
+        rows.add(
+          _VariantRow(
+            name: '${map['name'] ?? ''}',
+            start: '${map['start'] ?? 0}',
+            end: '${map['end'] ?? 0}',
+            segmentDamage: map['damage'] == null ? '' : '${map['damage']}',
+            skillproid: finalID,
+            templateSkillproid: templateID,
+            replayTimes: int.tryParse('${map['replay_times'] ?? 0}') ?? 0,
+            anmId: '${map['anm_id'] ?? ''}',
+          ),
+        );
+      }
+    }
+    // 深拷一份，取消时不影响外部；段里用到的号才带进来。
+    widget.hitOverrides.forEach((id, value) {
+      if (value is Map) {
+        overrides['$id'] = Map<String, dynamic>.from(value);
+      }
+    });
+    for (final row in rows) {
+      final damage = num.tryParse(row.segmentDamage);
+      if (row.hasHit &&
+          !widget.hits.containsKey(row.skillproid) &&
+          damage != null) {
+        overrides
+            .putIfAbsent(row.skillproid, () => <String, dynamic>{})
+            .putIfAbsent('SkillDamage', () => damage);
       }
     }
   }
@@ -8296,21 +10167,211 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
 
   void copyBase() {
     setState(() {
+      final hitTemplates = widget.baseSegments
+          .where(
+            (segment) => '${segment['skillproid'] ?? ''}'.trim().isNotEmpty,
+          )
+          .length;
+      final reusable = {...reservedIDs};
+      for (final row in rows) {
+        final id = row.skillproid.trim();
+        if (sessionReservedIDs.contains(id)) reusable.remove(id);
+      }
+      final available =
+          widget.maximum -
+          widget.minimum +
+          1 -
+          reusable.where((id) {
+            final value = int.tryParse(id);
+            return value != null &&
+                value >= widget.minimum &&
+                value <= widget.maximum;
+          }).length;
+      if (hitTemplates > available) {
+        error = '变体命中属性编号不足，无法照抄全部命中段';
+        return;
+      }
+      for (final row in rows) {
+        releaseID(row.skillproid.trim());
+        overrides.remove(row.skillproid.trim());
+      }
       dropped.addAll(rows);
       rows.clear();
       for (final s in widget.baseSegments) {
-        rows.add(_VariantRow(
-          name: '${s['name'] ?? ''}',
-          start: '${s['start'] ?? 0}',
-          end: '${s['end'] ?? 0}',
-          damage: s['damage'] == null ? '' : '${s['damage']}',
-        ));
+        final source = '${s['skillproid'] ?? ''}'.trim();
+        final id = source.isEmpty ? '' : reserveID();
+        if (id.isNotEmpty) {
+          final damage = num.tryParse('${s['damage'] ?? ''}');
+          overrides[id] = {
+            if (widget.hitOverrides[source] is Map)
+              ...Map<String, dynamic>.from(widget.hitOverrides[source] as Map),
+            if (damage != null) 'SkillDamage': damage,
+          };
+        }
+        rows.add(
+          _VariantRow(
+            name: '${s['name'] ?? ''}',
+            start: '${s['start'] ?? 0}',
+            end: '${s['end'] ?? 0}',
+            // 无条件块的命中编号作为模板源；命中段同步预分配最终 ID，纯动作段保持无号。
+            segmentDamage: s['damage'] == null ? '' : '${s['damage']}',
+            skillproid: id,
+            templateSkillproid: '${s['skillproid'] ?? ''}',
+            replayTimes: int.tryParse('${s['replay_times'] ?? 0}') ?? 0,
+            anmId: '${s['anm_id'] ?? ''}',
+          ),
+        );
       }
       error = '';
     });
   }
 
+  String reserveID() {
+    final id = nextVariantSkillProID(
+      reservedIDs,
+      minimum: nextReservedID,
+      maximum: widget.maximum,
+    );
+    if (id == null) {
+      error = '变体命中属性编号已用完（${widget.minimum}–${widget.maximum}）';
+      return '';
+    }
+    final value = int.parse(id);
+    nextReservedID = value + 1;
+    reservedIDs.add(id);
+    sessionReservedIDs.add(id);
+    return id;
+  }
+
+  void releaseID(String id) {
+    if (sessionReservedIDs.remove(id)) {
+      reservedIDs.remove(id);
+      final value = int.tryParse(id);
+      if (value != null && value < nextReservedID) nextReservedID = value;
+    }
+  }
+
+  bool hasTemplateValues(String id) =>
+      id.isNotEmpty && widget.hits[id]?['values'] is Map;
+
+  String automaticTemplateFor(int index) {
+    final current = rows[index].templateSkillproid.trim();
+    if (hasTemplateValues(current)) return current;
+    final start = int.tryParse(rows[index].startCtrl.text.trim()) ?? 0;
+    final end = int.tryParse(rows[index].endCtrl.text.trim()) ?? start;
+    for (final segment in rows) {
+      final source = segment.templateSkillproid.trim().isNotEmpty
+          ? segment.templateSkillproid.trim()
+          : segment.skillproid.trim();
+      final from = int.tryParse(segment.startCtrl.text.trim()) ?? 0;
+      final to = int.tryParse(segment.endCtrl.text.trim()) ?? from;
+      if (hasTemplateValues(source) && from <= end && to >= start)
+        return source;
+    }
+    for (final segment in widget.baseSegments) {
+      final source = '${segment['skillproid'] ?? ''}'.trim();
+      final from = int.tryParse('${segment['start'] ?? 0}') ?? 0;
+      final to = int.tryParse('${segment['end'] ?? from}') ?? from;
+      if (hasTemplateValues(source) && from <= end && to >= start)
+        return source;
+    }
+    for (final segment in rows) {
+      final source = segment.templateSkillproid.trim().isNotEmpty
+          ? segment.templateSkillproid.trim()
+          : segment.skillproid.trim();
+      if (hasTemplateValues(source)) return source;
+    }
+    for (final segment in widget.baseSegments) {
+      final source = '${segment['skillproid'] ?? ''}'.trim();
+      if (hasTemplateValues(source)) return source;
+    }
+    return '';
+  }
+
+  /// 点击后立即预占最终分支 ID并打开共用的命中属性编辑器，不再先让用户挑模板。
+  Future<void> addHit(int index) async {
+    final template = automaticTemplateFor(index);
+    if (template.isEmpty) {
+      setState(() => error = '当前动作没有带实际数值的命中属性模板，暂不能增加命中属性');
+      return;
+    }
+    final row = rows[index];
+    final oldID = row.skillproid.trim();
+    releaseID(oldID);
+    overrides.remove(oldID);
+    final id = reserveID();
+    if (id.isEmpty) {
+      setState(() {});
+      return;
+    }
+    setState(() {
+      row.templateSkillproid = template;
+      row.skillproid = id;
+      row.replayTimes = 0;
+      row.replayCtrl.text = '0';
+      error = '';
+    });
+    await editHit(index);
+  }
+
+  /// 改某一段命中属性的数值。预占但尚未应用的 ID也允许编辑。
+  Future<void> editHit(int index) async {
+    final row = rows[index];
+    final id = row.skillproid.trim();
+    if (id.isEmpty) return;
+    final source = row.templateSkillproid.trim();
+    final hit =
+        widget.hits[id] ?? (source.isEmpty ? null : widget.hits[source]);
+    final initial = Map<String, dynamic>.from(overrides[id] ?? const {});
+    if (!widget.hits.containsKey(id) &&
+        row.segmentDamage.isNotEmpty &&
+        !overrides.containsKey(id)) {
+      final damage = num.tryParse(row.segmentDamage);
+      if (damage != null) initial.putIfAbsent('SkillDamage', () => damage);
+    }
+    final original = <String, dynamic>{
+      for (final field in widget.fields)
+        '${field['key']}': '${(hit?['values'] as Map?)?[field['key']] ?? 0}',
+    };
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _HitPropertyDialog(
+        hitId: id,
+        variant: condition,
+        original: original,
+        initial: initial,
+        fields: widget.fields,
+        effects: widget.effects,
+        hitOptions: widget.hitOptions,
+        allowed: widget.allowed,
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      overrides[id] = result;
+      if (row.segmentDamage.isNotEmpty) {
+        row.segmentDamage =
+            '${result['SkillDamage'] ?? original['SkillDamage'] ?? ''}';
+      }
+      error = '';
+    });
+  }
+
+  dynamic _normalizeVariantDamage(dynamic value) {
+    if (value is num) return value;
+    return num.tryParse('$value'.trim()) ?? value;
+  }
+
   void submit() {
+    if (rows.any(
+      (row) =>
+          row.skillproid.isNotEmpty &&
+          row.skillproid == row.templateSkillproid &&
+          !_isVariantSkillProID(row.skillproid),
+    )) {
+      setState(() => error = '变体命中属性编号不足，无法转换旧分支；请清除命中属性或取消');
+      return;
+    }
     final cond = int.tryParse(condition.trim());
     if (cond == null || cond <= 0) {
       setState(() => error = '请选择触发状态（必须是 ustate 编号）');
@@ -8326,27 +10387,52 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
       }
       final start = int.tryParse(r.startCtrl.text.trim());
       final end = int.tryParse(r.endCtrl.text.trim());
-      if (start == null || end == null || end < start) {
-        setState(() => error = '第 ${i + 1} 段的帧区间不合法（结束帧需 ≥ 开始帧）');
+      final replay = int.tryParse(r.replayCtrl.text.trim());
+      if (start == null || end == null || start < 0 || end < start) {
+        setState(() => error = '第 ${i + 1} 段的帧区间不合法（需从 0 开始且结束帧 ≥ 开始帧）');
         return;
       }
-      final damageText = r.damageCtrl.text.trim();
-      double? damage;
-      if (damageText.isNotEmpty) {
-        damage = double.tryParse(damageText);
-        if (damage == null) {
-          setState(() => error = '第 ${i + 1} 段的伤害不是数字');
-          return;
-        }
+      if (replay == null || replay < 0) {
+        setState(() => error = '第 ${i + 1} 段的卡帧必须是大于等于 0 的整数');
+        return;
       }
       segments.add({
         'name': name,
         'start': start,
         'end': end,
-        if (damage != null) 'damage': damage,
+        // 原样回带：不走这两行的话，打开分支再点「确定」就会把这一段重建成新号
+        // （旧号变孤儿、卡帧丢失），也就是「同一份配置每次保存都不一样」。
+        if (r.skillproid.trim().isNotEmpty) 'skillproid': r.skillproid.trim(),
+        if (r.templateSkillproid.trim().isNotEmpty)
+          'template_skillproid': r.templateSkillproid.trim(),
+        if (overrides[r.skillproid]?['SkillDamage'] != null ||
+            r.segmentDamage.isNotEmpty)
+          'damage': _normalizeVariantDamage(
+            overrides[r.skillproid]?['SkillDamage'] ?? r.segmentDamage,
+          ),
+        if (r.skillproid.trim().isNotEmpty || replay > 0)
+          'replay_times': replay,
+        if (r.anmId.isNotEmpty) 'anm_id': r.anmId,
       });
     }
-    Navigator.pop(context, {'condition': cond, 'segments': segments});
+    // 只回带这一段仍挂着的号：段被删掉时，它的命中属性数值也一起撤掉
+    // （真删属性节点靠后端应用时清孤儿，这里先保证规则不再引用它）。
+    final keep = {
+      for (final s in segments)
+        if ('${s['skillproid'] ?? ''}'.isNotEmpty) '${s['skillproid']}',
+    };
+    final hitProperties = <String, dynamic>{
+      for (final id in keep)
+        id: Map<String, dynamic>.from(
+          overrides[id] ?? const <String, dynamic>{},
+        ),
+    };
+    Navigator.pop(context, {
+      'condition': cond,
+      'segments': segments,
+      'hit_properties': hitProperties,
+      'local_ids': sessionReservedIDs.toList(),
+    });
   }
 
   @override
@@ -8355,7 +10441,7 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     return AlertDialog(
       title: Text('动作分支 · ${widget.stateLabel}'),
       content: SizedBox(
-        width: 480,
+        width: 620,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -8380,88 +10466,39 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
               Row(
                 children: [
                   const Expanded(
-                    child: Text('动作段（留空 = 照抄本招动作段，只换命中编号）',
-                        style: TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w600)),
+                    child: Text(
+                      '动作段（留空 = 照抄本招动作段，只换命中编号）',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                   if (widget.baseSegments.isNotEmpty)
                     TextButton.icon(
                       onPressed: copyBase,
                       icon: const Icon(Icons.copy_all, size: 15),
-                      label:
-                          const Text('照抄本招', style: TextStyle(fontSize: 12)),
+                      label: const Text('照抄本招', style: TextStyle(fontSize: 12)),
                     ),
                 ],
               ),
-              for (var i = 0; i < rows.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        flex: 3,
-                        child: TextFormField(
-                          controller: rows[i].nameCtrl,
-                          decoration: const InputDecoration(
-                              labelText: '动画名', isDense: true),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 60,
-                        child: TextFormField(
-                          controller: rows[i].startCtrl,
-                          decoration:
-                              const InputDecoration(labelText: '起', isDense: true),
-                          keyboardType: TextInputType.number,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 60,
-                        child: TextFormField(
-                          controller: rows[i].endCtrl,
-                          decoration:
-                              const InputDecoration(labelText: '止', isDense: true),
-                          keyboardType: TextInputType.number,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      SizedBox(
-                        width: 72,
-                        child: TextFormField(
-                          controller: rows[i].damageCtrl,
-                          decoration: const InputDecoration(
-                              labelText: '伤害', isDense: true),
-                          keyboardType: TextInputType.number,
-                        ),
-                      ),
-                      GestureDetector(
-                        onTap: () => setState(() {
-                          dropped.add(rows.removeAt(i));
-                        }),
-                        child: const Padding(
-                          padding: EdgeInsets.only(left: 6, top: 10),
-                          child: Icon(Icons.close,
-                              size: 16, color: Colors.deepOrange),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+              for (var i = 0; i < rows.length; i++) buildRow(i),
               TextButton.icon(
-                onPressed: () => setState(() => rows.add(_VariantRow())),
+                onPressed: () =>
+                    setState(() => rows.add(_VariantRow(replayTimes: 2))),
                 icon: const Icon(Icons.add, size: 16),
-                label: const Text('添加一段', style: TextStyle(fontSize: 12)),
+                label: const Text('添加一段（默认卡帧）', style: TextStyle(fontSize: 12)),
               ),
               if (error.isNotEmpty)
-                Text(error,
-                    style: const TextStyle(fontSize: 12, color: Colors.red)),
+                Text(
+                  error,
+                  style: const TextStyle(fontSize: 12, color: Colors.red),
+                ),
               const SizedBox(height: 4),
               const Text(
                 '保存后还要点「应用到游戏」才会写进配置包；分支块会新分一份命中编号（skillproid）'
-                '并克隆命中属性，不影响原本的无条件动作。',
+                '并克隆命中属性，不影响原本的无条件动作。点某一段的命中属性编号可以直接改它的'
+                '伤害 / 受击动作，改的就是「连招与命中效果」页里那条。',
                 style: TextStyle(fontSize: 11, color: Colors.black54),
               ),
             ],
@@ -8469,6 +10506,408 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
         ),
       ),
       actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: submit, child: const Text('确定')),
+      ],
+    );
+  }
+
+  /// 一段动作：帧区间 + 伤害 + 该段的命中属性（挑模板 / 看编号 / 点开改数值）。
+  Widget buildRow(int index) {
+    final row = rows[index];
+    final id = row.skillproid.trim();
+    final pending = id.isNotEmpty && !widget.applied.contains(id);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 3,
+                child: TextFormField(
+                  controller: row.nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '动画名',
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 60,
+                child: TextFormField(
+                  controller: row.startCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '起',
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 60,
+                child: TextFormField(
+                  controller: row.endCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '止',
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 64,
+                child: TextFormField(
+                  controller: row.replayCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '卡帧',
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 6),
+              GestureDetector(
+                onTap: () => setState(() {
+                  final removed = rows.removeAt(index);
+                  final id = removed.skillproid.trim();
+                  if (id.isNotEmpty) {
+                    releaseID(id);
+                    overrides.remove(id);
+                  }
+                  dropped.add(removed);
+                }),
+                child: const Padding(
+                  padding: EdgeInsets.only(left: 6, top: 10),
+                  child: Icon(Icons.close, size: 16, color: Colors.deepOrange),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4, top: 2, bottom: 6),
+            child: Row(
+              children: [
+                if (id.isEmpty)
+                  TextButton.icon(
+                    onPressed: () => addHit(index),
+                    icon: const Icon(Icons.add_circle_outline, size: 14),
+                    label: const Text('增加命中属性', style: TextStyle(fontSize: 11)),
+                  )
+                else ...[
+                  ActionChip(
+                    avatar: Icon(
+                      pending ? Icons.hourglass_top : Icons.gps_fixed,
+                      size: 14,
+                    ),
+                    label: Text(
+                      pending ? '命中属性 $id（待应用）' : '命中属性 $id',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    onPressed: () => editHit(index),
+                  ),
+                  const SizedBox(width: 6),
+                  TextButton(
+                    onPressed: () => setState(() {
+                      releaseID(id);
+                      overrides.remove(id);
+                      row.skillproid = '';
+                      row.templateSkillproid = '';
+                      row.segmentDamage = '';
+                      row.replayTimes = 2;
+                      row.replayCtrl.text = '2';
+                    }),
+                    child: const Text('清除', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 命中属性数值编辑（动作分支里点编号打开的就是它）。
+///
+/// 字段与「连招与命中效果」页里的命中属性编辑完全同源：同样的 propertyFields、
+/// 同样的受击动作选项表、同样的命中参数枚举。保存的是同一份 rule['properties'][id]。
+class _HitPropertyDialog extends StatefulWidget {
+  const _HitPropertyDialog({
+    required this.hitId,
+    required this.variant,
+    required this.original,
+    required this.initial,
+    required this.fields,
+    required this.effects,
+    required this.hitOptions,
+    required this.allowed,
+  });
+
+  final String hitId;
+  final String variant;
+  final Map<String, dynamic> original;
+  final Map<String, dynamic> initial;
+  final List fields;
+  final List effects;
+  final Map<String, dynamic> hitOptions;
+  final Map<String, dynamic> allowed;
+
+  @override
+  State<_HitPropertyDialog> createState() => _HitPropertyDialogState();
+}
+
+class _HitPropertyDialogState extends State<_HitPropertyDialog> {
+  late final Map<String, dynamic> values;
+  String reaction = 'original';
+  final damageCtrls = <String, TextEditingController>{};
+  String error = '';
+
+  @override
+  void initState() {
+    super.initState();
+    values = Map<String, dynamic>.from(widget.initial);
+    for (final field in widget.fields) {
+      final key = '${field['key']}';
+      final current = values[key] ?? widget.original[key];
+      if (key == 'SkillDamage' || key == 'SkillEnhanceDamage') {
+        damageCtrls[key] = TextEditingController(
+          text: values.containsKey(key) ? '$current' : '',
+        );
+      }
+    }
+    reaction = widget.initial.isEmpty ? 'original' : 'custom';
+  }
+
+  @override
+  void dispose() {
+    for (final c in damageCtrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  int valueOf(String key) {
+    final raw = values[key] ?? widget.original[key] ?? 0;
+    return int.tryParse('$raw') ?? 0;
+  }
+
+  /// 一个下拉字段的候选项：客户端在用的值都收，不在选项表里的原值也保留。
+  List<Map<String, dynamic>> optionsFor(String key, int current) {
+    final known = (widget.hitOptions[key] as List? ?? [])
+        .map((o) => Map<String, dynamic>.from(o as Map))
+        .toList();
+    final values = {for (final o in known) o['value'] as int};
+    if (!values.contains(current)) {
+      known.add({
+        'value': current,
+        'label': '客户端原生值（未收录音译）',
+        'detail': '这个编号在官方配置里用到了，但暂无中文说明，保留原值更安全',
+      });
+    }
+    return known;
+  }
+
+  void submit() {
+    final out = <String, dynamic>{};
+    for (final entry in damageCtrls.entries) {
+      final text = entry.value.text.trim();
+      if (text.isEmpty) continue;
+      final parsed = num.tryParse(text);
+      Map<String, dynamic>? field;
+      for (final candidate in widget.fields) {
+        if ('${candidate['key']}' == entry.key) {
+          field = Map<String, dynamic>.from(candidate as Map);
+          break;
+        }
+      }
+      if (parsed == null || field == null) {
+        setState(() => error = '伤害不是数字');
+        return;
+      }
+      if (parsed < field['min'] || parsed > field['max']) {
+        setState(() => error = '${field?['name'] ?? entry.key} 超出范围');
+        return;
+      }
+      out[entry.key] = parsed;
+    }
+    // 非伤害字段只在用户真的改过时才写，避免把原生值整套抄进规则。
+    values.forEach((key, value) {
+      if (key == 'SkillDamage' || key == 'SkillEnhanceDamage') return;
+      final original = int.tryParse('${widget.original[key] ?? 0}') ?? 0;
+      if (value is num && value.toInt() != original) out[key] = value;
+    });
+    if (reaction == 'original') {
+      out.removeWhere(
+        (key, _) => key != 'SkillDamage' && key != 'SkillEnhanceDamage',
+      );
+    }
+    Navigator.pop(context, out);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final damageFields = widget.fields
+        .where(
+          (f) =>
+              '${f['key']}' == 'SkillDamage' ||
+              '${f['key']}' == 'SkillEnhanceDamage',
+        )
+        .toList();
+    final advanced = widget.fields.where((f) => f['oneshot'] == true).toList();
+    final branch = widget.variant.trim().isEmpty
+        ? ''
+        : ' · 分支 ${widget.variant}';
+    return AlertDialog(
+      title: Text('命中属性 ${widget.hitId}$branch'),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: reaction,
+                decoration: const InputDecoration(labelText: '受击动作'),
+                items: [
+                  const DropdownMenuItem(
+                    value: 'original',
+                    child: Text('默认（客户端原生）'),
+                  ),
+                  if (reaction == 'custom')
+                    const DropdownMenuItem(
+                      value: 'custom',
+                      enabled: false,
+                      child: Text('自定义受击动作'),
+                    ),
+                  for (final effect in widget.effects)
+                    DropdownMenuItem(
+                      value: '${effect['id']}',
+                      child: Text(
+                        '${effect['id']}' == 'float'
+                            ? '上升 / 悬浮'
+                            : '${effect['name']}',
+                      ),
+                    ),
+                ],
+                onChanged: (v) => setState(() {
+                  reaction = v ?? 'original';
+                  if (reaction == 'original') {
+                    values.removeWhere(
+                      (key, _) =>
+                          key != 'SkillDamage' && key != 'SkillEnhanceDamage',
+                    );
+                  } else {
+                    for (final effect in widget.effects) {
+                      if ('${effect['id']}' == reaction) {
+                        values.addAll(
+                          Map<String, dynamic>.from(effect['values'] as Map),
+                        );
+                      }
+                    }
+                  }
+                }),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final field in damageFields)
+                    SizedBox(
+                      width: 170,
+                      child: TextFormField(
+                        controller: damageCtrls['${field['key']}'],
+                        decoration: InputDecoration(
+                          labelText: '${field['name']}',
+                          helperText:
+                              '默认 ${widget.original['${field['key']}']}',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text(
+                  '击飞参数 / 高级设置',
+                  style: TextStyle(fontSize: 13),
+                ),
+                children: [
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      for (final field in advanced)
+                        SizedBox(
+                          width: 250,
+                          child: DropdownButtonFormField<int>(
+                            isExpanded: true,
+                            initialValue: valueOf('${field['key']}'),
+                            decoration: InputDecoration(
+                              labelText: '${field['name']}（${field['key']}）',
+                              helperText:
+                                  '默认 ${widget.original['${field['key']}']}',
+                            ),
+                            items: [
+                              for (final option in optionsFor(
+                                '${field['key']}',
+                                valueOf('${field['key']}'),
+                              ))
+                                DropdownMenuItem<int>(
+                                  value: option['value'] as int,
+                                  child: Text(
+                                    '${option['label']}（${option['value']}）',
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            onChanged: (v) => setState(() {
+                              values['${field['key']}'] = v;
+                              reaction = 'custom';
+                            }),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+              if (error.isNotEmpty)
+                Text(
+                  error,
+                  style: const TextStyle(fontSize: 12, color: Colors.red),
+                ),
+              const SizedBox(height: 4),
+              const Text(
+                '这里改的是「连招与命中效果」页里那条同名命中属性，两处联动。'
+                '「清除全部改动」会让它回到客户端原生数值。',
+                style: TextStyle(fontSize: 11, color: Colors.black54),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, <String, dynamic>{}),
+          child: const Text('清除全部改动'),
+        ),
         TextButton(
           onPressed: () => Navigator.pop(context),
           child: const Text('取消'),
@@ -8746,7 +11185,9 @@ class _BlueprintDialogState extends State<_BlueprintDialog> {
                         keyboardType: TextInputType.number,
                         validator: (text) {
                           final v = int.tryParse((text ?? '').trim());
-                          if (v == null || v < widget.minID || v > widget.maxID) {
+                          if (v == null ||
+                              v < widget.minID ||
+                              v > widget.maxID) {
                             return '编号超出预留区间';
                           }
                           if (widget.usedIDs.contains('$v')) return '编号已被占用';
@@ -8901,9 +11342,7 @@ class _BlueprintDialogState extends State<_BlueprintDialog> {
                 TextFormField(
                   controller: note,
                   maxLength: 200,
-                  decoration: const InputDecoration(
-                    labelText: '备注（可选，仅本地记录）',
-                  ),
+                  decoration: const InputDecoration(labelText: '备注（可选，仅本地记录）'),
                 ),
               ],
             ),
@@ -9014,9 +11453,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  '编号、供体、子类与模型不可修改；改动在「应用到游戏」后写入配置包。',
-                ),
+                const Text('编号、供体、子类与模型不可修改；改动在「应用到游戏」后写入配置包。'),
                 const SizedBox(height: 16),
                 TextFormField(
                   controller: name,
@@ -9072,9 +11509,7 @@ class _BlueprintInfoDialogState extends State<_BlueprintInfoDialog> {
                 TextFormField(
                   controller: note,
                   maxLength: 200,
-                  decoration: const InputDecoration(
-                    labelText: '备注（仅本地记录）',
-                  ),
+                  decoration: const InputDecoration(labelText: '备注（仅本地记录）'),
                 ),
               ],
             ),
@@ -9111,15 +11546,15 @@ class _ComboDonorDialogState extends State<_ComboDonorDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final suggestedFirst = [...widget.candidates]..sort((a, b) {
-      if (a['id'] == widget.suggested) return -1;
-      if (b['id'] == widget.suggested) return 1;
-      return (a['id'] as int).compareTo(b['id'] as int);
-    });
+    final suggestedFirst = [...widget.candidates]
+      ..sort((a, b) {
+        if (a['id'] == widget.suggested) return -1;
+        if (b['id'] == widget.suggested) return 1;
+        return (a['id'] as int).compareTo(b['id'] as int);
+      });
     final matches = suggestedFirst.where((w) {
       final text = query.trim();
-      return text.isEmpty ||
-          '${w['name']} ${w['id']}'.contains(text);
+      return text.isEmpty || '${w['name']} ${w['id']}'.contains(text);
     }).toList();
     return AlertDialog(
       title: const Text('选择参考武器（借用它的连招表）'),
@@ -9244,9 +11679,7 @@ class _ClientPickerDialogState extends State<ClientPickerDialog> {
             const SizedBox(height: 2),
             Expanded(
               child: widget.detected.isEmpty
-                  ? const Center(
-                      child: Text('没有自动找到客户端，请在下面直接填路径'),
-                    )
+                  ? const Center(child: Text('没有自动找到客户端，请在下面直接填路径'))
                   : ListView.builder(
                       itemCount: widget.detected.length,
                       itemBuilder: (context, index) {
@@ -9301,17 +11734,15 @@ class _ClientPickerDialogState extends State<ClientPickerDialog> {
                                       : '$directory\nconfig.spf2  ${hash.length > 12 ? hash.substring(0, 12) : hash}…'),
                             style: TextStyle(
                               fontSize: 11,
-                              color: valid
-                                  ? null
-                                  : Colors.deepOrange.shade900,
+                              color: valid ? null : Colors.deepOrange.shade900,
                             ),
                           ),
                           isThreeLine: hash.isNotEmpty || !valid,
                           onTap: valid
                               ? () => setState(() {
-                                    chosen = directory;
-                                    manual.text = directory;
-                                  })
+                                  chosen = directory;
+                                  manual.text = directory;
+                                })
                               : null,
                         );
                       },
@@ -9424,8 +11855,9 @@ class _RemapTemplateDialogState extends State<_RemapTemplateDialog> {
                               final stateKey = '${s['state']}';
                               final ids = (s['property_ids'] as List? ?? [])
                                   .join('、');
-                              final fx = (s['effects'] as List? ?? [])
-                                  .join('、');
+                              final fx = (s['effects'] as List? ?? []).join(
+                                '、',
+                              );
                               return ListTile(
                                 dense: true,
                                 selected: chosenState == stateKey,
@@ -9436,8 +11868,7 @@ class _RemapTemplateDialogState extends State<_RemapTemplateDialog> {
                                   '${fx.isEmpty ? '' : '\n特效 $fx'}',
                                   style: const TextStyle(fontSize: 11),
                                 ),
-                                isThreeLine:
-                                    ids.isNotEmpty || fx.isNotEmpty,
+                                isThreeLine: ids.isNotEmpty || fx.isNotEmpty,
                                 onTap: () =>
                                     setState(() => chosenState = stateKey),
                               );
@@ -9459,9 +11890,9 @@ class _RemapTemplateDialogState extends State<_RemapTemplateDialog> {
           onPressed: (selected == null || chosenState == null)
               ? null
               : () => Navigator.pop(context, {
-                    'weapon': selected!['id'] as int,
-                    'state': int.parse(chosenState!),
-                  }),
+                  'weapon': selected!['id'] as int,
+                  'state': int.parse(chosenState!),
+                }),
           child: const Text('复用此状态'),
         ),
       ],
@@ -9532,7 +11963,6 @@ class _PropertyPickerDialogState extends State<_PropertyPickerDialog> {
     );
   }
 }
-
 
 /// 本地图片路径输入框：选择要上传的 PNG 文件路径。
 class _IconUploadDialog extends StatefulWidget {
@@ -9615,10 +12045,7 @@ class _MergeExportDialog extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             if (createdCount > 1)
-              const Text(
-                '选择导出范围：',
-                style: TextStyle(fontSize: 12),
-              ),
+              const Text('选择导出范围：', style: TextStyle(fontSize: 12)),
           ],
         ),
       ),
@@ -9641,7 +12068,6 @@ class _MergeExportDialog extends StatelessWidget {
   }
 }
 
-
 /// 每个状态的可编辑重映射：动作 / 命中属性 / 说明三个输入框；复用模板把结果
 /// 填进输入框，用户可再改，然后提交或取消。
 class _RemapEditor extends StatefulWidget {
@@ -9653,9 +12079,13 @@ class _RemapEditor extends StatefulWidget {
     required this.api,
     required this.weapons,
     required this.onSaved,
+    required this.onCommit,
+    required this.onAddProperty,
     super.key,
   });
 
+  final void Function(Map<String, dynamic>) onCommit;
+  final String Function(String, List<Map<String, dynamic>>) onAddProperty;
   final String stateKey;
   final int weaponId;
   final Map<String, dynamic> initial;
@@ -9672,14 +12102,16 @@ class _RemapEditorState extends State<_RemapEditor> {
   late final TextEditingController action;
   late final TextEditingController property;
   late final TextEditingController label;
+  Map<String, dynamic>? templateHit;
   bool saving = false;
 
   @override
   void initState() {
     super.initState();
     action = TextEditingController(text: '${widget.initial['action'] ?? ''}');
-    property =
-        TextEditingController(text: '${widget.initial['property_id'] ?? ''}');
+    property = TextEditingController(
+      text: '${widget.initial['property_id'] ?? ''}',
+    );
     label = TextEditingController(text: '${widget.initial['label'] ?? ''}');
   }
 
@@ -9696,22 +12128,25 @@ class _RemapEditorState extends State<_RemapEditor> {
   Future<void> pickTemplate() async {
     final picked = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => _RemapTemplateDialog(
-        weapons: widget.weapons,
-        self: widget.weaponId,
-      ),
+      builder: (_) =>
+          _RemapTemplateDialog(weapons: widget.weapons, self: widget.weaponId),
     );
     if (picked == null || !mounted) return;
     try {
-      final r = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_template_resolve',
-        'template_weapon': picked['weapon'],
-        'template_stage': picked['state'],
-      }));
+      final r = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': 'weapon_template_resolve',
+          'template_weapon': picked['weapon'],
+          'template_stage': picked['state'],
+        }),
+      );
       if (!mounted) return;
       setState(() {
         action.text = '${r['action'] ?? ''}';
         property.text = '${r['property_id'] ?? ''}';
+        templateHit = r['hit'] is Map
+            ? Map<String, dynamic>.from(r['hit'] as Map)
+            : null;
       });
     } catch (e) {
       if (mounted) {
@@ -9728,6 +12163,7 @@ class _RemapEditorState extends State<_RemapEditor> {
         await widget.api({'operation': 'weapon_remap_options'}),
       );
     } catch (_) {}
+    if (!mounted) return;
     final properties = [
       for (final p in (catalog['properties'] as List? ?? []))
         Map<String, dynamic>.from(p as Map),
@@ -9738,14 +12174,21 @@ class _RemapEditorState extends State<_RemapEditor> {
     );
     if (template == null || !mounted) return;
     try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_property_add',
-        'template': template,
-      }));
+      final newId = widget.onAddProperty(template, properties);
       if (!mounted) return;
-      final newId = '${result['property_id'] ?? ''}';
-      if (newId.isEmpty) return;
-      setState(() => property.text = newId);
+      final templateRow = properties.firstWhere(
+        (row) => '${row['id']}' == template,
+      );
+      setState(() {
+        property.text = newId;
+        templateHit = {
+          'id': newId,
+          'buff': templateRow['buff'] ?? '0',
+          'values': Map<String, dynamic>.from(
+            templateRow['values'] as Map? ?? const <String, dynamic>{},
+          ),
+        };
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -9757,14 +12200,14 @@ class _RemapEditorState extends State<_RemapEditor> {
   Future<void> commit({bool clear = false}) async {
     setState(() => saving = true);
     try {
-      final result = Map<String, dynamic>.from(await widget.api({
-        'operation': 'weapon_remap',
-        'weapon': widget.weaponId,
-        'stage': int.parse(widget.stateKey),
+      widget.onCommit({
         'action': clear ? '' : action.text.trim(),
         'property_id': clear ? '' : property.text.trim(),
         'label': clear ? '' : label.text.trim(),
-      }));
+        if (!clear && templateHit != null) 'hit': templateHit,
+        if (!clear && templateHit != null)
+          'template_property_id': '${templateHit!['id']}',
+      });
       if (!mounted) return;
       if (clear) {
         setState(() {
@@ -9775,10 +12218,6 @@ class _RemapEditorState extends State<_RemapEditor> {
       }
       setState(() => saving = false);
       await widget.onSaved();
-      if (mounted && result['message'] != null) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('${result['message']}')));
-      }
     } catch (e) {
       if (mounted) {
         setState(() => saving = false);
@@ -9868,7 +12307,6 @@ class _RemapEditorState extends State<_RemapEditor> {
     );
   }
 }
-
 
 /// 特效的绑定方式（bindtype）。游戏里没有公开的枚举名，这张表是按全库 9000+ 处
 /// <Effect> / <HitEffect> 的实际用法归纳出来的：6 几乎只配 bindindex=0（出招瞬间在
@@ -9975,8 +12413,9 @@ class _EffectLedgerDialogState extends State<_EffectLedgerDialog> {
       final data = '${map['thumbnail'] ?? ''}';
       if (data.isNotEmpty) thumbs['${map['effect_id']}'] = data;
     }
-    final unregistered =
-        (widget.view['unregistered'] as List? ?? []).map((e) => '$e').toList();
+    final unregistered = (widget.view['unregistered'] as List? ?? [])
+        .map((e) => '$e')
+        .toList();
     final references = widget.view['references'] as List? ?? [];
     return AlertDialog(
       title: Text('${widget.title} · 模型特效（装备时预加载）'),
@@ -9989,21 +12428,27 @@ class _EffectLedgerDialogState extends State<_EffectLedgerDialog> {
             Text(
               widget.editable
                   ? '这是**武器模型**要预加载的特效登记（acteffect.xml）。招式里引用的特效若不在'
-                      '这张表里就不会加载；这里只写编辑集，点「应用到游戏」才进配置包。'
+                        '这张表里就不会加载；这里只写编辑集，点「应用到游戏」才进配置包。'
                   : '这是武器模型的特效登记。原有武器只能预览，编辑只对自建武器开放。',
               style: const TextStyle(fontSize: 12),
             ),
             const SizedBox(height: 4),
             Text(
               '招式引用 ${references.length} 处 · 公共登记 ${widget.view['common_count'] ?? 0} 条',
-              style: TextStyle(fontSize: 12, color: Theme.of(context).hintColor),
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).hintColor,
+              ),
             ),
             if (unregistered.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
                   '招式引用了但尚未登记：${unregistered.join('、')}',
-                  style: const TextStyle(fontSize: 12, color: Colors.deepOrange),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.deepOrange,
+                  ),
                 ),
               ),
             const SizedBox(height: 8),
@@ -10039,10 +12484,15 @@ class _EffectLedgerDialogState extends State<_EffectLedgerDialog> {
                           trailing: widget.editable
                               ? IconButton(
                                   tooltip: '删除登记',
-                                  icon: const Icon(Icons.delete_outline, size: 18),
+                                  icon: const Icon(
+                                    Icons.delete_outline,
+                                    size: 18,
+                                  ),
                                   onPressed: busy
                                       ? null
-                                      : () => setState(() => rows.removeAt(index)),
+                                      : () => setState(
+                                          () => rows.removeAt(index),
+                                        ),
                                 )
                               : null,
                         );
@@ -10155,6 +12605,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
   late final TextEditingController startInput;
   late final TextEditingController endInput;
   late final TextEditingController bindIndexInput;
+  late final TextEditingController breakInput;
 
   @override
   void initState() {
@@ -10164,8 +12615,10 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
     idInput = TextEditingController(text: '${widget.row['effect_id'] ?? ''}');
     startInput = TextEditingController(text: '${widget.row['start'] ?? 0}');
     endInput = TextEditingController(text: '${widget.row['end'] ?? 0}');
-    bindIndexInput =
-        TextEditingController(text: '${widget.row['bind_index'] ?? ''}');
+    bindIndexInput = TextEditingController(
+      text: '${widget.row['bind_index'] ?? ''}',
+    );
+    breakInput = TextEditingController(text: '${widget.row['break'] ?? ''}');
   }
 
   @override
@@ -10174,6 +12627,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
     startInput.dispose();
     endInput.dispose();
     bindIndexInput.dispose();
+    breakInput.dispose();
     super.dispose();
   }
 
@@ -10201,6 +12655,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: TextField(
+                    key: const ValueKey('effect-row-id'),
                     controller: idInput,
                     decoration: const InputDecoration(
                       labelText: '特效编号',
@@ -10216,6 +12671,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
                 SizedBox(
                   width: 90,
                   child: TextField(
+                    key: const ValueKey('effect-row-start'),
                     controller: startInput,
                     decoration: const InputDecoration(
                       labelText: '起始帧',
@@ -10228,6 +12684,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
                 SizedBox(
                   width: 90,
                   child: TextField(
+                    key: const ValueKey('effect-row-end'),
                     controller: endInput,
                     decoration: const InputDecoration(
                       labelText: '结束帧',
@@ -10240,6 +12697,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
                 SizedBox(
                   width: 82,
                   child: TextField(
+                    key: const ValueKey('effect-row-bind-index'),
                     controller: bindIndexInput,
                     decoration: const InputDecoration(
                       labelText: '骨骼号',
@@ -10262,6 +12720,15 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
                   DropdownMenuItem(value: entry.key, child: Text(entry.value)),
               ],
               onChanged: (value) => setState(() => bindType = value ?? ''),
+            ),
+            const SizedBox(height: 6),
+            TextField(
+              key: const ValueKey('effect-row-break'),
+              controller: breakInput,
+              decoration: const InputDecoration(
+                labelText: 'break（可空）',
+                isDense: true,
+              ),
             ),
             const SizedBox(height: 6),
             Text(
@@ -10291,6 +12758,7 @@ class _EffectRowDialogState extends State<_EffectRowDialog> {
               'end': end,
               'bind_type': bindType,
               'bind_index': bindIndexInput.text.trim(),
+              'break': breakInput.text.trim(),
             });
           },
           child: const Text('确定'),
@@ -10326,6 +12794,7 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
   final startInput = TextEditingController(text: '0');
   final endInput = TextEditingController(text: '0');
   final bindIndexInput = TextEditingController(text: '0');
+  final breakInput = TextEditingController();
   String kind = 'effect';
   String bindType = '';
   bool busy = false;
@@ -10343,6 +12812,7 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
           'end': row['end'] ?? 0,
           'bind_type': '${row['bind_type'] ?? ''}',
           'bind_index': '${row['bind_index'] ?? ''}',
+          'break': '${row['break'] ?? ''}',
         },
     ];
   }
@@ -10353,6 +12823,7 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
     startInput.dispose();
     endInput.dispose();
     bindIndexInput.dispose();
+    breakInput.dispose();
     super.dispose();
   }
 
@@ -10379,8 +12850,8 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
             Text(
               widget.editable
                   ? '这里改的是这个状态动作块里的 <Effect>（单帧）与 <HitEffect>（命中区间）。'
-                      '共用动作块会先克隆成这把武器独占，其它武器和原有招式不受影响；'
-                      '列表即最终结果（空 = 该招式没有特效）。'
+                        '共用动作块会先克隆成这把武器独占，其它武器和原有招式不受影响；'
+                        '列表即最终结果（空 = 该招式没有特效）。'
                   : '原有武器只能预览特效；编辑只对自建武器开放。',
               style: const TextStyle(fontSize: 12),
             ),
@@ -10409,20 +12880,25 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
                                   children: [
                                     IconButton(
                                       tooltip: '改帧号 / 绑定方式',
-                                      icon: const Icon(Icons.edit_outlined,
-                                          size: 18),
+                                      icon: const Icon(
+                                        Icons.edit_outlined,
+                                        size: 18,
+                                      ),
                                       onPressed: busy
                                           ? null
                                           : () => editRow(index),
                                     ),
                                     IconButton(
                                       tooltip: '删除',
-                                      icon: const Icon(Icons.delete_outline,
-                                          size: 18),
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        size: 18,
+                                      ),
                                       onPressed: busy
                                           ? null
                                           : () => setState(
-                                              () => edits.removeAt(index)),
+                                              () => edits.removeAt(index),
+                                            ),
                                     ),
                                   ],
                                 )
@@ -10433,87 +12909,102 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
             ),
             if (widget.editable) ...[
               const Divider(height: 12),
-              Row(
-                children: [
-                  DropdownButton<String>(
-                    value: kind,
-                    items: const [
-                      DropdownMenuItem(value: 'effect', child: Text('单帧特效')),
-                      DropdownMenuItem(value: 'hit', child: Text('命中特效')),
-                    ],
-                    onChanged: busy
-                        ? null
-                        : (value) => setState(() => kind = value ?? 'effect'),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: TextField(
-                      controller: idInput,
-                      decoration: const InputDecoration(
-                        labelText: '特效编号',
-                        isDense: true,
-                      ),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    DropdownButton<String>(
+                      value: kind,
+                      items: const [
+                        DropdownMenuItem(value: 'effect', child: Text('单帧特效')),
+                        DropdownMenuItem(value: 'hit', child: Text('命中特效')),
+                      ],
+                      onChanged: busy
+                          ? null
+                          : (value) => setState(() => kind = value ?? 'effect'),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 84,
-                    child: TextField(
-                      controller: startInput,
-                      decoration: const InputDecoration(
-                        labelText: '起始帧',
-                        isDense: true,
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 84,
-                    child: TextField(
-                      controller: endInput,
-                      decoration: const InputDecoration(
-                        labelText: '结束帧',
-                        isDense: true,
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 72,
-                    child: TextField(
-                      controller: bindIndexInput,
-                      decoration: const InputDecoration(
-                        labelText: '骨骼号',
-                        isDense: true,
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  DropdownButton<String>(
-                    value: bindType,
-                    items: [
-                      for (final entry in effectBindTypes.entries)
-                        DropdownMenuItem(
-                          value: entry.key,
-                          child: Text(
-                            entry.value,
-                            style: const TextStyle(fontSize: 12),
-                          ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 120,
+                      child: TextField(
+                        controller: idInput,
+                        decoration: const InputDecoration(
+                          labelText: '特效编号',
+                          isDense: true,
                         ),
-                    ],
-                    onChanged: busy
-                        ? null
-                        : (value) => setState(() => bindType = value ?? ''),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton(
-                    onPressed: busy ? null : addRow,
-                    child: const Text('添加'),
-                  ),
-                ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 84,
+                      child: TextField(
+                        controller: startInput,
+                        decoration: const InputDecoration(
+                          labelText: '起始帧',
+                          isDense: true,
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 84,
+                      child: TextField(
+                        controller: endInput,
+                        decoration: const InputDecoration(
+                          labelText: '结束帧',
+                          isDense: true,
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 72,
+                      child: TextField(
+                        controller: bindIndexInput,
+                        decoration: const InputDecoration(
+                          labelText: '骨骼号',
+                          isDense: true,
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 90,
+                      child: TextField(
+                        controller: breakInput,
+                        decoration: const InputDecoration(
+                          labelText: 'break',
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    DropdownButton<String>(
+                      value: bindType,
+                      items: [
+                        for (final entry in effectBindTypes.entries)
+                          DropdownMenuItem(
+                            value: entry.key,
+                            child: Text(
+                              entry.value,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                      ],
+                      onChanged: busy
+                          ? null
+                          : (value) => setState(() => bindType = value ?? ''),
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      onPressed: busy ? null : addRow,
+                      child: const Text('添加'),
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 4),
               Text(
@@ -10569,6 +13060,7 @@ class _StageEffectDialogState extends State<_StageEffectDialog> {
         'end': end,
         'bind_type': bindType,
         'bind_index': bindIndexInput.text.trim(),
+        'break': breakInput.text.trim(),
       });
       idInput.clear();
       message = '';

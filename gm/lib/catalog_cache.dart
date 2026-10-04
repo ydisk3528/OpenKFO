@@ -27,6 +27,8 @@ class CatalogCache {
     final read = const {
       'catalog',
       'weapon_catalog',
+      'weapon_list',
+      'weapon_detail',
       'client_directory_get',
       'weapon_combo_chain',
       'weapon_combo_rule',

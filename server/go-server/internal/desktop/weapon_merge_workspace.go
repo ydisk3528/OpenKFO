@@ -75,12 +75,11 @@ func mergeWeaponDifferences(a *archive, w mergeWeapon) ([]string, error) {
 		}
 	}
 	for prefix, blocks := range w.AnimationBlocks {
-		text, e := a.text("animation/" + prefix + ".xml")
-		if e != nil {
-			return nil, e
-		}
+		// 组内检索：1002/1006/3001… 这几组没有同名 4 位文件，按 animation/<前缀>.xml
+		// 取会整组读不到（会误报「差异」或直接报错）。
+		existing := a.groupBlockTexts(prefix)
 		for _, block := range blocks {
-			if !strings.Contains(text, block) {
+			if !containsBlockText(existing, block) {
 				changes = append(changes, "动作轨道 "+prefix)
 				break
 			}

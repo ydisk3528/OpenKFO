@@ -393,7 +393,11 @@ func appliedSkillOptions(info *inspection, state *weaponState, key string, optio
 		return options
 	}
 	predicted := copyCloneMap(state.PropertyClones)
-	if err := assignCloneIDs(info, state.Applied, predicted); err != nil {
+	plans := state.Applied
+	if len(info.weapons) == 1 && strconv.Itoa(info.weapons[0].ID) == key {
+		plans = map[string][]Rule{key: state.Applied[key]}
+	}
+	if err := assignCloneIDs(info, plans, predicted); err != nil {
 		// Broken applied rules surface in render with better context; the raw
 		// numbers are the least surprising thing to show meanwhile.
 		return options

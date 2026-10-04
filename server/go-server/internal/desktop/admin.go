@@ -84,6 +84,7 @@ type Request struct {
 	Counters               map[int]*CounterEdit                 `json:"counters,omitempty"`
 	BlockElements          map[int]map[string][]BlockElement    `json:"block_elements,omitempty"`
 	Scopes                 map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
+	Variants               map[int][]VariantEdit                `json:"variants,omitempty"`
 	StageEffects           []StageEffect                        `json:"stage_effects,omitempty"`
 	EffectRows             []EffectRow                          `json:"effect_rows,omitempty"`
 	ComboRule              *ComboRuleSet                        `json:"combo_rule,omitempty"`
@@ -95,6 +96,7 @@ type Request struct {
 	AppliedOnly            bool                                 `json:"applied_only,omitempty"`
 	UState                 *UStateEdit                          `json:"ustate,omitempty"`
 	LuaText                string                               `json:"lua,omitempty"`
+	Workspace              map[string]any                       `json:"workspace,omitempty"`
 }
 type Admin struct {
 	Root          string
@@ -376,7 +378,7 @@ func (admin *Admin) Call(request Request) (any, error) {
 		return map[string]any{"source": "client_titlemission", "missions": missions}, nil
 	}
 	// 武器编辑器只要武器图标：道具库那条路径才需要全部道具的图标。
-	items, err := catalog(client, request.Operation == "catalog" || request.Operation == "weapon_catalog", request.Operation == "weapon_catalog")
+	items, err := catalog(client, request.Operation == "catalog" || request.Operation == "weapon_catalog" || request.Operation == "weapon_list" || request.Operation == "weapon_detail", request.Operation == "weapon_catalog" || request.Operation == "weapon_list" || request.Operation == "weapon_detail")
 	if err != nil {
 		return nil, err
 	}

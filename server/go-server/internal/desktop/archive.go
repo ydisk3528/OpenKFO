@@ -22,6 +22,11 @@ type archive struct {
 	data                          []byte
 	tree, table, checksums, count int
 	entries                       map[string]int
+	// groups / groupBlocks 是「动作号 → 动画文件」组内检索的懒缓存，见
+	// animation_groups.go。归档是不变值：每次改写都走 parseArchive 产生新对象，
+	// 所以缓存不会失效。
+	groups      map[string][]string
+	groupBlocks map[string]map[int][]groupBlock
 }
 
 func loadArchive(path string) (*archive, error) {

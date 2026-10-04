@@ -23,6 +23,7 @@ import 'login_error_config.dart';
 import 'shop_config.dart';
 import 'wallet_config.dart';
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -127,6 +128,7 @@ class Backend {
   Future<dynamic> _callUncached(Map<String, dynamic> input) async {
     resolvePaths();
     if (root == null) throw Exception('找不到服务器目录，请勿单独移动 EXE。');
+    final operation = '${input['operation'] ?? 'unknown'}';
     final executable = File(Platform.resolvedExecutable).parent;
     final bundledBackend = File('${executable.path}/kungfu-desktop-admin.exe');
     final p = await Process.start(
@@ -143,26 +145,65 @@ class Backend {
     );
     final out = p.stdout.transform(utf8.decoder).join(),
         err = p.stderr.transform(utf8.decoder).join();
-    p.stdin.add(
-      utf8.encode(
-        jsonEncode({
-          ...input,
-          'gm_version': gmVersion,
-          'management_session_token': _managementSession,
-        }),
-      ),
-    );
-    await p.stdin.close();
-    final code = await p.exitCode, text = await out, error = await err;
-    if (code != 0) throw Exception(error);
-    final result = jsonDecode(text);
-    if (result['ok'] != true) throw Exception(result['error']);
-    if (input['operation'] == 'management_connection_login') {
-      _managementSession = result['result']['token'] as String;
-    } else if (input['operation'] == 'management_connection_save') {
-      _managementSession = '';
+    try {
+      p.stdin.add(
+        utf8.encode(
+          jsonEncode({
+            ...input,
+            'gm_version': gmVersion,
+            'management_session_token': _managementSession,
+          }),
+        ),
+      );
+      await p.stdin.close();
+
+      // Details and archive writes can legitimately take tens of seconds, but a
+      // broken child process must never leave CatalogCache/busy waiting forever.
+      final completed = await Future.wait<dynamic>([
+        p.exitCode,
+        out,
+        err,
+      ]).timeout(const Duration(seconds: 120));
+      final code = completed[0] as int;
+      final text = completed[1] as String;
+      final error = completed[2] as String;
+      if (code != 0) {
+        throw Exception(
+          error.trim().isEmpty ? '后端操作 $operation 失败（退出码 $code）' : error,
+        );
+      }
+      final result = jsonDecode(text);
+      if (result['ok'] != true) throw Exception(result['error']);
+      if (operation == 'management_connection_login') {
+        _managementSession = result['result']['token'] as String;
+      } else if (operation == 'management_connection_save') {
+        _managementSession = '';
+      }
+      return result['result'];
+    } on TimeoutException {
+      // A timeout is deliberately reported as indeterminate for writes: the
+      // child may have committed just before it became unresponsive.
+      p.kill();
+      try {
+        await p.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // The process handle is no longer useful; surface the actionable error.
+      }
+      final write = operation.startsWith('weapon_') ||
+          operation.contains('save') ||
+          operation.contains('apply');
+      throw Exception(
+        write
+            ? '操作 $operation 超时；写入结果可能已经落盘，请先重新读取当前武器状态，再决定是否重试。'
+            : '操作 $operation 超时，请稍后重试。',
+      );
+    } finally {
+      // Closing streams here also releases the process resources when startup,
+      // JSON decoding, or a non-zero child exit fails before normal completion.
+      try {
+        await p.stdin.close();
+      } catch (_) {}
     }
-    return result['result'];
   }
 }
 

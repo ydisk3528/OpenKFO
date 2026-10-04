@@ -26,6 +26,8 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   bool busy = false;
 
   final typeCtrl = TextEditingController();
+  final nameCtrl = TextEditingController();
+  final descriptionCtrl = TextEditingController();
   final nodeCtrl = TextEditingController();
   final luaCtrl = TextEditingController();
 
@@ -38,6 +40,8 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   @override
   void dispose() {
     typeCtrl.dispose();
+    nameCtrl.dispose();
+    descriptionCtrl.dispose();
     nodeCtrl.dispose();
     luaCtrl.dispose();
     super.dispose();
@@ -121,6 +125,8 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
       setState(() {
         selected = t;
         typeCtrl.text = t;
+        nameCtrl.text = '${d['name'] ?? ''}';
+        descriptionCtrl.text = '${d['note'] ?? ''}';
         final pending = '${d['pending'] ?? ''}';
         nodeCtrl.text = pending.isNotEmpty ? pending : '${d['node'] ?? ''}';
         final luaEdited = '${d['lua_edited'] ?? ''}';
@@ -137,6 +143,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
     setState(() {
       selected = null;
       typeCtrl.clear();
+      descriptionCtrl.clear();
       nodeCtrl.text = _templateNode();
       luaCtrl.text = _templateLua();
       message = '';
@@ -271,6 +278,15 @@ end''';
     );
   }
 
+  String _nodeForType(String type) {
+    final node = nodeCtrl.text;
+    final re = RegExp(r'(<Data\\b[^>]*\\btype\\s*=\\s*)"[^"]*"');
+    if (re.hasMatch(node)) {
+      return node.replaceFirstMapped(re, (m) => '${m.group(1)}"$type"');
+    }
+    return node;
+  }
+
   Future<void> _save() async {
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
@@ -284,7 +300,11 @@ end''';
       final r = Map<String, dynamic>.from(
         await _call('weapon_buff_save', {
           'key': t,
-          'ustate': {'action': 'upsert', 'text': nodeCtrl.text, 'note': ''},
+          'ustate': {
+            'action': 'upsert',
+            'text': _nodeForType(t),
+            'note': descriptionCtrl.text.trim(),
+          },
         }),
       );
       setState(() {
@@ -354,7 +374,7 @@ end''';
       builder: (c) => AlertDialog(
         title: const Text('应用到客户端'),
         content: const Text(
-          '会把当前所有状态/Buff 编辑连同武器编辑一起写入客户端配置包。\n'
+          '只会应用 ustate.xml 和状态/Buff 脚本编辑，不会重写武器动作分支、连招或命中属性。\n'
           '请先退出游戏客户端（否则会被拒绝）。',
         ),
         actions: [
@@ -648,10 +668,21 @@ end''';
             ),
           ],
         ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: descriptionCtrl,
+          maxLines: 2,
+          decoration: const InputDecoration(
+            labelText: 'Buff 说明',
+            hintText: '写入 ustate.xml 中 <Data> 节点前的说明注释',
+            border: OutlineInputBorder(),
+            alignLabelWithHint: true,
+          ),
+        ),
         if (selName != null)
           Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text('中文描述：$selName', style: const TextStyle(fontSize: 13)),
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('当前客户端说明：$selName', style: const TextStyle(fontSize: 12)),
           ),
         const SizedBox(height: 8),
         const Text('图标（点击缩略图替换节点里的 Icon）'),
@@ -675,8 +706,12 @@ end''';
         const SizedBox(height: 12),
         Row(
           children: [
-            const Text('节点 XML（ustate.xml 的 <Data>）'),
-            const Spacer(),
+            const Expanded(
+              child: Text(
+                '节点 XML（ustate.xml 的 <Data>）',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
             TextButton.icon(
               onPressed: busy ? null : _newNode,
               icon: const Icon(Icons.auto_fix_high),
@@ -717,11 +752,11 @@ end''';
           runSpacing: 8,
           children: [
             FilledButton(
-              onPressed: busy ? null : () => _run(_save),
+              onPressed: busy ? null : _save,
               child: const Text('保存状态'),
             ),
             FilledButton(
-              onPressed: busy ? null : () => _run(_saveLua),
+              onPressed: busy ? null : _saveLua,
               child: const Text('保存 lua'),
             ),
             OutlinedButton(

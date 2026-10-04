@@ -448,11 +448,15 @@ func validateBlockElements(a *archive, weaponKey string, edits map[int]map[strin
 // applyBlockElements renders the authored guard / self-state elements onto the
 // archive. Runs after applyCounters so a shared block was already cloned when a
 // remap needed one; anything still shared is cloned here.
-func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive, error) {
+func applyBlockElements(a *archive, state *weaponState, items []Item, wanted ...map[int]bool) (*archive, error) {
 	if len(state.BlockElements) == 0 {
 		return a, nil
 	}
-	info, err := inspect(a, items)
+	var filter map[int]bool
+	if len(wanted) > 0 {
+		filter = wanted[0]
+	}
+	info, err := inspectFilteredWithActions(a, items, filter, projectionActions(state, filter)...)
 	if err != nil {
 		return nil, err
 	}
@@ -522,24 +526,33 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 			}
 			action := row[column]
 			if action == "" || action == "0" {
-				return nil, fmt.Errorf("状态 %d 没有动作，无法编辑防护/自身状态", stage)
+				for tag, elements := range edits {
+					if _, known := blockElementSpecFor(tag); !known {
+						return nil, fmt.Errorf("不支持的元素 %s", tag)
+					}
+					if len(elements) > 0 {
+						return nil, fmt.Errorf("状态 %d 没有动作，无法编辑防护/自身状态", stage)
+					}
+				}
+				continue
 			}
-			blocks := info.blocks[actionKey(action)]
-			if len(blocks) != 1 {
-				return nil, fmt.Errorf("动作 %s 不存在或不唯一", action)
+			// 同名多份（无条件 + 条件分支）时默认编辑无条件那份；条件分支保持不动。
+			variants := actionVariants(info, action)
+			chosen, ok := pickBlock(variants)
+			if !ok {
+				return nil, fmt.Errorf("动作 %s 不存在", action)
 			}
-			file := "animation/" + action[:4] + ".xml"
+			file, err := a.animationWriteFile(action)
+			if err != nil {
+				return nil, err
+			}
 			animation, err := loadAnimation(file)
 			if err != nil {
 				return nil, err
 			}
-			target := blocks[0].original
-			if strings.Count(animation, target) != 1 {
-				found, ok := currentBlock(animation, strings.TrimSpace(blocks[0].node.get("id")))
-				if !ok {
-					return nil, fmt.Errorf("动作定义无法唯一替换")
-				}
-				target = found
+			target, err := locateEditableBlock(animation, chosen)
+			if err != nil {
+				return nil, err
 			}
 			// 只改编辑集里出现的标签：没动过的元素一个字节都不碰。
 			rewritten := target
@@ -573,13 +586,13 @@ func applyBlockElements(a *archive, state *weaponState, items []Item) (*archive,
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
-				clone := retitleBlock(rewritten, cloneID)
-				if !anmInfoEndPattern.MatchString(animation) {
-					return nil, fmt.Errorf("动作表结构错误")
+				// 连条件分支一起复制：只复制被编辑的那份、把条件块留在供体 id 下的话，
+				// 新武器就丢了「带该状态时变形态」的效果（条件块成了孤儿）。
+				next, err := cloneBlockVariants(animation, variants, chosen.condition, rewritten, cloneID)
+				if err != nil {
+					return nil, err
 				}
-				animation = anmInfoEndPattern.ReplaceAllStringFunc(animation, func(string) string {
-					return "\n" + clone + "\n</AnmInfo>"
-				})
+				animation = next
 				row[column] = action[:4] + fmt.Sprintf("%03d", cloneID)
 				tableChanged = true
 			} else {
@@ -656,7 +669,7 @@ func blockElementFiles(source *archive, state *weaponState) map[string]bool {
 				action = remap.Action
 			}
 			if len(action) >= 5 && action != "0" {
-				files["animation/"+action[:4]+".xml"] = true
+				source.allowGroupFiles(files, action)
 			}
 		}
 	}

@@ -45,6 +45,56 @@ var (
 	effectIdShape          = regexp.MustCompile(`^[A-Za-z0-9_]{1,16}$`)
 )
 
+func validateStageEffectValues(effects []StageEffect) error {
+	for _, e := range effects {
+		if !effectIdShape.MatchString(e.EffectID) {
+			return fmt.Errorf("特效编号 %q 无效", e.EffectID)
+		}
+		if e.Kind != "effect" && e.Kind != "hit" {
+			return fmt.Errorf("特效类型无效")
+		}
+		if e.Start < 0 || e.Start > 9999 || e.End < 0 || e.End > 9999 || (e.Kind == "hit" && e.End < e.Start) {
+			return fmt.Errorf("特效 %s 的帧号无效（%d..%d）", e.EffectID, e.Start, e.End)
+		}
+		for _, value := range []string{e.BindType, e.BindIndex, e.Break} {
+			if value == "" {
+				continue
+			}
+			n, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || n > 2147483647 {
+				return fmt.Errorf("特效 %s 的绑定或中断属性无效", e.EffectID)
+			}
+		}
+	}
+	return nil
+}
+
+// 只允许唯一无条件基础块；未知条件和重复条件不能安全克隆。
+func stageEffectBase(blocks []block) (block, error) {
+	var base block
+	count := 0
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		if seen[b.condition] {
+			return block{}, fmt.Errorf("动作基础块或条件分支不唯一")
+		}
+		seen[b.condition] = true
+		if b.condition == "" {
+			for _, child := range b.node.children {
+				if child.tag == "Condition" {
+					return block{}, fmt.Errorf("动作包含不支持的条件结构")
+				}
+			}
+			base = b
+			count++
+		}
+	}
+	if count != 1 {
+		return block{}, fmt.Errorf("动作缺少唯一无条件基础块")
+	}
+	return base, nil
+}
+
 // stageEffectText 渲染一条特效节点。
 func stageEffectText(e StageEffect) string {
 	extra := ""
@@ -66,6 +116,9 @@ func stageEffectText(e StageEffect) string {
 // rewriteStageEffects 用给定列表替换动作块里的全部特效节点。原块没有特效就插入，
 // 列表为空就删除。内容完全一致时不改动（幂等）。
 func rewriteStageEffects(block string, effects []StageEffect) (string, bool, error) {
+	if err := validateStageEffectValues(effects); err != nil {
+		return block, false, err
+	}
 	existing := []string{}
 	kept := strings.Builder{}
 	last := 0
@@ -134,32 +187,25 @@ func stageEffectIndex(a *archive) (map[string][]block, map[string]map[string]boo
 		}
 	}
 	index := map[string][]block{}
-	files := map[string]bool{}
+	prefixes := map[string]bool{}
 	for action := range owners {
 		if len(action) > 4 {
-			files["animation/"+action[:4]+".xml"] = true
+			prefixes[action[:4]] = true
 		}
 	}
-	for file := range files {
-		if _, ok := a.entries[file]; !ok {
-			continue
-		}
-		animation, err := a.text(file)
-		if err != nil {
-			return nil, nil, err
-		}
-		prefix := strings.TrimSuffix(strings.TrimPrefix(file, "animation/"), ".xml")
-		for _, original := range animationPattern.FindAllString(animation, -1) {
-			node, err := parseXML(original)
-			if err != nil {
-				continue
+	sorted := make([]string, 0, len(prefixes))
+	for prefix := range prefixes {
+		sorted = append(sorted, prefix)
+	}
+	sort.Strings(sorted)
+	// 组内检索：动作号只写 4 位组前缀，块可能落在同前缀的 6 位子文件里
+	// （见 animation_groups.go）。
+	for _, prefix := range sorted {
+		for number, found := range a.groupBlockIndex(prefix) {
+			key := prefix + "/" + strconv.Itoa(number)
+			for _, entry := range found {
+				index[key] = append(index[key], entry.block)
 			}
-			id, err := strconv.Atoi(strings.TrimSpace(node.get("id")))
-			if err != nil {
-				continue
-			}
-			key := prefix + "/" + strconv.Itoa(id)
-			index[key] = append(index[key], block{original, node})
 		}
 	}
 	return index, owners, nil
@@ -213,19 +259,11 @@ func validateStageEffects(a *archive, weaponKey string, edits map[int][]StageEff
 		if action == "" || action == "0" {
 			return fmt.Errorf("状态 %d 没有动作，无法编辑特效", stage)
 		}
-		if len(blockIndex[actionKey(action)]) != 1 {
-			return fmt.Errorf("动作 %s 不存在或不唯一，无法编辑特效", action)
+		if _, err := stageEffectBase(blockIndex[actionKey(action)]); err != nil {
+			return fmt.Errorf("动作 %s 无法编辑特效：%w", action, err)
 		}
-		for _, e := range effects {
-			if !effectIdShape.MatchString(strings.TrimSpace(e.EffectID)) {
-				return fmt.Errorf("特效编号 %q 无效", e.EffectID)
-			}
-			if e.Kind != "effect" && e.Kind != "hit" {
-				return fmt.Errorf("特效类型无效")
-			}
-			if e.Start < 0 || e.Start > 9999 || e.End < e.Start || e.End > 9999 {
-				return fmt.Errorf("特效 %s 的帧号无效（%d..%d）", e.EffectID, e.Start, e.End)
-			}
+		if err := validateStageEffectValues(effects); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -274,7 +312,7 @@ func itemactAction(actionText, weapon string, stage int) (string, bool) {
 
 // applyStageEffects 把招式特效写进动画块；共用块先克隆成该武器独占，并按需改写
 // 动作行指向新块——原动作块与其它武器完全不受影响。
-func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
+func applyStageEffects(a *archive, state *weaponState, wanted ...map[int]bool) (*archive, error) {
 	if len(state.StageEffects) == 0 {
 		return a, nil
 	}
@@ -315,6 +353,12 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 	}
 	sort.Strings(weaponKeys)
 	for _, weaponKey := range weaponKeys {
+		if len(wanted) > 0 && wanted[0] != nil {
+			id, parseErr := strconv.Atoi(weaponKey)
+			if parseErr != nil || !wanted[0][id] {
+				continue
+			}
+		}
 		line := lineIndex[weaponKey]
 		if line == 0 {
 			return nil, fmt.Errorf("武器 %s 不在动作表中", weaponKey)
@@ -339,10 +383,14 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 				return nil, fmt.Errorf("状态 %d 没有动作，无法编辑特效", stage)
 			}
 			actionBlocks := blockIndex[actionKey(action)]
-			if len(actionBlocks) != 1 {
-				return nil, fmt.Errorf("动作 %s 不存在或不唯一", action)
+			chosen, err := stageEffectBase(actionBlocks)
+			if err != nil {
+				return nil, fmt.Errorf("动作 %s 无法编辑特效：%w", action, err)
 			}
-			file := "animation/" + action[:4] + ".xml"
+			file, err := a.animationWriteFile(action)
+			if err != nil {
+				return nil, err
+			}
 			animation, ok := animations[file]
 			if !ok {
 				animation, err = a.text(file)
@@ -350,13 +398,9 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 					return nil, err
 				}
 			}
-			target := actionBlocks[0].original
-			if strings.Count(animation, target) != 1 {
-				found, unique := currentBlock(animation, strings.TrimSpace(actionBlocks[0].node.get("id")))
-				if !unique {
-					return nil, fmt.Errorf("动作定义无法唯一替换")
-				}
-				target = found
+			target, err := locateEditableBlock(animation, chosen)
+			if err != nil {
+				return nil, err
 			}
 			rewritten, changed, err := rewriteStageEffects(target, state.StageEffects[weaponKey][stage])
 			if err != nil {
@@ -372,13 +416,20 @@ func applyStageEffects(a *archive, state *weaponState) (*archive, error) {
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
-				clone := retitleBlock(rewritten, cloneID)
-				if !anmInfoEndPattern.MatchString(animation) {
-					return nil, fmt.Errorf("动作表结构错误")
+				// 刷新本轮已编辑的分支，避免从旧索引克隆回过期内容。
+				variants := make([]block, len(actionBlocks))
+				for i, variant := range actionBlocks {
+					text, locateErr := locateEditableBlock(animation, variant)
+					if locateErr != nil {
+						return nil, fmt.Errorf("共享动作分支无法安全克隆：%w", locateErr)
+					}
+					variants[i] = variant
+					variants[i].original = text
 				}
-				animation = anmInfoEndPattern.ReplaceAllStringFunc(animation, func(string) string {
-					return "\n" + clone + "\n</AnmInfo>"
-				})
+				animation, err = cloneBlockVariants(animation, variants, "", rewritten, cloneID)
+				if err != nil {
+					return nil, err
+				}
 				row[column] = action[:4] + fmt.Sprintf("%03d", cloneID)
 				tableChanged = true
 			} else {
@@ -450,18 +501,51 @@ func stageEffectFiles(source *archive, state *weaponState) map[string]bool {
 			if len(action) < 4 {
 				continue
 			}
-			files["animation/"+action[:4]+".xml"] = true
+			source.allowGroupFiles(files, action)
 		}
 	}
 	return files
 }
 
-// validateEffectRows 校验武器特效登记的编辑：编号合法、资源路径是本地的且文件存在。
+// 已有源登记允许资源不随临时副本复制；新增或改名资源必须存在。
+func validateAppliedEffectRows(source *archive, client string, rows []EffectRow) error {
+	if err := validateEffectRows("", rows); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	text, err := source.text("acteffect.xml")
+	if err != nil {
+		return err
+	}
+	root, err := parseXML(text)
+	if err != nil {
+		return err
+	}
+	native := map[EffectRow]bool{}
+	root.walk(func(n *xmlNode) {
+		if n.tag == "EffectFile" {
+			native[EffectRow{EffectID: n.get("EffectId"), File: n.get("File")}] = true
+		}
+	})
+	for _, row := range rows {
+		if native[row] {
+			continue
+		}
+		if err := validateEffectRows(client, []EffectRow{row}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// client 为空时仅校验编号、重复和路径；legacy_set 传客户端以校验资源存在性。
 func validateEffectRows(client string, rows []EffectRow) error {
 	seen := map[string]bool{}
 	for _, row := range rows {
 		id := strings.TrimSpace(row.EffectID)
-		if !effectIdShape.MatchString(id) {
+		if !effectIdShape.MatchString(id) || id != row.EffectID {
 			return fmt.Errorf("特效编号 %q 无效", row.EffectID)
 		}
 		if seen[id] {
@@ -473,8 +557,16 @@ func validateEffectRows(client string, rows []EffectRow) error {
 			return fmt.Errorf("特效 %s 缺少资源文件名", id)
 		}
 		rel := filepath.FromSlash(strings.ReplaceAll(file, "\\", "/"))
-		if !filepath.IsLocal(rel) {
+		if !filepath.IsLocal(rel) || file != row.File || strings.ContainsAny(file, ":\"'<>&|?*\x00\r\n\t") {
 			return fmt.Errorf("特效 %s 的资源路径无效", id)
+		}
+		for _, part := range strings.Split(strings.ReplaceAll(file, "\\", "/"), "/") {
+			if part == ".." || part == "." || part == "" || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+				return fmt.Errorf("特效 %s 的资源路径无效", id)
+			}
+		}
+		if client == "" {
+			continue
 		}
 		stat, err := os.Stat(filepath.Join(client, "Data", "effect", "effect", rel))
 		if err != nil || !stat.Mode().IsRegular() {

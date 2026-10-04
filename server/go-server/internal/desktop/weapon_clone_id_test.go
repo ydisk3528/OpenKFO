@@ -70,6 +70,77 @@ func TestCloneIDsStayPutWhenOtherWeaponsChange(t *testing.T) {
 
 // 发号要跳过归档里已经被占用的号（基线里可能留着历史克隆节点），
 // 并且要重新处理「钉住的号已被占用」这种情况 —— 否则会追加出重复的 SkillProId 节点。
+func TestCloneIDAllocationReservesAllPinnedNumbers(t *testing.T) {
+	info := &inspection{
+		weapons: []Weapon{{ID: 253300, Name: "王八拳", BuffIDs: []int{0}, Stages: []Stage{
+			{Stage: 1, State: "2011", Action: "2001936", PropertyIDs: []string{"1830110"}, Supported: true},
+		}}},
+		properties: map[string][]*xmlNode{},
+	}
+	plans := map[string][]Rule{"253300": {{Stage: 1, Buff: 0, Level: 1, Duration: 3000,
+		Properties: map[string]map[string]float64{"1830110": {"SkillDamage": 1}}}}}
+	clones := map[string]map[string]string{
+		"253700": {cloneKey(1, "3101"): "900000000"},
+	}
+	if err := assignCloneIDs(info, plans, clones); err != nil {
+		t.Fatalf("分配失败：%v", err)
+	}
+	if got := clones["253300"][cloneKey(1, "1830110")]; got != "900000001" {
+		t.Fatalf("应当避开计划外的固定号，实际 %s", got)
+	}
+}
+
+func TestCloneIDAllocationRejectsPinnedNumberCollision(t *testing.T) {
+	info := &inspection{
+		weapons: []Weapon{
+			{ID: 253300, Name: "王八拳", BuffIDs: []int{0}, Stages: []Stage{
+				{Stage: 1, State: "2011", Action: "2001936", PropertyIDs: []string{"1830110"}, Supported: true},
+			}},
+			{ID: 253700, Name: "混沌宇宙", BuffIDs: []int{0}, Stages: []Stage{
+				{Stage: 1, State: "2011", Action: "2001500", PropertyIDs: []string{"3101"}, Supported: true},
+			}},
+		},
+		properties: map[string][]*xmlNode{},
+	}
+	plans := map[string][]Rule{
+		"253300": {{Stage: 1, Buff: 0, Level: 1, Duration: 3000,
+			Properties: map[string]map[string]float64{"1830110": {"SkillDamage": 1}}}},
+		"253700": {{Stage: 1, Buff: 0, Level: 1, Duration: 3000,
+			Properties: map[string]map[string]float64{"3101": {"SkillDamage": 1}}}},
+	}
+	clones := map[string]map[string]string{
+		"253300": {cloneKey(1, "1830110"): "900000000"},
+		"253700": {cloneKey(1, "3101"): "900000000"},
+	}
+	if err := assignCloneIDs(info, plans, clones); err == nil || !strings.Contains(err.Error(), "900000000") {
+		t.Fatalf("两个 active 输出使用同一固定号时应拒绝，实际错误：%v", err)
+	}
+	if got := clones["253300"][cloneKey(1, "1830110")]; got != "900000000" {
+		t.Fatalf("重复校验失败后不应改写固定号，实际 %s", got)
+	}
+}
+
+func TestCloneIDAllocationAllowsOneActiveAndOneInactivePinnedNumber(t *testing.T) {
+	info := &inspection{
+		weapons: []Weapon{{ID: 253300, Name: "王八拳", BuffIDs: []int{0}, Stages: []Stage{
+			{Stage: 1, State: "2011", Action: "2001936", PropertyIDs: []string{"1830110"}, Supported: true},
+		}}},
+		properties: map[string][]*xmlNode{},
+	}
+	plans := map[string][]Rule{"253300": {{Stage: 1, Buff: 0, Level: 1, Duration: 3000,
+		Properties: map[string]map[string]float64{"1830110": {"SkillDamage": 1}}}}}
+	clones := map[string]map[string]string{
+		"253300": {cloneKey(1, "1830110"): "900000000"},
+		"253700": {cloneKey(1, "3101"): "900000000"},
+	}
+	if err := assignCloneIDs(info, plans, clones); err != nil {
+		t.Fatalf("一个 active 加一个历史 inactive 不应失败：%v", err)
+	}
+	if got := clones["253300"][cloneKey(1, "1830110")]; got != "900000000" {
+		t.Fatalf("active 固定号不应改写，实际 %s", got)
+	}
+}
+
 func TestCloneIDAllocationSkipsOccupiedNumbers(t *testing.T) {
 	occupied := []string{"900000000", "900000001", "900000002"}
 	properties := map[string][]*xmlNode{}

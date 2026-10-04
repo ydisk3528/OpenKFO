@@ -31,7 +31,55 @@ const buffLuaEntry = "script/playereventproc/ustateeventproc.lua"
 type UStateEdit struct {
 	Action string `json:"action"`
 	Text   string `json:"text,omitempty"`
+	Name   string `json:"name,omitempty"`
 	Note   string `json:"note,omitempty"`
+}
+
+func formatUStateComment(name, desc string) string {
+	name = strings.TrimSpace(name)
+	desc = strings.TrimSpace(desc)
+	if name == "" {
+		return desc
+	}
+	if desc == "" {
+		return name
+	}
+	return name + "，" + desc
+}
+
+func splitUStateComment(value string) (name, desc string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", ""
+	}
+	runes := []rune(value)
+	cut := -1
+	for i, r := range runes {
+		if r == '，' || r == ',' || r == '、' {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return value, ""
+	}
+	return strings.TrimSpace(string(runes[:cut])), strings.TrimSpace(string(runes[cut+1:]))
+}
+
+func ustateCommentBefore(text string, offset int) string {
+	open := strings.LastIndex(text[:offset], "<!--")
+	if open < 0 {
+		return ""
+	}
+	close := strings.Index(text[open:offset], "-->")
+	if close < 0 {
+		return ""
+	}
+	close += open
+	if strings.TrimSpace(text[close+3:offset]) != "" {
+		return ""
+	}
+	return strings.TrimSpace(text[open+4 : close])
 }
 
 var (
@@ -189,7 +237,22 @@ func renderUStates(text string, edits map[string]UStateEdit) (string, error) {
 				if s.Type != key {
 					continue
 				}
-				out = out[:s.Start] + node + out[s.End:]
+				start := s.Start
+				prefix := ""
+				if c := attachedCommentStart(out[:start]); c >= 0 {
+					start = c
+					prefix = out[c:s.Start]
+				}
+				if strings.TrimSpace(edit.Name) != "" || strings.TrimSpace(edit.Note) != "" {
+					comment := "<!--Buff定制：" + formatUStateComment(edit.Name, edit.Note) + "-->"
+					if prefix != "" {
+						commentNL := newlineOf(prefix)
+						prefix = comment + commentNL
+					} else {
+						prefix = comment + newlineOf(out)
+					}
+				}
+				out = out[:start] + prefix + node + out[s.End:]
 				replaced = true
 				break
 			}
@@ -197,8 +260,8 @@ func renderUStates(text string, edits map[string]UStateEdit) (string, error) {
 				continue
 			}
 			comment := "<!--Buff定制：状态 " + key + "-->"
-			if strings.TrimSpace(edit.Note) != "" {
-				comment = "<!--Buff定制：" + strings.TrimSpace(edit.Note) + "-->"
+			if strings.TrimSpace(edit.Name) != "" || strings.TrimSpace(edit.Note) != "" {
+				comment = "<!--Buff定制：" + formatUStateComment(edit.Name, edit.Note) + "-->"
 			}
 			spans := ustateSpans(out)
 			if len(spans) == 0 {
@@ -468,7 +531,12 @@ func buffRows(state *weaponState, a *archive) ([]buffRow, error) {
 	rows := []buffRow{}
 	for _, span := range ustateSpans(text) {
 		attr := ustateAttrRe.FindStringSubmatch(span.Text)
-		row := buffRow{Type: span.Type, Name: ustateNameBefore(text, span.Start)}
+		comment := ustateCommentBefore(text, span.Start)
+		name, _ := splitUStateComment(comment)
+		if edit, ok := state.UStates[span.Type]; ok && strings.TrimSpace(edit.Name) != "" {
+			name = strings.TrimSpace(edit.Name)
+		}
+		row := buffRow{Type: span.Type, Name: name}
 		if attr != nil {
 			if m := ustateIconRe.FindStringSubmatch(attr[1]); m != nil {
 				row.Icon = m[1]
@@ -561,13 +629,39 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 			}
 		}
 		edit := state.UStates[key]
+		comment := ""
+		for _, span := range ustateSpans(text) {
+			if span.Type == key {
+				comment = ustateCommentBefore(text, span.Start)
+				break
+			}
+		}
+		commentName, commentNote := splitUStateComment(comment)
+		name := edit.Name
+		if strings.TrimSpace(name) == "" {
+			name = commentName
+		}
+		note := edit.Note
+		if strings.TrimSpace(note) == "" {
+			note = commentNote
+		}
+		if strings.TrimSpace(note) == "" && node != "" {
+			note = ustateCommentBefore(text, func() int {
+				for _, span := range ustateSpans(text) {
+					if span.Type == key {
+						return span.Start
+					}
+				}
+				return -1
+			}())
+		}
 		return map[string]any{
 			"type":       key,
 			"node":       node,
 			"lua":        lua,
 			"function":   "OnGetUstate_" + key,
 			"action":     edit.Action,
-			"note":       edit.Note,
+			"note":       note,
 			"pending":    edit.Text,
 			"lua_edited": state.LuaScripts[buffLuaEntry]["OnGetUstate_"+key],
 		}, nil
@@ -588,6 +682,8 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 			return nil, fmt.Errorf("节点不是合法 XML：%w", err)
 		}
 		edit.Action = "upsert"
+		edit.Name = strings.TrimSpace(edit.Name)
+		edit.Note = strings.TrimSpace(edit.Note)
 		if state.UStates == nil {
 			state.UStates = map[string]UStateEdit{}
 		}
@@ -737,17 +833,15 @@ func weaponBuff(request Request, client, folder string, state *weaponState, stat
 	return nil, fmt.Errorf("未知状态/Buff 操作")
 }
 
-// weaponBuffApply 把「基线 + 全部编辑集」重新渲染并写入客户端。状态/Buff 编辑集
-// 不能单独落盘——客户端包里已经是「基线 + 武器编辑 + Buff 编辑」的合成结果，
-// 只套 Buff 编辑会把武器那部分抹掉，所以这里仍然走 prepareClient 那条完整管线。
+// weaponBuffApply writes only the state/Buff documents. Weapon edits are already
+// present in the installed archive and must not be rebuilt here.
 func weaponBuffApply(state *weaponState, client, folder, statePath string) (any, error) {
-	return weaponBuffApplyWith(state, client, folder, statePath, false)
+	return weaponBuffApplyWith(state, client, folder, statePath, true)
 }
 
-// weaponBuffApplyWith is weaponBuffApply with an explicit write mode. buffOnly
-// is set by the merge-import path: it writes only the state/lua edits and skips
-// the combo-rule renumber guard, which belongs to weapon applies and must not
-// veto an unrelated buff import.
+// weaponBuffApplyWith keeps the explicit mode used by merge import callers.
+// Both modes are Buff-only; the flag remains for source compatibility with
+// older callers and future import-specific messaging.
 func weaponBuffApplyWith(state *weaponState, client, folder, statePath string, buffOnly bool) (any, error) {
 	if runtime.GOOS == "windows" {
 		command := exec.Command("tasklist", "/FI", "IMAGENAME eq gfld.dat", "/FO", "CSV", "/NH")
@@ -761,36 +855,7 @@ func weaponBuffApplyWith(state *weaponState, client, folder, statePath string, b
 		}
 	}
 	entry := state.baselineFor(client)
-	if err := ensureBaseline(entry, folder, false); err != nil {
-		return nil, err
-	}
-	source, err := loadArchive(entry.path(folder))
-	if err != nil {
-		return nil, fmt.Errorf("基线无法读取：%w", err)
-	}
-	if err = source.verify(); err != nil {
-		return nil, fmt.Errorf("基线校验失败：%w", err)
-	}
-	if entry.SourceHash != "" && digest(source.data) != entry.SourceHash {
-		return nil, fmt.Errorf("基线备份已被改动，已停止写入")
-	}
-	base, err := buildWeaponBase(source, state)
-	if err != nil {
-		return nil, err
-	}
-	itemText, err := base.text("item.txt")
-	if err != nil {
-		return nil, fmt.Errorf("武器表缺失：%w", err)
-	}
-	items, err := itemsFromText(entry.Directory, itemText, true, true)
-	if err != nil {
-		return nil, err
-	}
-	info, err := inspect(base, items)
-	if err != nil {
-		return nil, err
-	}
-	plan, err := prepareClient(entry, folder, state, state.Applied, info, buffOnlyOptions(buffOnly)...)
+	plan, err := prepareBuffOnlyClient(entry, folder, state)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +871,11 @@ func weaponBuffApplyWith(state *weaponState, client, folder, statePath string, b
 	if err = atomicWrite(statePath, encoded); err != nil {
 		return nil, err
 	}
-	return map[string]any{"backup": plan.Backup, "message": "状态/Buff 已写入客户端；重启游戏后加载，实战效果仍需验证"}, nil
+	message := "状态/Buff 已写入客户端；仅更新 ustate.xml 和状态脚本，重启游戏后加载"
+	if !buffOnly {
+		message = "状态/Buff 已写入客户端；仅更新 ustate.xml 和状态脚本，重启游戏后加载"
+	}
+	return map[string]any{"backup": plan.Backup, "message": message}, nil
 }
 
 // buffOnlyOptions converts the buffOnly flag into prepareClient render options.

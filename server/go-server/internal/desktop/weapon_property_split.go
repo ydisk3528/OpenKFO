@@ -27,7 +27,13 @@ import (
 // 换段判断只看状态号首位，不看它挂在哪个动作文件上。
 
 // propertySplitPrefix 是分身号的起始值，与 render 的克隆号同域（900000000
-// 起）。两边共用「归档里已有的 SkillProId」作占用集，因此永不撞号。
+// 起）。两边共用「归档里已有的 SkillProId ∪ 已钉住的克隆号」作占用集，因此永不撞号。
+//
+// **只认归档里的号是不够的**：render 的克隆号存在 settings.json 的 property_clones
+// 里，上一次 apply 就可能已经把 900000395 这类号发给了别的武器，而它要等 render
+// 跑完才出现在归档里。新武器在这中间分身时只看归档就会拿到同一个号；下一次 apply
+// render 把钉住的号**原样复用**，两条不同武器的属性就并成一条 —— 表现是「新武器的
+// 伤害莫名其妙变成了别的武器的值」。所以选号前必须把钉住的克隆号一并算作占用。
 const propertySplitPrefix = 900000000
 
 // publicActionThreshold 是「公共动作段」的判定阈值：2xxx 段里一个动作若被
@@ -73,12 +79,15 @@ type actionSlot struct {
 	action string
 }
 
-// surveyForWeapons 只扫自建武器实际用到的动作文件。
+// surveyForWeapons 只扫自建武器实际用到的动作组。
 //
 // 不遍历全库动画是刻意的：原生 animation/*.xml 里有 3 个文件本身 XML 不规范
 // （100201.xml 少一个 </AnmDesc>、2002up.xml 注释写成 <!-、2011.xml 的 <Param>
 // 被 </AnmDesc> 关闭）。全量解析会直接失败，而现有 inspect() 只在用户选中对应
 // 武器时才碰这些文件，所以从没暴露。这里按需加载，顺手绕开它们。
+//
+// 「动作号 -> 文件」交给 archive 的组内检索（见 animation_groups.go）：只认
+// animation/<前4位>.xml 会漏掉 1002/3001 这类按角色拆开的子文件组。
 //
 // 共享判定用两把尺子并集：动作块被别的武器/状态引用（itemact 纯文本），或
 // skillproid 被别的 2xxx 段引用。任一条命中就分身。
@@ -118,8 +127,8 @@ func surveyForWeapons(a *archive, wanted map[string]Blueprint) (*skillPropertySu
 		}
 	}
 
-	// 只解析自建武器用到的动作文件。
-	needFiles := map[string]bool{}
+	// 只解析自建武器用到的动作组。
+	needPrefixes := map[string]bool{}
 	for _, s := range slots {
 		if _, ok := wanted[s.weapon]; !ok {
 			continue
@@ -128,46 +137,34 @@ func surveyForWeapons(a *archive, wanted map[string]Blueprint) (*skillPropertySu
 			continue
 		}
 		if key := actionKey(s.action); key != "" {
-			needFiles["animation/"+s.action[:4]+".xml"] = true
+			needPrefixes[s.action[:4]] = true
 		}
 	}
 	blockRefs := map[string][]string{}
 	blockIDs := map[string]bool{}
-	files := make([]string, 0, len(needFiles))
-	for file := range needFiles {
-		files = append(files, file)
+	prefixes := make([]string, 0, len(needPrefixes))
+	for prefix := range needPrefixes {
+		prefixes = append(prefixes, prefix)
 	}
-	sort.Strings(files)
-	for _, file := range files {
-		if _, ok := a.entries[file]; !ok {
-			continue
-		}
-		animation, err := a.text(file)
-		if err != nil {
-			return nil, err
-		}
-		prefix := strings.TrimSuffix(strings.TrimPrefix(file, "animation/"), ".xml")
-		for _, original := range animationPattern.FindAllString(animation, -1) {
-			node, err := parseXML(original)
-			if err != nil {
-				// 原生脏数据：跳过该块，不让它拖垮整次分身。
-				continue
-			}
-			id := strings.TrimSpace(node.get("id"))
-			if id == "" {
-				continue
-			}
-			key := prefix + "/" + id
+	sort.Strings(prefixes)
+	for _, prefix := range prefixes {
+		for number, found := range a.groupBlockIndex(prefix) {
+			key := prefix + "/" + strconv.Itoa(number)
 			blockIDs[key] = true
-			refs := []string{}
-			node.walk(func(child *xmlNode) {
-				if child.tag == "Anm" {
-					if sp := strings.TrimSpace(child.get("skillproid")); sp != "" {
-						refs = append(refs, sp)
+			for _, entry := range found {
+				refs := []string{}
+				entry.block.node.walk(func(child *xmlNode) {
+					if child.tag == "Anm" {
+						if sp := strings.TrimSpace(child.get("skillproid")); sp != "" {
+							refs = append(refs, sp)
+						}
 					}
-				}
-			})
-			blockRefs[key] = refs
+				})
+				// **累加**而不是覆盖：同名 <AnmDesc> 允许注册多条（无条件 + 条件
+				// 分支），覆盖会让前一份块引用的 skillproid 整个漏掉，分身时它们
+				// 仍与供体共享。
+				blockRefs[key] = append(blockRefs[key], refs...)
+			}
 		}
 	}
 
@@ -300,10 +297,17 @@ func splitClonedProperties(base *archive, state *weaponState) (*archive, error) 
 		return nil, err
 	}
 
-	// skillproid 占用集：归档已有的 + 本次分配的。
+	// skillproid 占用集：归档已有的 + render 已钉住的克隆号 + 本次分配的。
 	occupied := map[string]bool{}
 	for id := range survey.properties {
 		occupied[id] = true
+	}
+	for _, clones := range state.PropertyClones {
+		for _, id := range clones {
+			if id != "" {
+				occupied[id] = true
+			}
+		}
 	}
 	nextID := propertySplitPrefix
 	allocate := func() (string, error) {
@@ -517,38 +521,56 @@ func splitClonedProperties(base *archive, state *weaponState) (*archive, error) 
 				return nil, err
 			}
 		}
-		target, ok := currentBlock(animation, parts[1])
-		if !ok {
+		// 同名 <AnmDesc> 可能有多份（无条件 + 条件分支），必须逐个处理：
+		// 只取一份会让另一份留在供体 id 下 —— 新武器就丢了那条分支。
+		variants := variantTexts(animation, parts[1])
+		if len(variants) == 0 {
 			return nil, fmt.Errorf("%s 缺少动作块 %s", file, parts[1])
 		}
-		rewritten, err := rewriteBlockSkillProIDs(target, blockPlan[action])
-		if err != nil {
-			return nil, err
+		rewritten := make([]string, 0, len(variants))
+		for _, variant := range variants {
+			next, err := rewriteBlockSkillProIDs(variant, blockPlan[action])
+			if err != nil {
+				return nil, err
+			}
+			rewritten = append(rewritten, next)
 		}
 		newID := blockTarget[action]
 		if newID != parts[1] {
-			// 块分身：改 id 后追加到文件末尾，原块原样保留给供体。
-			renamed, err := renameBlockID(rewritten, newID)
-			if err != nil {
-				return nil, err
+			// 块分身：全部变体各自改 id 后追加到文件末尾，原块原样保留给供体。
+			appended := make([]string, 0, len(rewritten))
+			for _, variant := range rewritten {
+				renamed, err := renameBlockID(variant, newID)
+				if err != nil {
+					return nil, err
+				}
+				appended = append(appended, renamed)
 			}
 			ending := regexp.MustCompile(`</AnmInfo\s*>`)
 			if len(ending.FindAllStringIndex(animation, -1)) != 1 {
 				return nil, fmt.Errorf("%s 结构错误", file)
 			}
 			animation = ending.ReplaceAllStringFunc(animation, func(string) string {
-				return "\n" + renamed + "\n</AnmInfo>"
+				return "\n" + strings.Join(appended, "\n") + "\n</AnmInfo>"
 			})
 			fileBlocks[file] = animation
 			continue
 		}
-		if rewritten == target {
-			continue
+		// 原地替换：每份块各自替换（文本不同，不会互相干扰）。
+		changed := false
+		for i, variant := range variants {
+			if rewritten[i] == variant {
+				continue
+			}
+			if strings.Count(animation, variant) != 1 {
+				return nil, fmt.Errorf("%s 的动作块 %s 无法唯一替换", file, parts[1])
+			}
+			animation = strings.Replace(animation, variant, rewritten[i], 1)
+			changed = true
 		}
-		if strings.Count(animation, target) != 1 {
-			return nil, fmt.Errorf("%s 的动作块 %s 无法唯一替换", file, parts[1])
+		if changed {
+			fileBlocks[file] = animation
 		}
-		fileBlocks[file] = strings.Replace(animation, target, rewritten, 1)
 	}
 
 	// ---- 落盘 ----

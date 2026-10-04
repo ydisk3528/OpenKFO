@@ -74,6 +74,15 @@ type AnmSegment struct {
 	Clip     int               `json:"clip_frames,omitempty"`
 	Scope    []FrameSwitchAttr `json:"scope,omitempty"`
 	CharBox  []FrameSwitchAttr `json:"char_scope,omitempty"`
+	// ReplayTimes 是卡帧数（原生 <Anm replaytimes="2">）：这一段的画面定格，
+	// 用来把多段命中的伤害挤在几帧里播出来。不造成伤害，只拉长时间轴。
+	ReplayTimes int `json:"replay_times,omitempty"`
+	// Condition 是这段动作归属的触发条件：动作块 <AnmDesc> 头部的
+	// <Condition><Ustate id="N"/>（空 = 无条件生效）。同一份 AnmDesc id 允许注册
+	// 多条——一条无条件 + 若干带条件，引擎按玩家是否拥有该状态二选一。两份块的
+	// <Anm id> 是各自独立编号的（实测 253521 的 521011 两块都是 1/2/3/4…），
+	// 合到一起后光看 id 分不出谁是谁，所以必须把条件带出来给界面显示。
+	Condition string `json:"condition,omitempty"`
 }
 
 // StageMarker 是轨道上的一条标记（特效、音效、接招窗口、防护窗口……）。
@@ -156,9 +165,11 @@ func attrInt(attrs []FrameSwitchAttr, key string) (int, bool) {
 	return 0, false
 }
 
-// segmentsOf 读一个动作块里的全部片断（按文档顺序）。
+// segmentsOf 读一个动作块里的全部片断（按文档顺序）。condition 取自动作块
+// （<AnmDesc>）头部的 <Condition><Ustate>，同一块内所有片断共享同一个条件。
 func segmentsOf(node *xmlNode, client string) []AnmSegment {
 	found := []AnmSegment{}
+	condition := conditionUstate(node)
 	var walk func(*xmlNode)
 	walk = func(current *xmlNode) {
 		if current == nil || current.comment {
@@ -166,12 +177,14 @@ func segmentsOf(node *xmlNode, client string) []AnmSegment {
 		}
 		if current.tag == "Anm" {
 			segment := AnmSegment{
-				ID:       strings.TrimSpace(current.get("id")),
-				Name:     strings.TrimSpace(current.get("name")),
-				SkillPro: strings.TrimSpace(current.get("skillproid")),
+				ID:        strings.TrimSpace(current.get("id")),
+				Name:      strings.TrimSpace(current.get("name")),
+				SkillPro:  strings.TrimSpace(current.get("skillproid")),
+				Condition: condition,
 			}
 			segment.Start, _ = strconv.Atoi(strings.TrimSpace(current.get("startframe")))
 			segment.End, _ = strconv.Atoi(strings.TrimSpace(current.get("endframe")))
+			segment.ReplayTimes, _ = strconv.Atoi(strings.TrimSpace(current.get("replaytimes")))
 			for _, child := range current.children {
 				if child.comment {
 					continue
@@ -555,11 +568,15 @@ func validateScopes(a *archive, weaponKey string, edits map[int]map[string][]Fra
 
 // applyScopes 把攻击范围编辑写进动作块。跑在 applyBlockElements 之后：
 // 需要独占块时在这里克隆，原武器一个字节不动。
-func applyScopes(a *archive, state *weaponState, items []Item) (*archive, error) {
+func applyScopes(a *archive, state *weaponState, items []Item, wanted ...map[int]bool) (*archive, error) {
 	if len(state.Scopes) == 0 {
 		return a, nil
 	}
-	info, err := inspect(a, items)
+	var filter map[int]bool
+	if len(wanted) > 0 {
+		filter = wanted[0]
+	}
+	info, err := inspectFilteredWithActions(a, items, filter, projectionActions(state, filter)...)
 	if err != nil {
 		return nil, err
 	}
@@ -630,22 +647,22 @@ func applyScopes(a *archive, state *weaponState, items []Item) (*archive, error)
 			if action == "" || action == "0" {
 				return nil, fmt.Errorf("状态 %d 没有动作，无法编辑攻击范围", stage)
 			}
-			blocks := info.blocks[actionKey(action)]
-			if len(blocks) != 1 {
-				return nil, fmt.Errorf("动作 %s 不存在或不唯一", action)
+			variants := actionVariants(info, action)
+			chosen, ok := pickBlock(variants)
+			if !ok {
+				return nil, fmt.Errorf("动作 %s 不存在", action)
 			}
-			file := "animation/" + action[:4] + ".xml"
+			file, err := a.animationWriteFile(action)
+			if err != nil {
+				return nil, err
+			}
 			animation, err := loadAnimation(file)
 			if err != nil {
 				return nil, err
 			}
-			target := blocks[0].original
-			if strings.Count(animation, target) != 1 {
-				found, ok := currentBlock(animation, strings.TrimSpace(blocks[0].node.get("id")))
-				if !ok {
-					return nil, fmt.Errorf("动作定义无法唯一替换")
-				}
-				target = found
+			target, err := locateEditableBlock(animation, chosen)
+			if err != nil {
+				return nil, err
 			}
 			rewritten := target
 			changed := false
@@ -672,13 +689,11 @@ func applyScopes(a *archive, state *weaponState, items []Item) (*archive, error)
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
-				clone := retitleBlock(rewritten, cloneID)
-				if !anmInfoEndPattern.MatchString(animation) {
-					return nil, fmt.Errorf("动作表结构错误")
+				next, err := cloneBlockVariants(animation, variants, chosen.condition, rewritten, cloneID)
+				if err != nil {
+					return nil, err
 				}
-				animation = anmInfoEndPattern.ReplaceAllStringFunc(animation, func(string) string {
-					return "\n" + clone + "\n</AnmInfo>"
-				})
+				animation = next
 				row[column] = action[:4] + fmt.Sprintf("%03d", cloneID)
 				tableChanged = true
 			} else {
@@ -754,7 +769,7 @@ func scopeFiles(source *archive, state *weaponState) map[string]bool {
 				action = remap.Action
 			}
 			if len(action) >= 5 && action != "0" {
-				files["animation/"+action[:4]+".xml"] = true
+				source.allowGroupFiles(files, action)
 			}
 		}
 	}

@@ -274,11 +274,15 @@ func validateSwitchFrames(position string, sw FrameSwitch, startKey, endKey stri
 // runs right after applyRemaps, so a stage that was remapped is already pointing
 // at its private block; anything still shared gets cloned here instead of being
 // edited in place.
-func applyFrameSwitches(a *archive, state *weaponState, items []Item) (*archive, error) {
+func applyFrameSwitches(a *archive, state *weaponState, items []Item, wanted ...map[int]bool) (*archive, error) {
 	if len(state.FrameSwitches) == 0 {
 		return a, nil
 	}
-	info, err := inspect(a, items)
+	var filter map[int]bool
+	if len(wanted) > 0 {
+		filter = wanted[0]
+	}
+	info, err := inspectFilteredWithActions(a, items, filter, projectionActions(state, filter)...)
 	if err != nil {
 		return nil, err
 	}
@@ -347,22 +351,22 @@ func applyFrameSwitches(a *archive, state *weaponState, items []Item) (*archive,
 			if action == "" || action == "0" {
 				return nil, fmt.Errorf("状态 %d 没有动作，无法编辑帧级连招", stage)
 			}
-			blocks := info.blocks[actionKey(action)]
-			if len(blocks) != 1 {
-				return nil, fmt.Errorf("动作 %s 不存在或不唯一", action)
+			variants := actionVariants(info, action)
+			chosen, ok := pickBlock(variants)
+			if !ok {
+				return nil, fmt.Errorf("动作 %s 不存在", action)
 			}
-			file := "animation/" + action[:4] + ".xml"
+			file, err := a.animationWriteFile(action)
+			if err != nil {
+				return nil, err
+			}
 			animation, err := loadAnimation(file)
 			if err != nil {
 				return nil, err
 			}
-			target := blocks[0].original
-			if strings.Count(animation, target) != 1 {
-				found, ok := currentBlock(animation, strings.TrimSpace(blocks[0].node.get("id")))
-				if !ok {
-					return nil, fmt.Errorf("动作定义无法唯一替换")
-				}
-				target = found
+			target, err := locateEditableBlock(animation, chosen)
+			if err != nil {
+				return nil, err
 			}
 			rewritten, changed := rewriteFrameSwitches(target, switches)
 			if !changed {
@@ -374,13 +378,11 @@ func applyFrameSwitches(a *archive, state *weaponState, items []Item) (*archive,
 				if cloneID == 0 {
 					return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 				}
-				clone := retitleBlock(rewritten, cloneID)
-				if !anmInfoEndPattern.MatchString(animation) {
-					return nil, fmt.Errorf("动作表结构错误")
+				next, err := cloneBlockVariants(animation, variants, chosen.condition, rewritten, cloneID)
+				if err != nil {
+					return nil, err
 				}
-				animation = anmInfoEndPattern.ReplaceAllStringFunc(animation, func(string) string {
-					return "\n" + clone + "\n</AnmInfo>"
-				})
+				animation = next
 				row[column] = action[:4] + fmt.Sprintf("%03d", cloneID)
 				tableChanged = true
 			} else {
@@ -468,7 +470,7 @@ func frameSwitchFiles(source *archive, state *weaponState) map[string]bool {
 				action = remap.Action
 			}
 			if len(action) >= 5 && action != "0" {
-				files["animation/"+action[:4]+".xml"] = true
+				source.allowGroupFiles(files, action)
 			}
 		}
 	}

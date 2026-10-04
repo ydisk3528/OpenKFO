@@ -175,7 +175,10 @@ func syncWeaponEffects(a *archive, created map[string]Blueprint, rows map[string
 				if len(action) <= 4 {
 					continue
 				}
-				file := "animation/" + action[:4] + ".xml"
+				file := a.animationFileFor(action)
+				if file == "" {
+					continue
+				}
 				animation, err := loadAnimation(file)
 				if err != nil {
 					// itemact ships dead references (cells pointing at animation

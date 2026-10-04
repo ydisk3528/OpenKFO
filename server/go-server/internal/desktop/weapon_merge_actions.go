@@ -99,11 +99,9 @@ func planMergeActions(target *archive, manifest *mergeManifest, propertyRemap ma
 		}
 		for prefix, list := range w.AnimationBlocks {
 			if !loaded[prefix] {
-				animation, e := target.text("animation/" + prefix + ".xml")
-				if e != nil {
-					return e
-				}
-				for _, block := range animationPattern.FindAllString(animation, -1) {
+				// 组内检索：1002/1006/3001… 这 8 组没有同名 4 位文件，块只在
+				// 6 位子文件里。按 animation/<前缀>.xml 取会整组读不到。
+				for _, block := range target.groupBlockTexts(prefix) {
 					n, e := parseXML(block)
 					if e != nil {
 						return e

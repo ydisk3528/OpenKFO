@@ -33,6 +33,22 @@ func TestRenderUStatesUpsertExisting(t *testing.T) {
 	}
 }
 
+func TestRenderUStatesUpdatesDescriptionComment(t *testing.T) {
+	node := "<Data type=\"2\" ActiveState = \"0\"><Logic></Logic></Data>"
+	out, err := renderUStates(sampleUState, map[string]UStateEdit{
+		"2": {Action: "upsert", Text: node, Note: "新的状态说明"},
+	})
+	if err != nil {
+		t.Fatalf("renderUStates: %v", err)
+	}
+	if strings.Contains(out, "<!--乙-->") || !strings.Contains(out, "<!--Buff定制：新的状态说明-->") {
+		t.Fatalf("状态说明注释未更新：%s", out)
+	}
+	if err := checkXMLWellFormed(out); err != nil {
+		t.Fatalf("结果 XML 不合法：%v", err)
+	}
+}
+
 func TestRenderUStatesInsertNewAfterLastData(t *testing.T) {
 	node := "<Data type=\"433\" ActiveState = \"0\" Icon = \"x.png\"><Logic>\n</Logic></Data>"
 	out, err := renderUStates(sampleUState, map[string]UStateEdit{"433": {Action: "upsert", Text: node}})

@@ -209,6 +209,7 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	// unambiguous and refuse the rest before anything is written, so a saved
 	// black/white list can never silently stop matching. Buff-only writes do
 	// not renumber stages, so the check is skipped there.
+	clearClearedStageReferences(state, nil)
 	if !cfg.skipComboReconcile {
 		if _, err := reconcileComboRules(info, state); err != nil {
 			return nil, err
@@ -247,10 +248,29 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	if base, err = applyScopes(base, state, items); err != nil {
 		return nil, fmt.Errorf("攻击范围：%w", err)
 	}
+	// 分支形态：给状态再注册一份带 <Condition> 的动作块（引擎按是否拥有该状态
+	// 二选一）。新块的 skillproid 在这里分配并注册。
+	currentArchive, err := parseArchive(current)
+	if err != nil {
+		return nil, err
+	}
+	if base, err = applyVariants(base, state, items, currentArchive); err != nil {
+		return nil, fmt.Errorf("分支形态：%w", err)
+	}
+	// 分支写回可能新增或重分配 skillproid。后续规则协调、ID 克隆和
+	// render 校验必须使用最终动作结构，不能继续沿用分支写回前的快照。
+	if info, err = inspect(base, items); err != nil {
+		return nil, fmt.Errorf("分支形态结果解析失败：%w", err)
+	}
 	// 招式特效（<Effect> / <HitEffect>）：共用动作块会先克隆成该武器独占，
 	// 原有招式与其它武器不受影响。
 	if base, err = applyStageEffects(base, state); err != nil {
 		return nil, fmt.Errorf("招式特效：%w", err)
+	}
+	for key, rows := range state.EffectRows {
+		if err = validateAppliedEffectRows(source, entry.Directory, rows); err != nil {
+			return nil, fmt.Errorf("武器 %s 特效登记：%w", key, err)
+		}
 	}
 	if len(state.Created) > 0 {
 		if base, err = syncWeaponEffects(base, state.Created, state.EffectRows); err != nil {
@@ -287,6 +307,57 @@ func prepareClient(entry *clientBaseline, folder string, state *weaponState, pla
 	return &preparedClient{Entry: entry, Source: source, Current: current, Data: data}, nil
 }
 
+// prepareBuffOnlyClient overlays only ustate.xml and the dedicated state script
+// onto the currently applied archive. It deliberately does not rebuild the
+// weapon workspace from the baseline, so unrelated weapon edits and reserved
+// hit-property IDs cannot interfere with a Buff-only apply.
+func prepareBuffOnlyClient(entry *clientBaseline, folder string, state *weaponState) (*preparedClient, error) {
+	if err := ensureBaseline(entry, folder, false); err != nil {
+		return nil, err
+	}
+	source, err := loadArchive(entry.path(folder))
+	if err != nil {
+		return nil, fmt.Errorf("基线无法读取：%w", err)
+	}
+	if err = source.verify(); err != nil {
+		return nil, fmt.Errorf("基线校验失败：%w", err)
+	}
+	if entry.SourceHash != "" && digest(source.data) != entry.SourceHash {
+		return nil, fmt.Errorf("基线备份已被改动，已停止写入")
+	}
+	current, err := os.ReadFile(configPath(entry.Directory))
+	if err != nil {
+		return nil, fmt.Errorf("读不到 %s", configPath(entry.Directory))
+	}
+	expected := entry.AppliedHash
+	if expected == "" {
+		expected = digest(source.data)
+	}
+	if digest(current) != expected {
+		return nil, fmt.Errorf("游戏配置已被其他程序修改，已停止覆盖；如确认无误可「重新采集基线」")
+	}
+	currentArchive, err := parseArchive(current)
+	if err != nil {
+		return nil, fmt.Errorf("当前客户端配置包无法解析：%w", err)
+	}
+	updated, err := applyBuffEdits(currentArchive, state)
+	if err != nil {
+		return nil, fmt.Errorf("状态/Buff 配置：%w", err)
+	}
+	data, err := compactArchive(updated.data)
+	if err != nil {
+		return nil, err
+	}
+	verified, err := parseArchive(data)
+	if err != nil {
+		return nil, err
+	}
+	if err = verified.verify(); err != nil {
+		return nil, err
+	}
+	return &preparedClient{Entry: entry, Source: source, Current: current, Data: data}, nil
+}
+
 // commitClient backs up whatever is on disk, writes the rendered archive and
 // records the new hashes.
 func commitClient(prepared *preparedClient, folder string) error {
@@ -307,6 +378,7 @@ func commitClient(prepared *preparedClient, folder string) error {
 // buildWeaponBase layers the self-made weapon rows and the combo/effect
 // registrations of the current edit set onto a pristine baseline.
 func buildWeaponBase(source *archive, state *weaponState) (*archive, error) {
+	clearClearedStageReferences(state, nil)
 	base := source
 	var err error
 	if len(state.Created) > 0 {
@@ -377,7 +449,9 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 	for _, stages := range state.Remaps {
 		for _, remap := range stages {
 			if remap != nil && len(remap.Action) >= 4 {
-				allowed["animation/"+remap.Action[:4]+".xml"] = true
+				for _, file := range verified.groupFiles(remap.Action[:4]) {
+					allowed[file] = true
+				}
 			}
 		}
 	}
@@ -391,6 +465,9 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 		allowed[name] = true
 	}
 	for name := range scopeFiles(verified, state) {
+		allowed[name] = true
+	}
+	for name := range variantFiles(verified, state) {
 		allowed[name] = true
 	}
 	for name := range stageEffectFiles(verified, state) {
@@ -408,7 +485,9 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 				if !stageNeedsSplit(stage.State) || len(stage.Action) < 4 {
 					continue
 				}
-				allowed["animation/"+stage.Action[:4]+".xml"] = true
+				for _, file := range verified.groupFiles(stage.Action[:4]) {
+					allowed[file] = true
+				}
 			}
 		}
 	}
@@ -417,7 +496,9 @@ func checkAllowedWrites(source, verified *archive, state *weaponState, info *ins
 			for _, rule := range state.Applied[fmt.Sprint(weapon.ID)] {
 				for _, stage := range weapon.Stages {
 					if stage.Stage == rule.Stage && len(stage.Action) >= 4 {
-						allowed["animation/"+stage.Action[:4]+".xml"] = true
+						for _, file := range verified.groupFiles(stage.Action[:4]) {
+							allowed[file] = true
+						}
 					}
 				}
 			}

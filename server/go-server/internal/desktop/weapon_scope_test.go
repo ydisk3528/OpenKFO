@@ -61,6 +61,38 @@ func TestSegmentsAndMarkersParse(t *testing.T) {
 	}
 }
 
+// 同一 actionKey 下可能存在两条同名 <AnmDesc>（一条无条件 + 一条带 <Condition>），
+// 引擎按玩家是否拥有该状态二选一。片断必须把条件带出来，否则两份 <Anm id> 冲突，
+// 界面分不出谁属于哪个条件。
+func TestSegmentsCarryCondition(t *testing.T) {
+	plain, err := parseXML(`<AnmDesc id="521011">` +
+		`<Anm id="2" name="600180" startframe="15" endframe="18" skillproid="5210110" />` +
+		`</AnmDesc>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := segmentsOf(plain, ""); len(got) != 1 || got[0].Condition != "" {
+		t.Fatalf("无条件块不应带条件：%+v", got)
+	}
+	cond, err := parseXML(`<AnmDesc id="521011">` +
+		`<Condition><Ustate id="406" /></Condition>` +
+		`<Anm id="2" name="600180" startframe="14" endframe="15" skillproid="5210111" />` +
+		`<Anm id="3" name="600180" startframe="15" endframe="15" replaytimes="2" />` +
+		`</AnmDesc>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := segmentsOf(cond, "")
+	if len(got) != 2 {
+		t.Fatalf("应解析出 2 段，得到 %d", len(got))
+	}
+	for _, segment := range got {
+		if segment.Condition != "406" {
+			t.Fatalf("条件块内每段都应带 406，得到 %+v", segment)
+		}
+	}
+}
+
 func TestRewriteSegmentScopeReplaceAndInsert(t *testing.T) {
 	block := `<AnmDesc id="3104">` +
 		`<Anm id="1" name="60011883" startframe="0" endframe="19" />` +

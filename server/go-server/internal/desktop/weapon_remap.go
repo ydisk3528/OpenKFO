@@ -26,16 +26,49 @@ import (
 
 // StageRemap overrides one state of one weapon.
 type StageRemap struct {
-	Action     string `json:"action,omitempty"`
-	PropertyID string `json:"property_id,omitempty"`
-	Label      string `json:"label,omitempty"`
+	Action      string            `json:"action,omitempty"`
+	PropertyID  string            `json:"property_id,omitempty"`
+	PropertyMap map[string]string `json:"property_map,omitempty"`
+	Label       string            `json:"label,omitempty"`
 }
 
 // ExtraProperty is a hit-property node owned by the editor: a copy of a
 // template node, emitted under a fresh SkillProId whenever the configuration is
 // written.
 type ExtraProperty struct {
-	Template string `json:"template"`
+	Template    string `json:"template"`
+	OwnerWeapon string `json:"owner_weapon,omitempty"`
+}
+
+func validateExtraPropertyOwner(extra ExtraProperty, weaponKey, id string) error {
+	owner := strings.TrimSpace(extra.OwnerWeapon)
+	if owner != "" && owner != weaponKey {
+		return fmt.Errorf("命中属性 %s 属于武器 %s，不能跨武器使用", id, owner)
+	}
+	return nil
+}
+
+func extraPropertyOwners(state *weaponState) (map[string]string, error) {
+	owners := map[string]string{}
+	for weaponKey, stages := range state.Remaps {
+		for _, remap := range stages {
+			if remap == nil || strings.TrimSpace(remap.PropertyID) == "" {
+				continue
+			}
+			id := strings.TrimSpace(remap.PropertyID)
+			if _, ok := state.ExtraProperties[id]; !ok {
+				continue
+			}
+			if err := validateExtraPropertyOwner(state.ExtraProperties[id], weaponKey, id); err != nil {
+				return nil, err
+			}
+			if previous := owners[id]; previous != "" && previous != weaponKey {
+				return nil, fmt.Errorf("命中属性 %s 不能跨武器使用（%s、%s）", id, previous, weaponKey)
+			}
+			owners[id] = weaponKey
+		}
+	}
+	return owners, nil
 }
 
 var (
@@ -59,11 +92,34 @@ func ruleStageOf(state int) int {
 // extra property nodes cloned from their template. States registered as
 // cleared are zeroed out entirely. It runs after blueprints and combo tables
 // so the rest of the render pipeline sees the final structure.
-func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error) {
+func applyRemaps(a *archive, state *weaponState, items []Item, wanted ...map[int]bool) (*archive, error) {
+	if len(wanted) > 0 {
+		clearClearedStageReferences(state, wanted[0])
+	} else {
+		clearClearedStageReferences(state, nil)
+	}
 	if len(state.Remaps) == 0 && len(state.ExtraProperties) == 0 && len(state.Cleared) == 0 {
 		return a, nil
 	}
-	info, err := inspect(a, items)
+	var filter map[int]bool
+	if len(wanted) > 0 {
+		filter = wanted[0]
+	}
+	extraActions := []string{}
+	if filter != nil {
+		for key, stages := range state.Remaps {
+			id, parseErr := strconv.Atoi(key)
+			if parseErr != nil || !filter[id] {
+				continue
+			}
+			for _, remap := range stages {
+				if remap != nil && strings.TrimSpace(remap.Action) != "" {
+					extraActions = append(extraActions, strings.TrimSpace(remap.Action))
+				}
+			}
+		}
+	}
+	info, err := inspectFilteredWithActions(a, items, filter, extraActions...)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +164,19 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 
 	propertyClones := []string{}
 	tableChanged := false
+	owners, err := extraPropertyOwners(state)
+	if err != nil {
+		return nil, err
+	}
+
+	// 详情投影只加载部分动作；归属守卫必须检查整个客户端动作表。
+	ownershipInfo := info
+	if filter != nil && len(state.ExtraProperties) > 0 {
+		ownershipInfo, err = inspect(a, items)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Extra hit-property nodes, emitted first and sorted for determinism.
 	extraIDs := make([]string, 0, len(state.ExtraProperties))
@@ -116,18 +185,61 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 	}
 	sort.Strings(extraIDs)
 	for _, id := range extraIDs {
-		extra := state.ExtraProperties[id]
-		nodes := info.properties[extra.Template]
-		if len(nodes) != 1 {
-			return nil, fmt.Errorf("命中属性模板 %s 不存在或不唯一", extra.Template)
+		number, parseErr := strconv.Atoi(id)
+		if parseErr != nil || number < 800000001 || number > 899999999 || strconv.Itoa(number) != id {
+			return nil, fmt.Errorf("新增命中属性 %s 会覆盖原生或保留编号，必须使用 800000001..899999999", id)
 		}
-		clone := nodes[0].clone()
+		extra := state.ExtraProperties[id]
+		if owner := owners[id]; owner != "" && extra.OwnerWeapon == "" {
+			extra.OwnerWeapon = owner
+		}
+		for action, references := range ownershipInfo.owners {
+			if !includes(propertyIDsOfAction(ownershipInfo, action), id) {
+				continue
+			}
+			for reference := range references {
+				weaponKey := strings.SplitN(reference, ":", 2)[0]
+				if extra.OwnerWeapon == "" || extra.OwnerWeapon != weaponKey {
+					return nil, fmt.Errorf("新增命中属性 %s 已被武器 %s 占用，不能跨武器使用", id, weaponKey)
+				}
+			}
+		}
+		templateID := strings.TrimSpace(extra.Template)
+		if templateID == id {
+			return nil, fmt.Errorf("新增命中属性 %s 会覆盖客户端已有定义，不能以自身为模板", id)
+		}
+		node, ok := info.propertyNode(templateID)
+		if !ok {
+			return nil, fmt.Errorf("命中属性模板 %s 在客户端里不存在", extra.Template)
+		}
+		clone := node.clone()
 		clone.set("SkillProId", id)
 		encoded, err := clone.serialize()
 		if err != nil {
 			return nil, err
 		}
+		if _, exists := info.propertyNode(id); exists {
+			// 重新采集基线后，上一轮作者新增的节点会被吸收到客户端表中。
+			// 只有在现有节点仍是同一模板的逐字段副本时才幂等复用；同号但
+			// 内容不同可能是原生或别的武器所有，绝不能覆盖。
+			for _, existing := range info.properties[id] {
+				existingText, err := existing.serialize()
+				if err != nil {
+					return nil, err
+				}
+				if existingText != encoded {
+					return nil, fmt.Errorf("新增命中属性 %s 已被客户端或其他武器占用", id)
+				}
+			}
+			state.ExtraProperties[id] = extra
+			continue
+		}
+		state.ExtraProperties[id] = extra
 		propertyClones = append(propertyClones, encoded)
+		// 同轮 remap 需要看到刚登记的新增属性；同时保留第一条定义语义，
+		// 避免后续重复注册意外覆盖索引中的原生节点。
+		info.properties[id] = append(info.properties[id], clone)
+		info.ordered = append(info.ordered, clone)
 	}
 
 	// Per-weapon remaps. Cleared states come first: the column is zeroed and
@@ -145,6 +257,12 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 	}
 	sort.Strings(sorted)
 	for _, weaponKey := range sorted {
+		if filter != nil {
+			id, parseErr := strconv.Atoi(weaponKey)
+			if parseErr != nil || !filter[id] {
+				continue
+			}
+		}
 		line := rowIndex[weaponKey]
 		if line == 0 {
 			return nil, fmt.Errorf("武器 %s 不在动作表中", weaponKey)
@@ -155,6 +273,9 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 		}
 		row := strings.Split(strings.TrimSuffix(actionLines[line], "\r"), "\t")
 		for _, column := range sortedIntKeys(state.Cleared[weaponKey]) {
+			if !state.Cleared[weaponKey][column] {
+				continue
+			}
 			if index, ok := columns[strconv.Itoa(column)]; ok && index < len(row) {
 				row[index] = "0"
 				tableChanged = true
@@ -170,6 +291,9 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 		sort.Ints(stages)
 		for _, stage := range stages {
 			remap := state.Remaps[weaponKey][stage]
+			if remap == nil {
+				continue
+			}
 			column, ok := columns[strconv.Itoa(stage)]
 			if !ok || column >= len(row) {
 				return nil, fmt.Errorf("状态 %d 不存在", stage)
@@ -186,19 +310,27 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 				tableChanged = true
 			}
 			if remap.PropertyID != "" {
-				if len(info.properties[remap.PropertyID]) != 1 {
-					return nil, fmt.Errorf("命中属性 %s 不存在或不唯一", remap.PropertyID)
+				if _, ok := info.propertyNode(remap.PropertyID); !ok {
+					return nil, fmt.Errorf("命中属性 %s 在客户端里不存在", remap.PropertyID)
 				}
-				block := info.blocks[actionKey(action)][0]
-				file := "animation/" + action[:4] + ".xml"
+				variants := actionVariants(info, action)
+				source, ok := pickBlock(variants)
+				if !ok {
+					return nil, fmt.Errorf("动作 %s 不存在", action)
+				}
+				file, err := a.animationWriteFile(action)
+				if err != nil {
+					return nil, err
+				}
 				animation, err := loadAnimation(file)
 				if err != nil {
 					return nil, err
 				}
-				changed := block.node.clone()
+				changed := source.node.clone()
 				shared := len(info.owners[action]) > 1
+				cloneID := 0
 				if shared {
-					cloneID := entryProperties.allocate(action, reserved)
+					cloneID = entryProperties.allocate(action, reserved)
 					if cloneID == 0 {
 						return nil, fmt.Errorf("%s 独立动作编号空间不足", file)
 					}
@@ -208,33 +340,61 @@ func applyRemaps(a *archive, state *weaponState, items []Item) (*archive, error)
 					tableChanged = true
 				}
 				changed.walk(func(node *xmlNode) {
-					node.set("skillproid", remap.PropertyID)
+					if node.tag != "Anm" {
+						return
+					}
+					propertyID := strings.TrimSpace(remap.PropertyID)
+					if remap.PropertyMap != nil {
+						if mapped := strings.TrimSpace(remap.PropertyMap[strings.TrimSpace(node.get("skillproid"))]); mapped != "" {
+							propertyID = mapped
+						}
+					}
+					if propertyID != "" {
+						node.set("skillproid", propertyID)
+					}
 				})
 				encoded, err := changed.serialize()
 				if err != nil {
 					return nil, err
 				}
 				if shared {
-					loc := anmInfoEndPattern.FindAllStringIndex(animation, -1)
-					if len(loc) != 1 {
-						return nil, fmt.Errorf("动作表结构错误")
-					}
-					animation = anmInfoEndPattern.ReplaceAllStringFunc(animation, func(string) string {
-						return "\n" + encoded + "\n</AnmInfo>"
-					})
-				} else {
-					target := block.original
-					if strings.Count(animation, target) != 1 {
-						// An earlier stage of this same pass may already have
-						// rewritten this very block (two states can remap onto
-						// one action), so the pristine text is gone: match by id.
-						found, ok := currentBlock(animation, strings.TrimSpace(block.node.get("id")))
-						if !ok {
-							return nil, fmt.Errorf("动作定义无法唯一替换")
+					refs := make([]splitRef, 0, len(remap.PropertyMap))
+					for oldID, newID := range remap.PropertyMap {
+						if strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+							continue
 						}
-						target = found
+						refs = append(refs, splitRef{oldID: strings.TrimSpace(oldID), newID: strings.TrimSpace(newID)})
+					}
+					next, err := cloneBlockVariants(animation, variants, source.condition, encoded, cloneID, refs)
+					if err != nil {
+						return nil, err
+					}
+					animation = next
+				} else {
+					target, err := locateEditableBlock(animation, source)
+					if err != nil {
+						return nil, err
 					}
 					animation = strings.Replace(animation, target, encoded, 1)
+					if len(remap.PropertyMap) > 0 {
+						refs := make([]splitRef, 0, len(remap.PropertyMap))
+						for oldID, newID := range remap.PropertyMap {
+							if strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+								continue
+							}
+							refs = append(refs, splitRef{oldID: strings.TrimSpace(oldID), newID: strings.TrimSpace(newID)})
+						}
+						for _, variant := range variants {
+							if variant.condition == source.condition || variant.original == target {
+								continue
+							}
+							rewritten, rewriteErr := rewriteBlockSkillProIDs(variant.original, refs)
+							if rewriteErr != nil {
+								return nil, rewriteErr
+							}
+							animation = strings.Replace(animation, variant.original, rewritten, 1)
+						}
+					}
 				}
 				animations[file] = animation
 			}
@@ -322,8 +482,8 @@ func actionCatalog(info *inspection) []map[string]string {
 		id := key[strings.IndexByte(key, '/')+1:]
 		action := prefix + id
 		label := action
-		if len(blocks) == 1 {
-			if description := actionDescription(blocks[0].node); description != "" {
+		if chosen, ok := pickBlock(blocks); ok {
+			if description := actionDescription(chosen.node); description != "" {
 				label = description
 			}
 		}
@@ -334,25 +494,47 @@ func actionCatalog(info *inspection) []map[string]string {
 
 // propertyCatalog lists every hit-property node with a compact summary so the
 // author can pick (or template) a 招式 node.
-func propertyCatalog(info *inspection) []map[string]string {
+func propertyCatalog(info *inspection) []map[string]any {
 	ids := make([]string, 0, len(info.properties))
 	for id := range info.properties {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	result := []map[string]string{}
+	result := []map[string]any{}
 	for _, id := range ids {
 		nodes := info.properties[id]
-		if len(nodes) != 1 {
+		if len(nodes) == 0 {
 			continue
 		}
+		// 有重复定义时按第一条展示（与 render 的写法一致）。
 		node := nodes[0]
 		summary := strings.Join([]string{
 			"伤害 " + orZero(node.get("SkillDamage")),
 			"BUFF " + orZero(node.get("UnNormalState")),
 			"目标 " + targetLabel(node.get("TargetEnemy"), node.get("TargetSelf")),
 		}, " · ")
-		result = append(result, map[string]string{"id": id, "summary": summary})
+		values := map[string]string{}
+		for _, field := range propertyFields {
+			value := node.get(field.Key)
+			if value == "" {
+				value = "0"
+			}
+			values[field.Key] = value
+		}
+		for _, key := range []string{"UStateLevel", "UStateLastCycle"} {
+			if value := node.get(key); value != "" {
+				values[key] = value
+			}
+		}
+		buff := "0"
+		for _, attr := range node.attrs {
+			if attr.Name.Local == "UnNormalState" {
+				buff = attr.Value
+			}
+		}
+		result = append(result, map[string]any{
+			"id": id, "summary": summary, "values": values, "buff": buff,
+		})
 	}
 	return result
 }
@@ -409,7 +591,9 @@ func propertyIDsOfAction(info *inspection, action string) []string {
 	refs := map[string]bool{}
 	for _, block := range info.blocks[actionKey(action)] {
 		block.node.walk(func(node *xmlNode) {
-			if ref := node.get("skillproid"); ref != "" && ref != "0" {
+			// 原生动作块里属性值带空白（`skillproid="824113 "`），不规范化就会和
+			// skillproperty.xml 的键对不上。
+			if ref := strings.TrimSpace(node.get("skillproid")); ref != "" && ref != "0" {
 				refs[ref] = true
 			}
 		})
@@ -431,8 +615,8 @@ func validateRemap(a *archive, info *inspection, weaponKey string, stage int, ac
 	if action != "" && len(info.blocks[actionKey(action)]) == 0 {
 		return fmt.Errorf("动作 %s 不存在", action)
 	}
-	if propertyID != "" && len(info.properties[propertyID]) != 1 {
-		return fmt.Errorf("命中属性 %s 不存在或不唯一", propertyID)
+	if propertyID != "" && len(info.properties[propertyID]) == 0 {
+		return fmt.Errorf("命中属性 %s 在客户端里不存在", propertyID)
 	}
 	return nil
 }
@@ -509,13 +693,23 @@ func sortedIntKeys(source map[int]bool) []int {
 // rules for stages the weapon no longer plays, hit-property edits for nodes
 // that no longer belong to their stage after a remap, and rules whose stage
 // is not editable at all. Without this, one stale draft blocks every apply.
-func pruneStaleRules(state *weaponState, info *inspection) {
+func pruneStaleRules(state *weaponState, info *inspection, wanted ...map[int]bool) {
 	weapons := map[string]*Weapon{}
 	for index := range info.weapons {
 		weapons[strconv.Itoa(info.weapons[index].ID)] = &info.weapons[index]
 	}
+	var filter map[int]bool
+	if len(wanted) > 0 {
+		filter = wanted[0]
+	}
 	for _, rules := range []map[string][]Rule{state.Drafts, state.Applied} {
 		for key, list := range rules {
+			if filter != nil {
+				id, err := strconv.Atoi(key)
+				if err != nil || !filter[id] {
+					continue
+				}
+			}
 			weapon, ok := weapons[key]
 			if !ok {
 				delete(rules, key)

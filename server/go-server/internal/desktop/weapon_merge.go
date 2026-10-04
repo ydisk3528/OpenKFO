@@ -46,6 +46,9 @@ type mergeDelayRow struct {
 }
 
 // mergeWeapon 是 manifest.json 里一把武器的全部合并材料。
+// Each list holds the raw text of the entries that belong to it, so a package
+// can be merged into another client without re-deriving anything from the source
+// archive.
 type mergeWeapon struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
@@ -70,6 +73,20 @@ type mergeManifest struct {
 	Generated string        `json:"generated"`
 	Weapons   []mergeWeapon `json:"weapons"`
 	Assets    []string      `json:"assets"`
+}
+
+// containsBlockText 判断一份块原文是否语义等价地出现在候选块里。
+//
+// 用 sameMergeBlock（归一化比较）而不是逐字包含：包里同一块会经过 retitleBlock /
+// rewritePropertyRefs 处理，字节形态和归档里的副本常不一致，但语义相同 —— 那种
+// 情况不需要改写文件，也就必须放行。
+func containsBlockText(existing []string, block string) bool {
+	for _, have := range existing {
+		if sameMergeBlock(have, block) {
+			return true
+		}
+	}
+	return false
 }
 
 // 导出白名单：合并包允许触碰的归档条目（动画文件按前缀展开）。
@@ -779,10 +796,22 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 		} else {
 			newWeapons = append(newWeapons, map[string]any{"id": weapon.ID, "name": weapon.Name})
 		}
-		for prefix := range weapon.AnimationBlocks {
-			name := "animation/" + prefix + ".xml"
-			if _, ok := target.entries[name]; !ok {
-				return nil, fmt.Errorf("目标客户端缺少 %s，无法合并动作块", name)
+		for prefix, blocks := range weapon.AnimationBlocks {
+			if target.groupWriteFile(prefix) != "" {
+				continue
+			}
+			// 子文件组（1002/1006/3001… 这 8 组没有同名 4 位文件）：按角色骨骼拆成
+			// 多份、XML 本身不规范，GM 不改写这些文件。只有包里这些块已经逐字存在
+			// 于目标里才放行（同族客户端之间合并的正常情形），否则明确拒绝。
+			existing := target.groupBlockTexts(prefix)
+			if len(existing) == 0 {
+				return nil, fmt.Errorf("目标客户端没有动作组 %s（%s）", prefix, strings.Join(target.groupFiles(prefix), "、"))
+			}
+			for _, block := range blocks {
+				if !containsBlockText(existing, block) {
+					return nil, fmt.Errorf("动作块 %s 只存在于原生多角色共享文件（%s），GM 不支持改写该文件，无法合并",
+						prefix, strings.Join(target.groupFiles(prefix), "、"))
+				}
 			}
 		}
 		importable = append(importable, weapon)
@@ -890,7 +919,16 @@ func weaponMergeImport(request Request, client string, folder string) (any, erro
 		}
 		sort.Strings(prefixes)
 		for _, prefix := range prefixes {
-			name := "animation/" + prefix + ".xml"
+			name := target.groupWriteFile(prefix)
+			if name == "" {
+				// 子文件组：预检已确认包里这些块与目标逐字一致，不需要（也不能）改写。
+				report = append(report, mergeReportItem{
+					Entry:  "animation/" + prefix + "*.xml",
+					Action: "skipped",
+					Detail: "原生多角色共享动作，目标已有同样内容，未改写",
+				})
+				continue
+			}
 			animation, err := loadText(name)
 			if err != nil {
 				return nil, err

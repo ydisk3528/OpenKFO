@@ -183,6 +183,86 @@ func TestSplitClonedPropertiesToleratesDanglingRefs(t *testing.T) {
 	}
 }
 
+// TestSplitClonedPropertiesReservesCloneNumbers 确认分身选号会避开 render 已经
+// 钉在 property_clones 里的克隆号。
+//
+// 实测背景：两套分配器（splitClonedProperties 与 render 的 assignCloneIDs）共用
+// 900000000 号段，却只有前者按「归档里已有的 SkillProId」判占用。归档里查不到
+// render 上一次次发的号（它要等 render 跑完才落进去），于是新武器分身拿到同一个号；
+// 下一次 apply 时 render 把钉住的号**原样复用**，两条不同武器的属性并成一条 ——
+// 表现是「新武器的伤害莫名其妙变成了别的武器的值，还带上了别人的 buff」。
+// 253450（狂暴·紫金八面锤）就是这样被 253013 / 253400 的克隆值覆盖的。
+func TestSplitClonedPropertiesReservesCloneNumbers(t *testing.T) {
+	client := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")
+	if client == "" {
+		t.Skip("set OPENKFO_WEAPON_TEST_CLIENT")
+	}
+	source, err := loadArchive(filepath.Join(client, "Data", "config.spf2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := map[string]Blueprint{
+		"253998": {ID: 253998, Name: "撞号测试", Type: "7", Donor: 253047},
+	}
+	blueprinted, err := applyBlueprints(source, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &weaponState{Created: created}
+	free, err := splitClonedProperties(blueprinted, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocated := allocatedSplitIDs(t, blueprinted, free, created, "253998")
+	if len(allocated) == 0 {
+		t.Skip("供体 253047 没有可分身段，跳过")
+	}
+
+	// 把第一个分身号钉给别的武器：模拟上一次 apply 已经把它发出去。
+	pinned := allocated[0]
+	state.PropertyClones = map[string]map[string]string{
+		"253013": {"1|80810": pinned},
+	}
+	guarded, err := splitClonedProperties(blueprinted, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardedAllocated := allocatedSplitIDs(t, blueprinted, guarded, created, "253998")
+	if len(guardedAllocated) != len(allocated) {
+		t.Fatalf("分身号数量变了：%d -> %d", len(allocated), len(guardedAllocated))
+	}
+	for index, id := range guardedAllocated {
+		if id == pinned {
+			t.Fatalf("第 %d 个分身号 %s 与 property_clones 里钉住的号撞车", index+1, id)
+		}
+	}
+}
+
+// allocatedSplitIDs 列出某武器在分身前后新出现的 skillproid（按出现顺序）。
+func allocatedSplitIDs(t *testing.T, before, after *archive, created map[string]Blueprint, weapon string) []string {
+	t.Helper()
+	pre, err := surveyForWeapons(before, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post, err := surveyForWeapons(after, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]bool{}
+	for _, ref := range flattenedRefs(pre.weaponActions[weapon]) {
+		known[ref] = true
+	}
+	out := []string{}
+	for _, ref := range flattenedRefs(post.weaponActions[weapon]) {
+		if !known[ref] {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
 // TestSplitClonedPropertiesLeavesOtherStatesAlone 确认非 2xxx 段一个都没动。
 func TestSplitClonedPropertiesLeavesOtherStatesAlone(t *testing.T) {
 	client := os.Getenv("OPENKFO_WEAPON_TEST_CLIENT")

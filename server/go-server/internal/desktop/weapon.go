@@ -92,6 +92,29 @@ func parseXML(text string) (*xmlNode, error) {
 	}
 	return root, nil
 }
+
+// propertyAvailability 把「动作块引用的命中属性号」按 skillproperty.xml 里的解析
+// 情况分成两类，供编辑器决定「能不能改」和「要不要提醒」：
+//
+//   - missing：表里根本没有（原生悬空引用）→ 不能编辑；
+//   - duplicated：同一个号被定义了两遍（原生重复，两条内容还不一样）→ 能编辑，
+//     按第一条来，但要提醒作者客户端取哪条未知。
+//
+// 过去 inspect 一律要求「恰好 1 条」，把 duplicated 这种正常可用的数据也拦成了
+// 「动作或命中属性未能唯一对应，暂不可应用」。
+func propertyAvailability(info *inspection, refs []string) (missing, duplicated []string) {
+	for _, ref := range refs {
+		switch len(info.properties[ref]) {
+		case 0:
+			missing = append(missing, ref)
+		case 1:
+		default:
+			duplicated = append(duplicated, ref)
+		}
+	}
+	return missing, duplicated
+}
+
 func (n *xmlNode) get(key string) string {
 	for _, attr := range n.attrs {
 		if attr.Name.Local == key {
@@ -108,6 +131,18 @@ func (n *xmlNode) set(key, value string) {
 		}
 	}
 	n.attrs = append(n.attrs, xml.Attr{Name: xml.Name{Local: key}, Value: value})
+}
+
+// remove 删掉一个属性（不存在时无动作）。重建 <Anm> 段时用来清掉不该继承的
+// replaytimes / skillproid。
+func (n *xmlNode) remove(key string) {
+	kept := n.attrs[:0]
+	for _, attr := range n.attrs {
+		if attr.Name.Local != key {
+			kept = append(kept, attr)
+		}
+	}
+	n.attrs = kept
 }
 func (n *xmlNode) walk(visit func(*xmlNode)) {
 	visit(n)
@@ -320,6 +355,9 @@ type Hit struct {
 	ID     string            `json:"id"`
 	Values map[string]string `json:"values"`
 	Buff   string            `json:"buff"`
+	// Variant 是这条命中属性所属的分支（<Condition><Ustate id="N"> 的状态号），
+	// 空 = 默认（无条件）动作。同一招带分支时，各分支的号会一起列出来，靠它区分。
+	Variant string `json:"variant,omitempty"`
 }
 type Stage struct {
 	Stage       int      `json:"stage"`
@@ -333,6 +371,9 @@ type Stage struct {
 	Effects   []string `json:"effects,omitempty"`
 	Supported bool     `json:"supported"`
 	Reason    string   `json:"reason"`
+	// Notice 是「能编辑，但客户端数据有瑕疵」的提醒：目前只会是同一个命中属性号
+	// 在 skillproperty.xml 里被定义了两遍。和 Reason 的区别是 Notice 不禁用编辑。
+	Notice string `json:"notice,omitempty"`
 	// Counter is the parry window this stage's action block declares — the
 	// third transition channel, triggered by the opponent's attack rather than
 	// by a key. It is not visible in the combo-chain or frame-switch editors.
@@ -359,6 +400,9 @@ type Weapon struct {
 	Combos      []Combo          `json:"combos"`
 	BuffIDs     []int            `json:"buff_ids"`
 	Allowed     map[string][]int `json:"allowed_values"`
+	// StageCount is the number of non-empty itemact states. It is available in
+	// the lightweight weapon_list response without decoding animation blocks.
+	StageCount int `json:"stage_count"`
 	// ComboRows is how many delayacttable.xml transitions the weapon owns.
 	// Zero means the client can never advance past the first hit.
 	ComboRows int `json:"combo_rows"`
@@ -459,6 +503,22 @@ type inspection struct {
 	owners     map[string]map[string]bool
 }
 
+// propertyNode 返回一个命中属性号在 skillproperty.xml 里的**生效定义**。
+//
+// 两种情况都要照顾，调用点必须处理 ok=false：
+//   - 原生数据里有悬空引用：动作块写着 skillproid，表里根本没有这条（实测 26 处，
+//     如 2001/435 的 60011780）；
+//   - 原生数据里有重复定义：同一个号被写了两遍，且两条内容还不一样（实测 8 个号，
+//     如 813101/813104）。客户端取哪条无法确定，本工具链统一按**第一条**——
+//     render 克隆 [0]、原位替换取首个匹配文本，与此保持一致。
+func (i *inspection) propertyNode(id string) (*xmlNode, bool) {
+	nodes := i.properties[id]
+	if len(nodes) == 0 {
+		return nil, false
+	}
+	return nodes[0], true
+}
+
 var animationPattern = regexp.MustCompile(`(?s)<AnmDesc\b[^>]*>.*?</AnmDesc\s*>`)
 
 func actionKey(action string) string {
@@ -470,6 +530,17 @@ func actionKey(action string) string {
 		return ""
 	}
 	return action[:4] + "/" + strconv.Itoa(id)
+}
+
+// normalizedBlockID compares animation block identifiers by their numeric value.
+// itemact/actionKey drops padding ("087" -> "87"), while cloned XML blocks may
+// retain a three-digit id. Both spellings refer to the same AnmDesc.
+func normalizedBlockID(id string) string {
+	id = strings.TrimSpace(id)
+	if number, err := strconv.Atoi(id); err == nil {
+		return strconv.Itoa(number)
+	}
+	return id
 }
 
 // currentBlock returns the text of the one <AnmDesc> block inside animation
@@ -486,7 +557,7 @@ func currentBlock(animation, want string) (string, bool) {
 		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(node.get("id")) == want {
+		if normalizedBlockID(node.get("id")) == normalizedBlockID(want) {
 			found = candidate
 			count++
 		}
@@ -505,7 +576,7 @@ func currentConditionalBlock(animation, want, condition string) (string, bool) {
 		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(node.get("id")) != want {
+		if normalizedBlockID(node.get("id")) != normalizedBlockID(want) {
 			continue
 		}
 		if conditionUstate(node) != condition {
@@ -517,13 +588,62 @@ func currentConditionalBlock(animation, want, condition string) (string, bool) {
 	return found, count == 1
 }
 
-// clearStageBlockEdits 清掉一个状态上"绑在动作块/片断"上的全部编辑。
-//
-// 重映射换了动作以后，旧记录指向的片断与块已经不属于这个状态：留着它们，
-// applyScopes / applyFrameSwitches / applyCounters / applyBlockElements 会去改
-// **新块里恰好同号的片断**，还会反复触发"共用块先克隆"的分支，把 itemact 的动作列
-// 改成一个和 remap 记录对不上的克隆编号（实测 253300 状态 2081 就是这样：
-// remap 记的是 2204086，客户端列却被改成 2204999，技能直接放不出来）。
+// 清除标记优先于历史编辑；投影和应用必须清理同一组状态引用。
+func clearClearedStageReferences(state *weaponState, filter map[int]bool) {
+	for key, stages := range state.Cleared {
+		if filter != nil {
+			id, err := strconv.Atoi(key)
+			if err != nil || !filter[id] {
+				continue
+			}
+		}
+		for stage, cleared := range stages {
+			if !cleared {
+				continue
+			}
+			clearStageBlockEdits(state, key, stage)
+			delete(state.Remaps[key], stage)
+			if len(state.Remaps[key]) == 0 {
+				delete(state.Remaps, key)
+			}
+			delete(state.Variants[key], stage)
+			if len(state.Variants[key]) == 0 {
+				delete(state.Variants, key)
+			}
+			delete(state.StageEffects[key], stage)
+			if len(state.StageEffects[key]) == 0 {
+				delete(state.StageEffects, key)
+			}
+			for _, rules := range []map[string][]Rule{state.Drafts, state.Applied} {
+				kept := []Rule{}
+				for _, rule := range rules[key] {
+					if rule.Stage != ruleStageOf(stage) {
+						kept = append(kept, rule)
+					}
+				}
+				if _, ok := rules[key]; ok {
+					rules[key] = kept
+				}
+			}
+			for ref := range state.PropertyClones[key] {
+				if strings.HasPrefix(ref, strconv.Itoa(ruleStageOf(stage))+"|") {
+					delete(state.PropertyClones[key], ref)
+				}
+			}
+			column := strconv.Itoa(stage)
+			kept := []ComboTransition{}
+			for _, transition := range state.Chains[key] {
+				if transition.OldState != column && transition.NewState != column {
+					kept = append(kept, transition)
+				}
+			}
+			if _, ok := state.Chains[key]; ok {
+				state.Chains[key] = kept
+			}
+		}
+	}
+}
+
 func clearStageBlockEdits(state *weaponState, key string, stage int) {
 	if perStage, ok := state.Scopes[key]; ok {
 		delete(perStage, stage)
@@ -552,6 +672,94 @@ func clearStageBlockEdits(state *weaponState, key string, stage int) {
 }
 
 func inspect(a *archive, items []Item) (*inspection, error) {
+	return inspectFiltered(a, items, nil)
+}
+
+type weaponListRow struct {
+	Weapon
+}
+
+func lightWeaponList(a *archive, items []Item, authored ...*weaponState) ([]Weapon, error) {
+	text, err := a.text("itemact.txt")
+	if err != nil {
+		return nil, err
+	}
+	rows := splitRows(text)
+	if len(rows) < 2 || len(rows[0]) < 2 {
+		return nil, fmt.Errorf("武器动作表为空")
+	}
+	byID := map[string]Item{}
+	for _, item := range items {
+		if item.Kind == 25 {
+			byID[strconv.FormatUint(uint64(item.ID), 10)] = item
+		}
+	}
+	comboCounts := map[string]int{}
+	if text, err := a.text("delayacttable.xml"); err == nil {
+		comboCounts = comboRowCounts(text)
+	}
+	effectIDs := map[string]bool{}
+	if text, err := a.text("acteffect.xml"); err == nil {
+		for _, match := range effectBlockPattern.FindAllStringSubmatch(text, -1) {
+			effectIDs[match[1]] = true
+		}
+	}
+	suggestions := comboSuggestions(rows, comboCounts)
+	result := make([]Weapon, 0, len(rows)-1)
+	var state *weaponState
+	if len(authored) > 0 {
+		state = authored[0]
+	}
+	for _, row := range rows[1:] {
+		if len(row) < 2 {
+			continue
+		}
+		item, ok := byID[row[0]]
+		if !ok {
+			continue
+		}
+		id, err := strconv.Atoi(row[0])
+		if err != nil {
+			return nil, err
+		}
+		model := ""
+		if len(item.Fields) > 7 {
+			model = item.Fields[7]
+		}
+		stages := make([]Stage, 0, len(row)-2)
+		for index, action := range row[2:] {
+			if strings.TrimSpace(action) == "" || action == "0" || index+2 >= len(rows[0]) {
+				continue
+			}
+			stateName := rows[0][index+2]
+			number, parseErr := strconv.Atoi(stateName)
+			if parseErr != nil {
+				continue
+			}
+			if state != nil {
+				if cleared := state.Cleared[strconv.Itoa(id)][number]; cleared {
+					continue
+				}
+				if remap := state.Remaps[strconv.Itoa(id)][number]; remap != nil && remap.Action != "" {
+					action = remap.Action
+				}
+			}
+			stages = append(stages, Stage{Stage: ruleStageOf(number), State: stateName, Action: action})
+		}
+		result = append(result, Weapon{
+			ID: id, Name: item.Name, Icon: item.Icon, Description: item.Description,
+			Type: weaponType(item), Model: model, Stages: stages, Combos: []Combo{},
+			StageCount: len(stages), ComboRows: comboCounts[row[0]], ComboSuggestion: suggestions[id], Effects: effectIDs[row[0]],
+		})
+	}
+	return result, nil
+}
+
+func inspectFiltered(a *archive, items []Item, wanted map[int]bool) (*inspection, error) {
+	return inspectFilteredWithActions(a, items, wanted)
+}
+
+func inspectFilteredWithActions(a *archive, items []Item, wanted map[int]bool, extraActions ...string) (*inspection, error) {
 	buffRows, err := buffs(a)
 	if err != nil {
 		return nil, err
@@ -579,46 +787,64 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 		columns[state] = index
 	}
 	owners := map[string]map[string]bool{}
+	neededPrefixes := map[string]bool{}
 	for _, row := range lines[1:] {
 		if len(row) > len(header) || len(row) < 2 {
 			return nil, fmt.Errorf("武器动作字段错误")
 		}
+		selected := wanted == nil
+		if wanted != nil {
+			id, parseErr := strconv.Atoi(row[0])
+			selected = parseErr == nil && wanted[id]
+		}
 		for index, action := range row[2:] {
-			if action != "0" {
-				if owners[action] == nil {
-					owners[action] = map[string]bool{}
-				}
-				owners[action][row[0]+":"+header[index+2]] = true
+			if action == "0" || action == "" {
+				continue
+			}
+			if owners[action] == nil {
+				owners[action] = map[string]bool{}
+			}
+			owners[action][row[0]+":"+header[index+2]] = true
+			if selected && len(action) > 4 {
+				neededPrefixes[action[:4]] = true
 			}
 		}
 	}
 	result := &inspection{weapons: []Weapon{}, blocks: map[string][]block{}, properties: map[string][]*xmlNode{}, owners: owners}
-	files := map[string]bool{}
-	for action := range owners {
-		if len(action) > 4 {
-			files["animation/"+action[:4]+".xml"] = true
+	// 动作号 -> 承载它的动画文件（规则见 animation_groups.go）。
+	//
+	// 只扫 itemact 真的引用到的组，不做全库扫描：原生 animation/*.xml 里有 3 个
+	// 文件本身 XML 不规范（100201.xml 少一个 </AnmDesc>、2002up.xml 注释写成 <!-、
+	// 2011.xml 的 <Param> 被 </AnmDesc> 关闭），组内检索按块容错跳过，不因为一个
+	// 坏块让整张动作表报错。
+	scanned := map[string]bool{}
+	if wanted == nil {
+		for action := range owners {
+			if len(action) > 4 {
+				scanned[action[:4]] = true
+			}
+		}
+	} else {
+		for prefix := range neededPrefixes {
+			scanned[prefix] = true
+		}
+		for _, action := range extraActions {
+			if len(action) > 4 {
+				scanned[action[:4]] = true
+			}
 		}
 	}
-	for file := range files {
-		if _, ok := a.entries[file]; !ok {
-			continue
-		}
-		animation, err := a.text(file)
-		if err != nil {
-			return nil, err
-		}
-		prefix := strings.TrimSuffix(strings.TrimPrefix(file, "animation/"), ".xml")
-		for _, original := range animationPattern.FindAllString(animation, -1) {
-			node, err := parseXML(original)
-			if err != nil {
-				return nil, err
+	prefixes := make([]string, 0, len(scanned))
+	for prefix := range scanned {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	for _, prefix := range prefixes {
+		for number, found := range a.groupBlockIndex(prefix) {
+			key := prefix + "/" + strconv.Itoa(number)
+			for _, entry := range found {
+				result.blocks[key] = append(result.blocks[key], entry.block)
 			}
-			id, err := strconv.Atoi(strings.TrimSpace(node.get("id")))
-			if err != nil {
-				return nil, err
-			}
-			key := prefix + "/" + strconv.Itoa(id)
-			result.blocks[key] = append(result.blocks[key], block{original, node, conditionUstate(node)})
 		}
 	}
 
@@ -630,7 +856,10 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 		if node.comment {
 			continue
 		}
-		id := node.get("SkillProId")
+		// 原生表的属性值带前导/尾随空白（实测 `SkillProId="824113 "`）。不规范化就
+		// 和动作块里的 `skillproid="824113"` 对不上，表现为「动作或命中属性未能
+		// 唯一对应，暂不可应用」。全链路的 skillproid 比较统一按去空白后的值。
+		id := strings.TrimSpace(node.get("SkillProId"))
 		result.properties[id] = append(result.properties[id], node)
 		result.ordered = append(result.ordered, node)
 	}
@@ -664,6 +893,13 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 		if !ok {
 			continue
 		}
+		id, err := strconv.Atoi(row[0])
+		if err != nil {
+			return nil, err
+		}
+		if wanted != nil && !wanted[id] {
+			continue
+		}
 		sequences, err := combos(a, row[0])
 		if err != nil {
 			return nil, err
@@ -676,10 +912,6 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 			return a >= 2000 && a < 3000 && !(b >= 2000 && b < 3000)
 		})
 
-		id, err := strconv.Atoi(row[0])
-		if err != nil {
-			return nil, err
-		}
 		model := ""
 		if len(item.Fields) > 7 {
 			model = item.Fields[7]
@@ -702,44 +934,75 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 				number -= 2010
 			}
 			candidates := result.blocks[actionKey(action)]
+			// 同一动作键下可能有多份 <AnmDesc>：一份无条件 + 若干带
+			// <Condition><Ustate id="N"/> 的分支。分支只给「拥有该状态」的玩家换
+			// 形态，**不该**让整个招式变成"不可应用" —— 否则带分支的招式连默认
+			// 动作的命中属性都编辑不了。
+			_, hasBase := pickBlock(candidates)
+			// refVariant 记录每个命中属性号属于哪条分支（"" = 无条件）。
+			refVariant := map[string]string{}
 			refs := map[string]bool{}
 			for _, candidate := range candidates {
 				candidate.node.walk(func(node *xmlNode) {
-					ref := node.get("skillproid")
-					if ref != "" && ref != "0" {
-						refs[ref] = true
+					ref := strings.TrimSpace(node.get("skillproid"))
+					if ref == "" || ref == "0" {
+						return
+					}
+					refs[ref] = true
+					// 同一个号既出现在无条件块、又出现在分支里时按无条件归。
+					if previous, ok := refVariant[ref]; !ok || (previous != "" && candidate.condition == "") {
+						refVariant[ref] = candidate.condition
 					}
 				})
 			}
 			refIDs := []string{}
-			unique := true
 			for ref := range refs {
 				refIDs = append(refIDs, ref)
-				if len(result.properties[ref]) != 1 {
-					unique = false
-				}
 			}
-			sort.Strings(refIDs)
-			reason := ""
-			if len(candidates) != 1 || len(refs) == 0 || !unique {
-				reason = "动作或命中属性未能唯一对应，暂不可应用"
-				if len(candidates) == 1 && len(refs) == 0 {
-					reason = "该动作没有直接命中属性（移动、受击或间接效果），不提供伤害编辑"
+			sort.Slice(refIDs, func(i, j int) bool {
+				if refVariant[refIDs[i]] != refVariant[refIDs[j]] {
+					return refVariant[refIDs[i]] < refVariant[refIDs[j]]
 				}
-			} else {
-				for _, ref := range refIDs {
-					node := result.properties[ref][0]
-					if node.get("TargetSelf") != "0" || node.get("TargetEnemy") != "1" {
-						reason = "该段包含非敌方命中效果，暂不可应用"
+				return refIDs[i] < refIDs[j]
+			})
+			// 命中属性号在表里的解析情况：
+			//   0 条 = 原生悬空引用（动作块写着这个号，skillproperty.xml 里没有）→ 不能编辑；
+			//   ≥2 条 = 原生重复定义 → 客户端取哪条无法确定，本工具按第一条编辑，给提醒。
+			// 过去一律要求「恰好 1 条」，把重复定义这种正常可用的数据也拦成了
+			// 「动作或命中属性未能唯一对应，暂不可应用」。
+			missing, duplicated := propertyAvailability(result, refIDs)
+			reason := ""
+			switch {
+			case len(refs) == 0:
+				reason = "该动作没有直接命中属性（移动、受击或间接效果），不提供伤害编辑"
+			case len(candidates) > 1 && !hasBase:
+				reason = "动作有多份条件分支却没有默认动作，暂不可应用"
+			case len(missing) > 0:
+				reason = "动作引用的命中属性 " + strings.Join(missing, "、") +
+					" 在客户端 skillproperty.xml 里不存在（原生数据悬空），不提供伤害编辑"
+			default:
+				// 「非敌方命中效果」只用来挡住默认动作上的自target效果；分支段本就
+				// 允许换成别的形态，不拿它拦。
+				if len(candidates) == 1 {
+					for _, ref := range refIDs {
+						node := result.properties[ref][0]
+						if node.get("TargetSelf") != "0" || node.get("TargetEnemy") != "1" {
+							reason = "该段包含非敌方命中效果，暂不可应用"
+						}
 					}
 				}
 			}
+			notice := ""
+			if len(duplicated) > 0 {
+				notice = "命中属性 " + strings.Join(duplicated, "、") +
+					" 在客户端里被定义了两遍（原生重复），客户端取哪条未知，本工具按第一条编辑"
+			}
 			hits := []Hit{}
 			for _, ref := range refIDs {
-				if len(result.properties[ref]) != 1 {
+				node, ok := result.propertyNode(ref)
+				if !ok {
 					continue
 				}
-				node := result.properties[ref][0]
 				values := map[string]string{}
 				for _, field := range propertyFields {
 					value := node.get(field.Key)
@@ -759,7 +1022,7 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 						values[key] = value
 					}
 				}
-				hits = append(hits, Hit{ref, values, buff})
+				hits = append(hits, Hit{ID: ref, Values: values, Buff: buff, Variant: refVariant[ref]})
 			}
 			labels := []string{}
 			labelSeen := map[string]bool{}
@@ -785,12 +1048,13 @@ func inspect(a *archive, items []Item) (*inspection, error) {
 			stage := Stage{
 				Stage: number, State: state, Label: label, Action: action,
 				PropertyIDs: refIDs, Hits: hits, Effects: effectPreviews(candidates),
-				Supported: reason == "", Reason: reason,
+				Supported: reason == "", Reason: reason, Notice: notice,
 				Frames: raw, RawFrames: raw,
 			}
 			stage.Counter = counterWindowOf(candidates)
 			weapon.Stages = append(weapon.Stages, stage)
 		}
+		weapon.StageCount = len(weapon.Stages)
 		// 招架落到空处是不生效的：目标状态必须是本武器动作行里真实存在的一列。
 		reachable := map[int]bool{}
 		for _, stage := range weapon.Stages {
@@ -861,7 +1125,7 @@ func validateRules(rules []Rule, weapon Weapon) ([]Rule, error) {
 			for key, value := range values {
 				field, ok := fields[key]
 				if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < float64(field.Min) || value > float64(field.Max) {
-					return nil, fmt.Errorf("伤害或攻击效果超出范围")
+					return nil, fmt.Errorf("伤害或攻击效果超出范围：状态 %d、属性 %s、字段 %s、值 %v（允许 %d..%d）", rule.Stage, ref, key, value, field.Min, field.Max)
 				}
 				if key != "SkillDamage" && key != "SkillEnhanceDamage" && (value != math.Trunc(value) || !includes(weapon.Allowed[key], int(value))) {
 					return nil, fmt.Errorf("受击参数不属于客户端原生配置")
@@ -993,9 +1257,13 @@ func fieldOptionLabel(field string, value int) string {
 }
 
 func effects(info *inspection) []map[string]any {
+	return effectsFromProperties(info.ordered)
+}
+
+func effectsFromProperties(nodes []*xmlNode) []map[string]any {
 	result := []map[string]any{}
 	for _, choice := range [][2]string{{"repulse", "击退"}, {"float", "上升 / 悬空击飞"}, {"fall", "击倒"}} {
-		for _, node := range info.ordered {
+		for _, node := range nodes {
 			match := choice[0] == "repulse" && node.get("RepulseTarget") == "1" || choice[0] == "float" && node.get("TargetFlurr") == "1" && node.get("StandHurtDown") == "1" && node.get("StandHurtFly") == "11" || choice[0] == "fall" && node.get("TripTarget") == "1" && node.get("TargetFlurr") == "0"
 			if !match || node.get("TargetEnemy") != "1" || node.get("TargetSelf") != "0" {
 				continue
@@ -1009,6 +1277,20 @@ func effects(info *inspection) []map[string]any {
 		}
 	}
 	return result
+}
+
+func propertyNodes(a *archive) ([]*xmlNode, error) {
+	root, err := a.xml("skillproperty.xml")
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]*xmlNode, 0, len(root.children))
+	for _, node := range root.children {
+		if !node.comment {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes, nil
 }
 
 // cloneKey identifies the hit-property clone of one stage: the stage number
@@ -1061,9 +1343,9 @@ func assignCloneIDs(info *inspection, plans map[string][]Rule, clones map[string
 	sort.Strings(keys)
 	nextID := 900000000
 	assigned := map[string]bool{}
-	occupied := func(id string) bool {
-		return assigned[id] || len(info.properties[id]) > 0
-	}
+	reserved := map[string]string{}
+	active := map[string]bool{}
+	validated := map[string][]Rule{}
 	for _, key := range keys {
 		weapon, ok := weapons[key]
 		if !ok {
@@ -1073,6 +1355,49 @@ func assignCloneIDs(info *inspection, plans map[string][]Rule, clones map[string
 		if err != nil {
 			return err
 		}
+		validated[key] = rules
+		for _, rule := range rules {
+			for _, stage := range weapon.Stages {
+				if stage.Stage != rule.Stage {
+					continue
+				}
+				for _, oldID := range stage.PropertyIDs {
+					active[key+"/"+cloneKey(rule.Stage, oldID)] = true
+				}
+			}
+		}
+	}
+	idLocations := map[string][]string{}
+	for weaponKey, entries := range clones {
+		for reference, id := range entries {
+			if id == "" {
+				continue
+			}
+			location := weaponKey + "/" + reference
+			idLocations[id] = append(idLocations[id], location)
+			if _, ok := reserved[id]; !ok {
+				reserved[id] = location
+			}
+		}
+	}
+	for id, locations := range idLocations {
+		activeLocation := ""
+		for _, location := range locations {
+			if !active[location] {
+				continue
+			}
+			if activeLocation != "" {
+				return fmt.Errorf("命中属性克隆号重复：%s（%s 与 %s）", id, activeLocation, location)
+			}
+			activeLocation = location
+		}
+	}
+	occupied := func(id string) bool {
+		return assigned[id] || reserved[id] != "" || len(info.properties[id]) > 0
+	}
+	for _, key := range keys {
+		weapon := weapons[key]
+		rules := validated[key]
 		for _, rule := range rules {
 			var stage Stage
 			for _, candidate := range weapon.Stages {
@@ -1171,7 +1496,10 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 			if !sourceOK {
 				return nil, fmt.Errorf("动作 %s 不存在", stage.Action)
 			}
-			file := "animation/" + stage.Action[:4] + ".xml"
+			file, err := a.animationWriteFile(stage.Action)
+			if err != nil {
+				return nil, err
+			}
 			animation, ok := animations[file]
 			if !ok {
 				animation, err = a.text(file)
@@ -1218,7 +1546,13 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 				if newID == "" {
 					return nil, fmt.Errorf("克隆编号缺失：%s 状态 %d 属性 %s", key, rule.Stage, oldID)
 				}
-				prop := info.properties[oldID][0].clone()
+				prop, ok := info.propertyNode(oldID)
+				if !ok {
+					// 悬空引用（动作块写着这个号，表里没有）：不克隆也不改指，
+					// 原样留着，免得凭空造出一条属性或整段写入失败。
+					continue
+				}
+				prop = prop.clone()
 				prop.set("SkillProId", newID)
 				if rule.Buff != 0 {
 					buff, level, duration := rule.Buff, rule.Level, rule.Duration
@@ -1270,7 +1604,13 @@ func render(a *archive, items []Item, plans map[string][]Rule, cloneIDs map[stri
 			}
 			if shared {
 				// 连条件分支一起复制：否则新武器只拿到无条件那段，条件块成了孤儿。
-				next, err := cloneBlockVariants(animation, variants, source.condition, encoded, cloneID)
+				// editedText 已经按 remap 改过；其余条件块也必须套同一份映射，
+				// 否则新动作里的分支仍会指向供体的旧命中属性。
+				refs := make([]splitRef, 0, len(remap))
+				for oldID, newID := range remap {
+					refs = append(refs, splitRef{oldID: oldID, newID: newID})
+				}
+				next, err := cloneBlockVariants(animation, variants, source.condition, encoded, cloneID, refs)
 				if err != nil {
 					return nil, err
 				}
@@ -1737,6 +2077,129 @@ func validateBlueprint(client string, source *archive, blueprint Blueprint) erro
 	return nil
 }
 
+func detailProjectionState(state *weaponState, weapon int) (*weaponState, error) {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+	projected := &weaponState{}
+	if err = json.Unmarshal(encoded, projected); err != nil {
+		return nil, err
+	}
+	key := strconv.Itoa(weapon)
+	for candidate := range projected.Remaps {
+		if candidate != key {
+			delete(projected.Remaps, candidate)
+		}
+	}
+	for candidate := range projected.Cleared {
+		if candidate != key {
+			delete(projected.Cleared, candidate)
+		}
+	}
+	for candidate := range projected.FrameSwitches {
+		if candidate != key {
+			delete(projected.FrameSwitches, candidate)
+		}
+	}
+	for candidate := range projected.Counters {
+		if candidate != key {
+			delete(projected.Counters, candidate)
+		}
+	}
+	for candidate := range projected.BlockElements {
+		if candidate != key {
+			delete(projected.BlockElements, candidate)
+		}
+	}
+	for candidate := range projected.Scopes {
+		if candidate != key {
+			delete(projected.Scopes, candidate)
+		}
+	}
+	// Variants across weapons reserve explicit skillproids globally. Keep the
+	// other weapons' edits for allocation, while applyVariantsFiltered still
+	// limits archive projection to the requested weapon.
+	for candidate := range projected.StageEffects {
+		if candidate != key {
+			delete(projected.StageEffects, candidate)
+		}
+	}
+	clearClearedStageReferences(projected, map[int]bool{weapon: true})
+	return projected, nil
+}
+
+func weaponIDsInState(state *weaponState) map[int]bool {
+	ids := map[int]bool{}
+	for key := range state.Remaps {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.Cleared {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.FrameSwitches {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.Counters {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.BlockElements {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.Scopes {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.Variants {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	for key := range state.StageEffects {
+		if id, err := strconv.Atoi(key); err == nil {
+			ids[id] = true
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	return ids
+}
+
+func inspectState(a *archive, items []Item, state *weaponState) (*inspection, error) {
+	return inspectFiltered(a, items, weaponIDsInState(state))
+}
+
+func projectionActions(state *weaponState, wanted map[int]bool) []string {
+	if state == nil || wanted == nil {
+		return nil
+	}
+	result := []string{}
+	for key, stages := range state.Remaps {
+		id, err := strconv.Atoi(key)
+		if err != nil || !wanted[id] {
+			continue
+		}
+		for _, remap := range stages {
+			if remap != nil && strings.TrimSpace(remap.Action) != "" {
+				result = append(result, strings.TrimSpace(remap.Action))
+			}
+		}
+	}
+	return result
+}
+
 type weaponState struct {
 	Drafts      map[string][]Rule    `json:"drafts"`
 	Applied     map[string][]Rule    `json:"applied"`
@@ -1774,6 +2237,9 @@ type weaponState struct {
 	Scopes          map[string]map[int]map[string][]FrameSwitchAttr `json:"scopes,omitempty"`
 	Cleared         map[string]map[int]bool                         `json:"cleared,omitempty"`
 	ExtraProperties map[string]ExtraProperty                        `json:"extra_properties,omitempty"`
+	// HitProperties is the canonical in-memory index for every editable
+	// skillproperty node. Legacy fields above remain for workspace compatibility.
+	HitProperties map[string]HitProperty `json:"hit_properties,omitempty"`
 	// Variants authors 「按状态切换招式形态」: 给某个状态再注册一份带
 	// <Condition><Ustate id="N"/> 的动作块，引擎按玩家是否拥有该状态二选一。
 	// 键是武器 → 状态。分段与 skillproid 在落盘时才分配（见 applyVariants）。
@@ -1831,7 +2297,8 @@ const (
 // _rebase / import / publish 的操作一律是写，不走这里。
 func readOnlyWeaponOperation(operation string) bool {
 	switch operation {
-	case "weapon_catalog",
+	case "weapon_workspace_status", "weapon_workspace_load",
+		"weapon_catalog", "weapon_list", "weapon_detail",
 		"weapon_combo_chain",
 		"weapon_combo_rule",
 		"weapon_stage_track",
@@ -1876,6 +2343,35 @@ func acquireWeaponLock(folder string) (func(), error) {
 	}
 }
 
+func weaponComboChainView(base *archive, info *inspection, state *weaponState, weapon int, variantTaken []string, revision string) map[string]any {
+	key := strconv.Itoa(weapon)
+	return map[string]any{
+		"weapon":               weapon,
+		"chain":                comboChain(base, info, key),
+		"dead_ends":            comboDeadEnds(base, info, key),
+		"frame_switches":       comboFrameSwitches(base, info, key),
+		"frame_switches_saved": state.FrameSwitches[key],
+		"counters":             comboCounters(info, key),
+		"counters_saved":       state.Counters[key],
+		"block_elements":       comboBlockElements(info, key),
+		"block_elements_saved": state.BlockElements[key],
+		"variants":             comboVariants(info, key, state.Variants[key]),
+		"variant_occupied_ids": variantTaken,
+		"variant_skillpro_min": variantSkillProPrefix,
+		"variant_skillpro_max": variantSkillProLimit - 1,
+		"variants_saved":       state.Variants[key],
+		"variant_bases":        variantBases(info, key),
+		"block_element_groups": blockElementGroups(),
+		"frame_keys":           frameKeyOptions(),
+		"keys":                 keyInputs(base),
+		"revision":             revision,
+	}
+}
+
+func weaponComboRuleView(source *archive, info *inspection, state *weaponState, weapon int, revision string) map[string]any {
+	return comboRuleView(source, info, state, strconv.Itoa(weapon), revision)
+}
+
 func weaponHandle(request Request, client string, items []Item, folder string) (any, error) {
 	if request.Operation == "weapon_icon_upload" {
 		return uploadWeaponIcon(client, request.SourcePath)
@@ -1896,6 +2392,15 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			return nil, err
 		}
 		defer release()
+	}
+	if request.Operation == "weapon_workspace_status" || request.Operation == "weapon_workspace_load" {
+		return loadWeaponWorkspace(folder, request.Weapon)
+	}
+	if request.Operation == "weapon_workspace_save" {
+		return saveWeaponWorkspace(folder, request.Weapon, request.Workspace)
+	}
+	if request.Operation == "weapon_workspace_delete" {
+		return deleteWeaponWorkspace(folder, request.Weapon)
 	}
 	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" || request.Operation == "weapon_effect_view" {
 		return weaponEffects(request, client, items, folder)
@@ -1928,6 +2433,12 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	if state.ExtraProperties == nil {
 		state.ExtraProperties = map[string]ExtraProperty{}
+	}
+	if state.HitProperties == nil {
+		state.HitProperties = map[string]HitProperty{}
+	}
+	if err = normalizeHitProperties(&state); err != nil {
+		return nil, err
 	}
 	if state.Chains == nil {
 		state.Chains = map[string][]ComboTransition{}
@@ -1994,15 +2505,48 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if entry.SourceHash != "" && digest(source.data) != entry.SourceHash {
 		return nil, fmt.Errorf("该客户端的基线备份已变化，已停止写入")
 	}
+	current, err := os.ReadFile(packagePath)
+	if err != nil {
+		return nil, err
+	}
+	currentArchive, err := parseArchive(current)
+	if err != nil {
+		return nil, err
+	}
+	revision := digest(append(append([]byte(nil), current...), stateBytes...))
 	// Self-made weapons live in the same tables as the shipped ones, so the
 	// inspection, isolation and rendering path below applies to them unchanged.
 	// Combo registrations are layered on top: itemact.txt only says which
 	// animation each state plays, delayacttable.xml is what lets the player
 	// actually reach the next state, and a weapon without transitions cannot
 	// chain attacks however complete its action row looks.
+	//
+	// Apply the complete workspace before building the base archive. Remaps,
+	// cloned hit properties and all block edits must be visible to the first
+	// inspection; otherwise rules are validated against the pre-remap stage list
+	// and a newly-defined state is reported as "连招配置格式错误".
+	workspaceApplied := request.Operation == "weapon_apply" && request.Workspace != nil
+	key := strconv.Itoa(request.Weapon)
+	if workspaceApplied {
+		if err := validateWorkspacePayload(request.Weapon, request.Workspace); err != nil {
+			return nil, err
+		}
+		if err := mergeWorkspaceIntoState(request.Workspace, key, &state); err != nil {
+			return nil, err
+		}
+		if err := normalizeHitProperties(&state); err != nil {
+			return nil, err
+		}
+		projectHitPropertiesToLegacy(&state)
+	}
 	base, err := buildWeaponBase(source, &state)
 	if err != nil {
 		return nil, err
+	}
+	// Buff 编辑是全局状态文档，武器配置的 Buff 下拉和自身状态下拉也必须
+	// 看到当前编辑集；否则新建状态虽已保存/应用，武器页仍只读到基线 ustate.xml。
+	if base, err = applyBuffEdits(base, &state); err != nil {
+		return nil, fmt.Errorf("状态/Buff 配置：%w", err)
 	}
 	if len(state.Created) > 0 || len(state.Combos) > 0 || len(state.Chains) > 0 {
 		text, err := base.text("item.txt")
@@ -2013,14 +2557,59 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			return nil, err
 		}
 	}
+	if request.Operation == "weapon_list" {
+		weapons, err := lightWeaponList(base, items, &state)
+		if err != nil {
+			return nil, err
+		}
+		propertyNodes, err := propertyNodes(base)
+		if err != nil {
+			return nil, err
+		}
+		buffRows, err := buffs(base)
+		if err != nil {
+			return nil, err
+		}
+		undeployed := undeployedWeaponIDs(current, weapons)
+		result := map[string]any{
+			"weapons": weapons, "effects": effectsFromProperties(propertyNodes),
+			"fields": propertyFields, "hit_options": hitOptions, "buffs": buffRows,
+			"drafts": state.Drafts, "applied": state.Applied, "created": state.Created,
+			"combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules,
+			"remaps": state.Remaps, "extra_properties": state.ExtraProperties, "hit_properties": state.HitProperties, "cleared": state.Cleared,
+			"states": itemactStates(base), "ustates": ustateCatalog(base),
+			"client": describeClient(entry, folder), "clients": describeBaselines(&state, folder),
+			"models": weaponModels(client), "types": weaponTypes,
+			"used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed,
+			"blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID,
+			"revision": revision, "folder": folder,
+		}
+		return result, nil
+	}
+	projectionState := &state
+	wanted := map[int]bool(nil)
+	projectionWanted := map[int]bool(nil)
+	if request.Operation == "weapon_detail" {
+		if request.Weapon == 0 {
+			return nil, fmt.Errorf("请选择武器")
+		}
+		wanted = map[int]bool{request.Weapon: true}
+		// Shared action clones are allocated in global edit order. Project every
+		// authored weapon to keep IDs identical to apply, inspect only the target.
+		projectionWanted = weaponIDsInState(&state)
+		if projectionWanted == nil {
+			projectionWanted = map[int]bool{}
+		}
+		projectionWanted[request.Weapon] = true
+	}
 	// The stage list, the damage editors and every validation below must see
 	// the structure the remaps will actually produce, not the raw donor row:
 	// apply them once here so saved edits can only ever bind to live nodes.
 	// A broken remap must not lock the editor shut, so the catalogue falls
 	// back to the pre-remap view and reports the failure instead.
 	remapError := ""
-	if len(state.Remaps) > 0 || len(state.ExtraProperties) > 0 || len(state.Cleared) > 0 {
-		if remapped, remapErr := applyRemaps(base, &state, items); remapErr == nil {
+	if len(projectionState.Remaps) > 0 || len(projectionState.ExtraProperties) > 0 || len(projectionState.Cleared) > 0 {
+		if remapped, remapErr := applyRemaps(base, projectionState, items, projectionWanted); remapErr == nil {
 			base = remapped
 		} else {
 			remapError = remapErr.Error()
@@ -2028,40 +2617,52 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	// Frame-level switches are the second combo channel and must be visible in
 	// the editor exactly as they will be rendered, so apply them here too.
-	if len(state.FrameSwitches) > 0 {
-		if framed, frameErr := applyFrameSwitches(base, &state, items); frameErr == nil {
+	if len(projectionState.FrameSwitches) > 0 {
+		if framed, frameErr := applyFrameSwitches(base, projectionState, items, projectionWanted); frameErr == nil {
 			base = framed
 		} else {
 			remapError = frameErr.Error()
 		}
 	}
 	// 招架（<Counter>）是第三条通道，同样要让编辑器看到"应用后的样子"。
-	if len(state.Counters) > 0 {
-		if countered, counterErr := applyCounters(base, &state, items); counterErr == nil {
+	if len(projectionState.Counters) > 0 {
+		if countered, counterErr := applyCounters(base, projectionState, items, projectionWanted); counterErr == nil {
 			base = countered
 		} else {
 			remapError = counterErr.Error()
 		}
 	}
 	// 防护（霸体/无敌/穿人）与自身状态（UState/AddBuff）。
-	if len(state.BlockElements) > 0 {
-		if applied, applyErr := applyBlockElements(base, &state, items); applyErr == nil {
+	if len(projectionState.BlockElements) > 0 {
+		if applied, applyErr := applyBlockElements(base, projectionState, items, projectionWanted); applyErr == nil {
 			base = applied
 		} else {
 			remapError = applyErr.Error()
 		}
 	}
 	// 攻击范围（<AttackScope>）：同样是动作块里的元素，编辑后要立刻在轨道上看到。
-	if len(state.Scopes) > 0 {
-		if applied, applyErr := applyScopes(base, &state, items); applyErr == nil {
+	if len(projectionState.Scopes) > 0 {
+		if applied, applyErr := applyScopes(base, projectionState, items, projectionWanted); applyErr == nil {
 			base = applied
 		} else {
 			remapError = applyErr.Error()
 		}
 	}
+	// 保存时从分支应用前的投影重建候选，避免旧草稿造成误复用或删除失败。
+	variantBase := base
+	// 分支与写入管线使用同一投影，否则已保存的条件块和新命中号在编辑器中不可见。
+	if len(projectionState.Variants) > 0 {
+		if applied, applyErr := applyVariantsProjection(base, projectionState, items, projectionWanted, currentArchive); applyErr == nil {
+			base = applied
+		} else {
+			// 详情/目录读取允许工作区保留待重分配的预占号；真正应用时
+			// 仍走严格路径并明确报告冲突。不要让刷新页面变成整把武器不可读。
+			remapError = "分支形态：" + applyErr.Error()
+		}
+	}
 	// 招式特效（<Effect> / <HitEffect>）：编辑后同样要立刻在武器页与招式页看到。
-	if len(state.StageEffects) > 0 {
-		if applied, applyErr := applyStageEffects(base, &state); applyErr == nil {
+	if len(projectionState.StageEffects) > 0 {
+		if applied, applyErr := applyStageEffects(base, projectionState, projectionWanted); applyErr == nil {
 			base = applied
 		} else {
 			remapError = applyErr.Error()
@@ -2076,7 +2677,12 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			return nil, syncErr
 		}
 	}
-	info, err := inspect(base, items)
+	var info *inspection
+	if wanted == nil {
+		info, err = inspect(base, items)
+	} else {
+		info, err = inspectFilteredWithActions(base, items, wanted, projectionActions(projectionState, wanted)...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2087,14 +2693,56 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	}
 	// Saved edits that predate a remap reference nodes that no longer belong
 	// to their stage; drop them instead of failing every later apply, and let
-	// a remap's own label name the state in the stage list.
-	pruneStaleRules(&state, info)
-	overlayRemapLabels(&state, info)
-	current, err := os.ReadFile(packagePath)
-	if err != nil {
-		return nil, err
+	// a remap's own label name the state in the stage list. Detail projection
+	// must not prune another weapon's saved plans from the shared state.
+	pruneStaleRules(projectionState, info, wanted)
+	overlayRemapLabels(projectionState, info)
+	variantTaken := []string{}
+	if request.Operation == "weapon_catalog" || request.Operation == "weapon_combo_chain" || request.Operation == "weapon_variant_set" {
+		variantTaken, err = variantOccupiedIDs(&state, source, currentArchive, base)
+		if err != nil {
+			return nil, err
+		}
 	}
-	revision := digest(append(append([]byte(nil), current...), stateBytes...))
+	if request.Operation == "weapon_detail" {
+		if len(info.weapons) != 1 || info.weapons[0].ID != request.Weapon {
+			return nil, fmt.Errorf("武器 %d 不在本客户端的动作表中", request.Weapon)
+		}
+		buffRows, err := buffs(base)
+		if err != nil {
+			return nil, err
+		}
+		weapon := info.weapons[0]
+		variantTaken, err := variantOccupiedIDs(&state, source, currentArchive, base)
+		if err != nil {
+			return nil, err
+		}
+		result := map[string]any{
+			"weapon": weapon, "weapons": []Weapon{weapon},
+			"effects": effects(info), "fields": propertyFields, "hit_options": hitOptions,
+			"buffs": buffRows, "drafts": state.Drafts, "applied": state.Applied, "created": state.Created,
+			"combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules,
+			"remaps": state.Remaps, "extra_properties": state.ExtraProperties, "hit_properties": state.HitProperties, "cleared": state.Cleared,
+			"states": itemactStates(base), "ustates": ustateCatalog(base),
+			"client": describeClient(entry, folder), "clients": describeBaselines(&state, folder),
+			"models": weaponModels(client), "types": weaponTypes,
+			"used_ids":      usedWeaponIDs(source, state.Created),
+			"blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID,
+			"revision": revision, "folder": folder,
+			"chain_info":      weaponComboChainView(base, info, &state, request.Weapon, variantTaken, revision),
+			"combo_rule_info": weaponComboRuleView(source, info, &state, request.Weapon, revision),
+		}
+		result["variant_occupied_ids"] = variantTaken
+		result["variant_skillpro_min"] = variantSkillProPrefix
+		result["variant_skillpro_max"] = variantSkillProLimit - 1
+		if remapError != "" {
+			result["remap_error"] = remapError
+		}
+		if warnings := counterWarnings(info); len(warnings) > 0 {
+			result["counter_warnings"] = warnings
+		}
+		return result, nil
+	}
 	if request.Operation == "weapon_catalog" {
 		buffRows, err := buffs(base)
 		if err != nil {
@@ -2106,7 +2754,10 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		// file itself (not the baseline) and report the ids it does not ship, so
 		// the list can mark them instead of claiming they are installed here.
 		undeployed := undeployedWeaponIDs(current, info.weapons)
-		result := map[string]any{"weapons": info.weapons, "effects": effects(info), "fields": propertyFields, "hit_options": hitOptions, "buffs": buffRows, "drafts": state.Drafts, "applied": state.Applied, "created": state.Created, "combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules, "remaps": state.Remaps, "extra_properties": state.ExtraProperties, "cleared": state.Cleared, "states": itemactStates(base), "client": describeClient(entry, folder), "clients": describeBaselines(&state, folder), "models": weaponModels(client), "types": weaponTypes, "used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed, "blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID, "revision": revision, "folder": folder}
+		result := map[string]any{"weapons": info.weapons, "effects": effects(info), "fields": propertyFields, "hit_options": hitOptions, "buffs": buffRows, "drafts": state.Drafts, "applied": state.Applied, "created": state.Created, "combos": state.Combos, "chains": state.Chains, "combo_rules": state.ComboRules, "remaps": state.Remaps, "extra_properties": state.ExtraProperties, "hit_properties": state.HitProperties, "cleared": state.Cleared, "states": itemactStates(base), "client": describeClient(entry, folder), "clients": describeBaselines(&state, folder), "models": weaponModels(client), "types": weaponTypes, "used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed, "blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID, "revision": revision, "folder": folder}
+		result["variant_occupied_ids"] = variantTaken
+		result["variant_skillpro_min"] = variantSkillProPrefix
+		result["variant_skillpro_max"] = variantSkillProLimit - 1
 		if remapError != "" {
 			result["remap_error"] = remapError
 		}
@@ -2522,19 +3173,37 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		for _, perStage := range request.Variants {
 			count += len(perStage)
 		}
-		// 整把一次性替换：map 里没有的状态 = 不改（沿用块里原有的分支）。
 		if len(request.Variants) == 0 {
-			snapshotState(statePath)
 			delete(state.Variants, key)
 		} else {
+			merged, err := mergeVariantEdits(variantBase, key, state.Variants[key], request.Variants, currentArchive)
+			if err != nil {
+				return nil, err
+			}
 			if state.Variants == nil {
 				state.Variants = map[string]map[int][]VariantEdit{}
 			}
-			state.Variants[key] = request.Variants
+			state.Variants[key] = merged
+		}
+		for weapon, edits := range state.Variants {
+			if err := validateVariants(variantBase, weapon, edits); err != nil {
+				return nil, err
+			}
+		}
+		candidate, err := applyVariants(variantBase, &state, items, currentArchive)
+		if err != nil {
+			return nil, err
+		}
+		variantTaken, err = variantOccupiedIDs(&state, source, currentArchive, candidate)
+		if err != nil {
+			return nil, err
 		}
 		encoded, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {
 			return nil, err
+		}
+		if len(request.Variants) == 0 {
+			snapshotState(statePath)
 		}
 		if err := atomicWrite(statePath, encoded); err != nil {
 			return nil, err
@@ -2544,10 +3213,11 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			message = "已清除该武器的分支形态编辑，动作块回到原样"
 		}
 		return map[string]any{
-			"variants": state.Variants[key],
-			"saved":    count,
-			"revision": digest(append(append([]byte(nil), current...), encoded...)),
-			"message":  message,
+			"variants":             state.Variants[key],
+			"variant_occupied_ids": variantTaken,
+			"saved":                count,
+			"revision":             digest(append(append([]byte(nil), current...), encoded...)),
+			"message":              message,
 		}, nil
 	}
 	if request.Operation == "weapon_combo_chain_set" {
@@ -2707,32 +3377,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if err != nil {
 			return nil, err
 		}
-		// The key ids are non-contiguous and the editor must offer exactly the
-		// ones this client understands, so ship the client's own table along
-		// with the chain instead of a hardcoded list.
-		return map[string]any{
-			"weapon":         request.Weapon,
-			"chain":          comboChain(base, info, strconv.Itoa(request.Weapon)),
-			"dead_ends":      comboDeadEnds(base, info, strconv.Itoa(request.Weapon)),
-			"frame_switches": comboFrameSwitches(base, info, strconv.Itoa(request.Weapon)),
-			// 已保存的帧级连招编辑（按状态），编辑器据此区分"改过的"和"原样"。
-			"frame_switches_saved": state.FrameSwitches[strconv.Itoa(request.Weapon)],
-			// 第三条通道：动作块里被对手攻击触发的招架。
-			"counters":       comboCounters(info, strconv.Itoa(request.Weapon)),
-			"counters_saved": state.Counters[strconv.Itoa(request.Weapon)],
-			// 防护（霸体/无敌/穿人）与自身状态（UState/AddBuff）：
-			// 现状 + 已保存的编辑 + 可写元素的清单（供界面按类型分组）。
-			"block_elements":       comboBlockElements(info, strconv.Itoa(request.Weapon)),
-			"block_elements_saved": state.BlockElements[strconv.Itoa(request.Weapon)],
-			// 分支形态（按状态切换招式）的现况 + 已保存的编辑 + 无条件块动作段。
-			"variants":             comboVariants(info, strconv.Itoa(request.Weapon)),
-			"variants_saved":       state.Variants[strconv.Itoa(request.Weapon)],
-			"variant_bases":        variantBases(info, strconv.Itoa(request.Weapon)),
-			"block_element_groups": blockElementGroups(),
-			"frame_keys":           frameKeyOptions(),
-			"keys":                 keyInputs(base),
-			"revision":             revision,
-		}, nil
+		return weaponComboChainView(base, info, &state, request.Weapon, variantTaken, revision), nil
 	}
 	// weapon_combo_rule returns the comborule.xml limits of one weapon: the
 	// per-skill hit limits, the black/white connection lists, the rules the
@@ -2744,7 +3389,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 		if request.Weapon == 0 {
 			return nil, fmt.Errorf("请选择武器")
 		}
-		return comboRuleView(source, info, &state, strconv.Itoa(request.Weapon), revision), nil
+		return weaponComboRuleView(source, info, &state, request.Weapon, revision), nil
 	}
 	// weapon_combo_rule_set replaces the rule blocks a weapon owns. It refuses
 	// to rewrite a block that ships in the client, so official data stays
@@ -2868,11 +3513,101 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 				break
 			}
 		}
-		return map[string]any{
+		result := map[string]any{
 			"action":       action,
 			"property_id":  propertyID,
 			"action_label": actionLabel,
-		}, nil
+		}
+		donorKey := strconv.Itoa(request.TemplateWeapon)
+		for _, donor := range info.weapons {
+			if donor.ID != request.TemplateWeapon {
+				continue
+			}
+			for _, stage := range donor.Stages {
+				if stage.State != strconv.Itoa(request.TemplateStage) {
+					continue
+				}
+				// A remap changes the target state to this complete donor action.
+				// Return the related editor channels as one snapshot so the GM can
+				// migrate them together instead of showing only action/property ids.
+				result["template_stage_data"] = stage
+				tracks := stageTracks(info, client, donorKey)
+				for _, track := range tracks {
+					if value, ok := track["state"].(string); ok && value == stage.State {
+						result["template_track"] = track
+						break
+					}
+				}
+				frame := []frameSwitch{}
+				for _, item := range comboFrameSwitches(base, info, donorKey) {
+					if item.State == stage.State {
+						frame = append(frame, item)
+					}
+				}
+				result["template_frame_switches"] = frame
+				counter := []map[string]any{}
+				for _, item := range comboCounters(info, donorKey) {
+					if value, ok := item["state"].(string); ok && value == stage.State {
+						counter = append(counter, item)
+					}
+				}
+				result["template_counters"] = counter
+				blocks := []map[string]any{}
+				for _, item := range comboBlockElements(info, donorKey) {
+					if value, ok := item["state"].(string); ok && value == stage.State {
+						blocks = append(blocks, item)
+					}
+				}
+				result["template_block_elements"] = blocks
+				rawState, _ := strconv.Atoi(stage.State)
+				if saved := state.Scopes[donorKey]; saved != nil {
+					if value := saved[rawState]; value != nil {
+						result["template_scope_saved"] = value
+					}
+				}
+				if saved := state.StageEffects[donorKey]; saved != nil {
+					if value, ok := saved[rawState]; ok {
+						result["template_stage_effects"] = value
+					}
+				}
+				result["template_chain"] = comboChain(base, info, donorKey)
+				result["template_variants"] = comboVariants(info, donorKey, state.Variants[donorKey])
+				result["template_variants_saved"] = state.Variants[donorKey]
+				result["template_variant_bases"] = variantBases(info, donorKey)
+				break
+			}
+		}
+		// The editor needs the complete donor node immediately. Returning only the
+		// id leaves a newly-created stage with property_ids but no renderable Hit.
+		if propertyID != "" {
+			if node, ok := info.propertyNode(propertyID); ok {
+				values := map[string]string{}
+				for _, field := range propertyFields {
+					value := node.get(field.Key)
+					if value == "" {
+						value = "0"
+					}
+					values[field.Key] = value
+				}
+				buff := "0"
+				for _, attr := range node.attrs {
+					if attr.Name.Local == "UnNormalState" {
+						buff = attr.Value
+					}
+				}
+				for _, key := range []string{"UStateLevel", "UStateLastCycle"} {
+					if value := node.get(key); value != "" {
+						values[key] = value
+					}
+				}
+				result["hit"] = map[string]any{
+					"id":     propertyID,
+					"values": values,
+					"buff":   buff,
+				}
+			}
+		}
+		return result, nil
 	}
 	if request.Operation == "weapon_remap" || request.Operation == "weapon_property_add" {
 		info, err := inspect(base, items)
@@ -2886,14 +3621,18 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			if template == "" {
 				return nil, fmt.Errorf("请选择命中属性模板")
 			}
-			if len(info.properties[template]) != 1 {
-				return nil, fmt.Errorf("命中属性模板 %s 不存在或不唯一", template)
+			if _, ok := info.propertyNode(template); !ok {
+				return nil, fmt.Errorf("命中属性模板 %s 在客户端里不存在", template)
 			}
 			id := freshPropertyID(info)
 			if id == "" {
 				return nil, fmt.Errorf("命中属性编号空间不足")
 			}
-			state.ExtraProperties[id] = ExtraProperty{Template: template}
+			extra := ExtraProperty{Template: template}
+			if request.Weapon > 0 {
+				extra.OwnerWeapon = strconv.Itoa(request.Weapon)
+			}
+			state.ExtraProperties[id] = extra
 			newPropertyID = id
 			message = "已新增命中属性节点 " + id
 		} else {
@@ -2924,6 +3663,20 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			} else {
 				if state.Remaps[key] == nil {
 					state.Remaps[key] = map[int]*StageRemap{}
+				}
+				if extra, exists := state.ExtraProperties[propertyID]; exists {
+					if err := validateExtraPropertyOwner(extra, key, propertyID); err != nil {
+						return nil, err
+					}
+					owners, err := extraPropertyOwners(&state)
+					if err != nil {
+						return nil, err
+					}
+					if owner := owners[propertyID]; owner != "" && owner != key {
+						return nil, fmt.Errorf("命中属性 %s 属于武器 %s，不能跨武器使用", propertyID, owner)
+					}
+					extra.OwnerWeapon = key
+					state.ExtraProperties[propertyID] = extra
 				}
 				state.Remaps[key][request.Stage] = &StageRemap{Action: action, PropertyID: propertyID, Label: strings.TrimSpace(request.Label)}
 				// 换了动作，旧动作块上那些"绑片断/绑块"的编辑全部失效，必须一起清掉。
@@ -2995,6 +3748,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			state.Cleared[key] = map[int]bool{}
 		}
 		state.Cleared[key][request.Stage] = true
+		clearClearedStageReferences(&state, map[int]bool{request.Weapon: true})
 		clearStageRule(&state, key, request.Stage, true)
 		if transitions := state.Chains[key]; len(transitions) > 0 {
 			kept := make([]ComboTransition, 0, len(transitions))
@@ -3036,11 +3790,33 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if weapon == nil {
 		return nil, fmt.Errorf("请选择本客户端的武器")
 	}
-	rules, err := validateRules(request.Rules, *weapon)
-	if err != nil {
-		return nil, err
+	rules := request.Rules
+	if !workspaceApplied {
+		if rules, err = validateRules(rules, *weapon); err != nil {
+			return nil, err
+		}
 	}
-	key := strconv.Itoa(weapon.ID)
+	variantReplacements := map[string]string{}
+	if workspaceApplied {
+		if currentArchive != nil && len(state.Variants[key]) > 0 {
+			var reassignErr error
+			variantReplacements, reassignErr = reassignConflictingVariantIDs(currentArchive, &state, variantBase)
+			if reassignErr != nil {
+				return nil, fmt.Errorf("分支形态 ID 重分配失败：%w", reassignErr)
+			}
+			if len(variantReplacements) > 0 {
+				request.Workspace["variants"] = state.Variants[key]
+			}
+		}
+		if draft, ok := state.Drafts[key]; ok {
+			rules = draft
+		}
+		appendVariantPropertyIDs(weapon, key, state.Variants)
+		rules = rewriteVariantRulePropertyIDs(rules, variantReplacements)
+		if rules, err = validateRules(rules, *weapon); err != nil {
+			return nil, err
+		}
+	}
 	if request.Operation == "weapon_publish" {
 		if strings.TrimSpace(request.Notes) == "" || len(request.Notes) > 8000 {
 			return nil, fmt.Errorf("请填写更新说明（最多 8000 字节）")
