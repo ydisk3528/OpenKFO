@@ -55,6 +55,11 @@ type Channel struct {
 }
 
 type Session struct {
+	auditSampleAt        time.Time
+	auditSamples         uint32
+	auditSuppressed      uint64
+	udpOrdered           bool
+	udpReceive           tunnel.UDPOrder
 	udpDrain             tunnel.UDPDrain
 	HornPending          bool
 	LastHorn             time.Time
@@ -1152,6 +1157,9 @@ func (hub *Hub) relayDatagram(session *Session, frame tunnel.Frame) error {
 	// refresh rebuilds peer state. Nothing to forward; keep the session alive.
 	// Authentication, lease, source port and envelope checks above still apply.
 	if extra == 0 {
+		// A solo PVE controller still reports its native entity lifecycle.
+		// Routing to nobody must not erase the server's actor registration.
+		hub.observeRelayedBattle(session, packet[24:], nil)
 		return nil
 	}
 	room := session.Room

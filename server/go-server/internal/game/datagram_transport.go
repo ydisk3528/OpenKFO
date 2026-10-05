@@ -53,6 +53,7 @@ func (s *Server) registerDatagramPeer(session *Session) (*tunnel.DatagramGrant, 
 	if e != nil {
 		return nil, nil
 	}
+	g.Order = session.udpOrdered
 	c, e := tunnel.NewDatagramCodec(g, true)
 	if e != nil {
 		return nil, nil
@@ -83,7 +84,11 @@ func (p *serverDatagramPeer) send(f tunnel.Frame) bool {
 	}
 	remote := p.remote
 	p.mu.Unlock()
-	encoded, e := p.codec.Seal(f.Port, f.Data)
+	data := f.Data
+	if p.session.udpOrdered {
+		data = tunnel.PackUDPEpoch(f.Value, data)
+	}
+	encoded, e := p.codec.Seal(f.Port, data)
 	if e != nil {
 		return false
 	}
@@ -202,6 +207,11 @@ func (p *serverDatagramPeer) handleInput(packet inboundDatagram) {
 			return
 		}
 		p.mu.Lock()
+		if p.remote == nil || p.remote.String() != addr.String() {
+			// A NAT rebind must confirm its own return path; the old address's
+			// lease cannot authorize sending combat to this new address.
+			p.ready = time.Time{}
+		}
 		p.remote = addr
 		if data[0] == 1 {
 			if time.Since(p.ready) > 3*time.Second {
@@ -216,6 +226,14 @@ func (p *serverDatagramPeer) handleInput(packet inboundDatagram) {
 		}
 		return
 	}
+	epoch := uint32(0)
+	if p.session.udpOrdered {
+		var err error
+		epoch, data, err = tunnel.UnpackUDPEpoch(data)
+		if err != nil {
+			return
+		}
+	}
 	// Only native relay envelopes use this lane; login/lease traffic remains TLS.
 	if len(data) < 24 || protocol.ReadUint16(data, 2) != 1008 {
 		return
@@ -226,7 +244,15 @@ func (p *serverDatagramPeer) handleInput(packet inboundDatagram) {
 	if !same {
 		return
 	}
-	if e := s.Hub.Handle(p.session, tunnel.Frame{Op: "udp", Port: port, Data: data}); e != nil {
+	if e := s.handleDatagram(p.session, tunnel.Frame{Op: "udp", Port: port, Data: data, Value: epoch}, false); e != nil {
 		log.Printf("udp_transport_rejected uid=%d", p.session.UID)
 	}
+}
+
+func (s *Server) handleDatagram(session *Session, f tunnel.Frame, reliable bool) error {
+	deliver := func(frame tunnel.Frame) error { return s.Hub.Handle(session, frame) }
+	if session.udpOrdered && f.Op == "udp" {
+		return session.udpReceive.Receive(f, reliable, deliver)
+	}
+	return deliver(f)
 }

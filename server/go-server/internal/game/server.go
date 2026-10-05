@@ -241,11 +241,16 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		}
 		return
 	}
+	session.udpOrdered = auth.UDPOrder
 	session.ClientRelease = auth.ClientRelease
 	session.udpDrain.Supported = auth.Kind == "udp-drain-v1"
 	session.ClientConfigHash = auth.ConfigHash
 	defer server.Hub.Detach(session)
 	grant, peer := server.registerDatagramPeer(session)
+	if peer == nil {
+		// No grant means the client cannot negotiate the ordered wire format.
+		session.udpOrdered = false
+	}
 	defer server.unregisterDatagramPeer(peer)
 	if peer != nil {
 		session.datagramEnabled.Store(true)
@@ -255,7 +260,7 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 		return
 	}
 	session.tracePacket("S->C", 0, "tunnel:auth-ok", 0, nil, false)
-	log.Printf("authenticated uid=%d account=%q player=%q", session.UID, session.Account, session.Nickname)
+	log.Printf("authenticated uid=%d account=%q player=%q udp_order=%t", session.UID, session.Account, session.Nickname, session.udpOrdered)
 	connection.SetDeadline(time.Time{})
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -303,7 +308,7 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 					finished := time.Now()
 					if (queued > 100*time.Millisecond || finished.Sub(started) > 100*time.Millisecond) && finished.Sub(lastSlowWrite) > 5*time.Second {
 						lastSlowWrite = finished
-						log.Printf("game_send_slow uid=%d op=%s queue_ms=%d write_ms=%d remaining=%d", session.UID, frame.Op, queued.Milliseconds(), finished.Sub(started).Milliseconds(), len(session.Output))
+						log.Printf("game_send_slow uid=%d op=%s channel=%d bytes=%d queue_ms=%d write_ms=%d remaining=%d", session.UID, frame.Op, frame.Channel, len(frame.Data), queued.Milliseconds(), finished.Sub(started).Milliseconds(), len(session.Output))
 					}
 				}
 				connection.SetWriteDeadline(time.Now().Add(30 * time.Second))
@@ -331,7 +336,7 @@ func (server *Server) serveConnection(connection *tls.Conn) {
 			log.Printf("session_bad_frame uid=%d account=%q bytes=%d", session.UID, session.Account, len(encoded))
 			break
 		}
-		if err = server.Hub.Handle(session, frame); err != nil {
+		if err = server.handleDatagram(session, frame, true); err != nil {
 			log.Printf("session_rejected uid=%d account=%q op=%q channel=%d kind=%q error=%v", session.UID, session.Account, frame.Op, frame.Channel, frame.Kind, err)
 			break
 		}

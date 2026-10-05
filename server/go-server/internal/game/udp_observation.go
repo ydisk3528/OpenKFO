@@ -6,11 +6,16 @@ import (
 	"math"
 )
 
-// Only observe complete small native frames after routing to at least one
-// authenticated room peer. Do not decode fragments or forward a second copy.
+// Observe complete small native frames routed to an authenticated room peer,
+// or lifecycle reports from a PVE controller with no recipients. Do not decode
+// fragments or forward a second copy.
 func (h *Hub) observeRelayedBattle(s *Session, body []byte, recipients map[uint64]bool) {
 	r := s.Room
-	if r == nil || len(recipients) == 0 || len(body) > 1024 || (r.Stage != "loading" && r.Stage != "battle") || r.isObserver(s) || s.game() == nil {
+	if r == nil || len(body) > 1024 || (r.Stage != "loading" && r.Stage != "battle") || r.isObserver(s) || s.game() == nil {
+		return
+	}
+	localPVE := len(recipients) == 0
+	if localPVE && (r.Owner != s.UID || r.fighterCount() != 1 || (r.Type() != protocol.StageAssault && r.Type() != protocol.FosterMode)) {
 		return
 	}
 	member := r.Members[s.UID]
@@ -28,6 +33,16 @@ func (h *Hub) observeRelayedBattle(s *Session, body []byte, recipients map[uint6
 			continue
 		}
 		id := protocol.ReadUint32(p, 0)
+		if localPVE {
+			switch id {
+			case protocol.BattleEventPVEActorCreate, protocol.BattleEventPVEActorRemove,
+				protocol.BattleEventPVEBlockCreate, protocol.BattleEventPVEBlockRemove,
+				protocol.BattleEventFosterPositions, protocol.BattleEventStageWaveEnd,
+				protocol.BattleEventHealth:
+			default:
+				continue
+			}
+		}
 		if protocol.ReadUint64(p, 4) != s.UID || p[12] != 1 || p[13] != 1 {
 			continue
 		}

@@ -109,6 +109,17 @@ func TestUDPRecoveryDoesNotBypassPendingFallback(t *testing.T) {
 		t.Fatal("resumed before peer acknowledgement")
 	}
 	s.udpDrain.Ack(fence.Value)
+	var second tunnel.Frame
+	if err := decoder.Decode(&second); err != nil || second.Data[23] != 1 {
+		t.Fatal("continued fallback missing", err)
+	}
+	if err := decoder.Decode(&fence); err != nil || fence.Kind != "udp-drain" {
+		t.Fatal("fresh fence missing", err)
+	}
+	s.udpDrain.Ack(fence.Value)
+	if !s.enqueueUDPFallback(tunnel.Frame{Op: "udp", Port: 100, Data: packet}) {
+		t.Fatal("third enqueue")
+	}
 	receiver.SetReadDeadline(time.Now().Add(time.Second))
 	n, err := receiver.Read(buf)
 	if err != nil {

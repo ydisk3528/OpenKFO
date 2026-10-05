@@ -39,6 +39,7 @@ func ReadFrame(reader *bufio.Reader, maximum int) ([]byte, error) {
 }
 
 type Frame struct {
+	UDPOrder               bool           `json:"udp_order,omitempty"`
 	ErrorMessage           string         `json:"error_message,omitempty"`
 	QueuedAt               time.Time      `json:"-"`
 	ClientRelease          string         `json:"client_release,omitempty"`

@@ -3,6 +3,7 @@
 package bridge
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -60,8 +61,12 @@ func ActivateExistingClient(image string) (bool, error) {
 	return false, nil
 }
 
-func AcquireLauncher(loginPort int) (syscall.Handle, bool, error) {
-	name, _ := syscall.UTF16PtrFromString(fmt.Sprintf(`Local\KungFuOnlineBridge%d`, loginPort))
+func AcquireLauncher(loginPort int, directory ...string) (syscall.Handle, bool, error) {
+	key := fmt.Sprintf(`Local\KungFuOnlineBridge%d`, loginPort)
+	if len(directory) > 0 && directory[0] != "" {
+		key = fmt.Sprintf(`Local\KungFuOnlineBridge-%x`, sha256.Sum256([]byte(strings.ToLower(filepath.Clean(directory[0])))))
+	}
+	name, _ := syscall.UTF16PtrFromString(key)
 	handle, _, err := kernel.NewProc("CreateMutexW").Call(0, 0, uintptr(unsafe.Pointer(name)))
 	if handle == 0 {
 		return 0, false, err

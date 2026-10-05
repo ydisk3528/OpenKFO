@@ -51,6 +51,16 @@ func (p *clientDatagramPeer) send(port uint16, data []byte) bool {
 	return e == nil
 }
 func (b *Bridge) startDatagrams(s *remoteSession, host string, g *tunnel.DatagramGrant) {
+	// The authenticated grant defines the TCP fallback format too. Preserve
+	// negotiation even when WSS is used or UDP setup fails locally.
+	if g == nil {
+		return
+	}
+	s.udpOrdered = g.Order
+	s.udpDrain.Supported = g.Drain
+	if host == "" {
+		return
+	}
 	codec, e := tunnel.NewDatagramCodec(g, false)
 	if e != nil {
 		return
@@ -65,7 +75,6 @@ func (b *Bridge) startDatagrams(s *remoteSession, host string, g *tunnel.Datagra
 	}
 	p := &clientDatagramPeer{conn: conn, codec: codec}
 	s.udpTransport = p
-	s.udpDrain.Supported = g.Drain
 	go func() {
 		defer conn.Close()
 		var lastReadError time.Time
@@ -116,7 +125,17 @@ func (b *Bridge) startDatagrams(s *remoteSession, host string, g *tunnel.Datagra
 			if !allowed {
 				continue
 			}
-			b.udp.WriteToUDP(data, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+			epoch := uint32(0)
+			if s.udpOrdered {
+				epoch, data, e = tunnel.UnpackUDPEpoch(data)
+				if e != nil {
+					continue
+				}
+			}
+			if e = b.deliverDatagram(s, tunnel.Frame{Op: "udp", Port: port, Data: data, Value: epoch}, false); e != nil {
+				s.close()
+				return
+			}
 		}
 	}()
 	go func() {
@@ -160,4 +179,15 @@ func retryUDPRead(err error) bool {
 	}
 	var temporary net.Error
 	return errors.As(err, &temporary) && (temporary.Timeout() || temporary.Temporary())
+}
+
+func (b *Bridge) deliverDatagram(s *remoteSession, f tunnel.Frame, reliable bool) error {
+	deliver := func(frame tunnel.Frame) error {
+		_, err := b.udp.WriteToUDP(frame.Data, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(frame.Port)})
+		return err
+	}
+	if s.udpOrdered && f.PeerReceipt == "" {
+		return s.udpReceive.Receive(f, reliable, deliver)
+	}
+	return deliver(f)
 }

@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,22 +30,24 @@ import (
 )
 
 type Config struct {
-	LauncherScope     string `json:"launcher_scope"`
-	ClientRelease     string `json:"client_release"`
-	SharedClient      bool   `json:"shared_client"`
-	ControlDirectory  string `json:"control_directory"`
-	TraceProtocol     bool   `json:"trace_protocol"`
-	LoginPort         int    `json:"login_port"`
-	SDKPort           int    `json:"sdk_port"`
-	GamePort          int    `json:"game_port"`
-	URL               string `json:"url"`
-	ClientDirectory   string `json:"client_directory"`
-	ClientExecutable  string `json:"client_executable"`
-	ClientSHA256      string `json:"client_sha256"`
-	ConfigHash        string `json:"config_hash"`
-	ServerCertificate string `json:"server_certificate"`
-	LoginCertificate  string `json:"login_certificate"`
-	LoginKey          string `json:"login_key"`
+	EmbeddedCertificates bool   `json:"embedded_certificates"`
+	AutoPorts            bool   `json:"auto_ports"`
+	LauncherScope        string `json:"launcher_scope"`
+	ClientRelease        string `json:"client_release"`
+	SharedClient         bool   `json:"shared_client"`
+	ControlDirectory     string `json:"control_directory"`
+	TraceProtocol        bool   `json:"trace_protocol"`
+	LoginPort            int    `json:"login_port"`
+	SDKPort              int    `json:"sdk_port"`
+	GamePort             int    `json:"game_port"`
+	URL                  string `json:"url"`
+	ClientDirectory      string `json:"client_directory"`
+	ClientExecutable     string `json:"client_executable"`
+	ClientSHA256         string `json:"client_sha256"`
+	ConfigHash           string `json:"config_hash"`
+	ServerCertificate    string `json:"server_certificate"`
+	LoginCertificate     string `json:"login_certificate"`
+	LoginKey             string `json:"login_key"`
 }
 type Bridge struct {
 	peerMutex    sync.Mutex
@@ -58,6 +61,11 @@ type Bridge struct {
 	relogin      chan *remoteSession
 }
 type remoteSession struct {
+	modPending      atomic.Bool
+	udpOrdered      bool
+	udpReceive      tunnel.UDPOrder
+	controlOnce     sync.Once
+	controlOutput   chan tunnel.Frame
 	udpDrain        tunnel.UDPDrain
 	udpDropLog      time.Time
 	udpDropped      uint64
@@ -90,9 +98,7 @@ func (session *remoteSession) send(frame tunnel.Frame) error {
 func (session *remoteSession) close() {
 	session.closeOnce.Do(func() {
 		close(session.done)
-		if path := modStatusPath(session.identity); path != "" {
-			_ = os.Remove(path)
-		}
+		modFiles.remove(session)
 		if session.udpTransport != nil {
 			session.udpTransport.conn.Close()
 		}
@@ -134,7 +140,11 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return config, err
 	}
-	for _, value := range []*string{&config.ClientDirectory, &config.ServerCertificate, &config.LoginCertificate, &config.LoginKey} {
+	paths := []*string{&config.ClientDirectory}
+	if !config.EmbeddedCertificates {
+		paths = append(paths, &config.ServerCertificate, &config.LoginCertificate, &config.LoginKey)
+	}
+	for _, value := range paths {
 		if !filepath.IsAbs(*value) {
 			*value = filepath.Join(root, *value)
 		}
@@ -179,7 +189,15 @@ func Run(ctx context.Context, config Config, launch bool) error {
 			return fmt.Errorf("client file mismatch: %s", filepath.Base(path))
 		}
 	}
-	certificate, err := tls.LoadX509KeyPair(config.LoginCertificate, config.LoginKey)
+	certPEM, err := config.certificateBytes(config.LoginCertificate)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := config.certificateBytes(config.LoginKey)
+	if err != nil {
+		return err
+	}
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return err
 	}
@@ -187,18 +205,23 @@ func Run(ctx context.Context, config Config, launch bool) error {
 	if config.SharedClient {
 		bridge.sessions = make(map[uint32]*remoteSession)
 	}
-	var listeners []net.Listener
+	listeners, udp, config, err := bindLocalPorts(config)
+	if err != nil {
+		return err
+	}
+	bridge.Config = config
+	bridge.udp = udp
+	defer udp.Close()
 	defer func() {
 		for _, listener := range listeners {
 			listener.Close()
 		}
 	}()
-	for _, port := range []int{config.LoginPort, config.SDKPort, config.GamePort} {
-		listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			return err
-		}
-		listeners = append(listeners, listener)
+	if err = writeLocalPorts(config); err != nil {
+		return err
+	}
+	for index, port := range []int{config.LoginPort, config.SDKPort, config.GamePort} {
+		listener := listeners[index]
 		go func(port int, listener net.Listener) {
 			for {
 				connection, err := listener.Accept()
@@ -220,11 +243,6 @@ func Run(ctx context.Context, config Config, launch bool) error {
 			}
 		}(port, listener)
 	}
-	bridge.udp, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: config.GamePort})
-	if err != nil {
-		return err
-	}
-	defer bridge.udp.Close()
 	if config.SharedClient && config.LauncherScope != "" {
 		executable, e := os.Executable()
 		if e != nil {
@@ -238,7 +256,8 @@ func Run(ctx context.Context, config Config, launch bool) error {
 			PID     uint32
 			Created uint64
 			Scope   string
-		}{owner.PID, owner.Created, config.LauncherScope})
+			Ports   []int
+		}{owner.PID, owner.Created, config.LauncherScope, []int{config.LoginPort, config.SDKPort, config.GamePort}})
 		if e != nil {
 			return e
 		}
@@ -321,7 +340,7 @@ func Run(ctx context.Context, config Config, launch bool) error {
 }
 
 func (bridge *Bridge) connect(account, password string, identity Identity) (*remoteSession, error) {
-	publicCertificate, err := os.ReadFile(bridge.Config.ServerCertificate)
+	publicCertificate, err := bridge.Config.certificateBytes(bridge.Config.ServerCertificate)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +377,7 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 	}
 	session := &remoteSession{account: account, traces: map[uint32]*packetTrace{}, identity: identity, connection: connection, reader: bufio.NewReaderSize(connection, 65536), encoder: json.NewEncoder(connection), channels: map[uint32]*nativeChannel{}, udpPorts: map[int]bool{}, done: make(chan struct{})}
 	receipt := bridge.peerReceiptFor(identity)
-	if err = session.send(tunnel.Frame{Kind: "udp-drain-v1", PeerReceipt: receipt, ClientRelease: bridge.Config.ClientRelease, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
+	if err = session.send(tunnel.Frame{UDPOrder: true, Kind: "udp-drain-v1", PeerReceipt: receipt, ClientRelease: bridge.Config.ClientRelease, Op: "auth", Account: account, Password: password, ConfigHash: bridge.Config.ConfigHash, Port: uint16(bridge.Config.GamePort)}); err != nil {
 		session.close()
 		return nil, err
 	}
@@ -378,8 +397,12 @@ func (bridge *Bridge) connect(account, password string, identity Identity) (*rem
 	session.uid = response.UID
 	session.loggedOut = make(chan struct{})
 	connection.SetDeadline(time.Time{})
-	if endpoint.Scheme == "tls" && response.UDP != nil {
-		bridge.startDatagrams(session, endpoint.Hostname(), response.UDP)
+	if response.UDP != nil {
+		host := ""
+		if endpoint.Scheme == "tls" {
+			host = endpoint.Hostname()
+		}
+		bridge.startDatagrams(session, host, response.UDP)
 	}
 	return session, nil
 }
@@ -502,7 +525,7 @@ func (bridge *Bridge) login(raw net.Conn, certificate tls.Certificate) {
 			}
 		}
 	}()
-	log.Print("online login accepted")
+	log.Printf("online login accepted udp_order=%t", session.udpOrdered)
 }
 
 func (bridge *Bridge) current(identity Identity) *remoteSession {
@@ -627,18 +650,20 @@ func (bridge *Bridge) receive(session *remoteSession) {
 			if !allowed {
 				return
 			}
-			bridge.udp.WriteToUDP(frame.Data, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(frame.Port)})
+			if bridge.deliverDatagram(session, frame, true) != nil {
+				return
+			}
 		case "pong":
 			if frame.Kind == "udp-drain" {
 				session.udpDrain.Ack(frame.Value)
 			}
 			if frame.Kind == "udp-down-drain" {
-				if err := session.send(tunnel.Frame{Op: "ping", Kind: "udp-down-drain-ack", Value: frame.Value}); err != nil {
+				if !session.enqueueControl(tunnel.Frame{Op: "ping", Kind: "udp-down-drain-ack", Value: frame.Value}) {
 					return
 				}
 			}
 			if len(frame.Data) == 216 {
-				writeModStatus(session.identity, frame.Data)
+				modFiles.submit(session, frame.Data)
 			}
 		default:
 			return

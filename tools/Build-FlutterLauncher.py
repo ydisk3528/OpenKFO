@@ -1,5 +1,5 @@
 """Build an offline-complete Flutter launcher and per-file update feed. Never deploys."""
-import argparse, hashlib, json, os, shutil, subprocess, tempfile, zipfile
+import argparse, base64, hashlib, json, os, shutil, subprocess, tempfile, zipfile
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser();p.add_argument('--version',default='2026.09.21-flutter.1');p.add_argument('--flutter',default='E:/OpenKFO-Flutter3169/flutter/bin/flutter.bat');p.add_argument('--config-hash',required=True);p.add_argument('--realms-config');p.add_argument('--launcher-version-url');p.add_argument('--server-version-url',help='game-server update entry tried before OSS');args=p.parse_args()
@@ -63,6 +63,15 @@ if args.realms_config:
 if args.launcher_version_url:
     assert args.launcher_version_url.startswith('https://')
     bridge['launcher_update_version_url']=args.launcher_version_url
+embedded=json.loads((source/'lib/embedded_certificates.dart').read_text(encoding='utf-8').split('= <String, String>',1)[1].strip().removesuffix(';'))
+required=[bridge[k].replace('\\','/').removeprefix('launcher-files/') for k in ['server_certificate','login_certificate','login_key']]
+if args.realms_config: required += [profile['server_certificate'] for profile in profiles]
+use_embedded=all(name in embedded and (payload/name).is_file() and (payload/name).read_bytes()==base64.b64decode(embedded[name]) for name in required)
+bridge['embedded_certificates']=use_embedded
+if use_embedded:
+    for name in embedded:
+        file=payload/name
+        if file.is_file() and file.read_bytes()==base64.b64decode(embedded[name]): file.unlink()
 (payload/'bridge.json').write_text(json.dumps(bridge,ensure_ascii=False,indent=2),encoding='utf-8')
 (payload/'files.json').write_text(json.dumps({f.relative_to(payload).as_posix():digest(f) for f in payload.rglob('*') if f.is_file()},ensure_ascii=False),encoding='utf-8')
 feed=root/'dist'/('launcher-flutter-feed-'+args.version);(feed/'files').mkdir(parents=True)

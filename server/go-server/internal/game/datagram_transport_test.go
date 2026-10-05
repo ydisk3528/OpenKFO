@@ -9,6 +9,41 @@ import (
 	"time"
 )
 
+func TestUDPRebindRequiresNewPathConfirmation(t *testing.T) {
+	h := NewHub(nil, Config{})
+	server := NewServer(h, tls.Certificate{})
+	stop, err := server.ListenDatagrams("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	s := &Session{UID: 1, Done: make(chan struct{})}
+	h.Sessions[s.UID] = s
+	g, err := tunnel.NewDatagramGrant(server.udp.LocalAddr().(*net.UDPAddr).Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := tunnel.NewDatagramCodec(g, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40101}
+	b := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40102}
+	p := &serverDatagramPeer{server: server, session: s, codec: c, remote: a, ready: time.Now()}
+	p.handleInput(inboundDatagram{port: 0, data: []byte{0}, addr: a})
+	if !p.readyForSend() {
+		t.Fatal("same-path probe erased confirmed lease")
+	}
+	p.handleInput(inboundDatagram{port: 0, data: []byte{0}, addr: b})
+	if p.readyForSend() {
+		t.Fatal("new address inherited old confirmation")
+	}
+	p.handleInput(inboundDatagram{port: 0, data: []byte{1}, addr: b})
+	if !p.readyForSend() {
+		t.Fatal("new path confirmation did not restore UDP")
+	}
+}
+
 func TestUDPBusyRoomDoesNotBlockOtherPeer(t *testing.T) {
 	h := NewHub(nil, Config{})
 	server := NewServer(h, tls.Certificate{})
@@ -133,6 +168,10 @@ func TestUDPHeartbeatDoesNotWaitForBattleReadLock(t *testing.T) {
 }
 
 func TestAuthenticatedUDPRelayAndFallback(t *testing.T) {
+	t.Run("legacy", func(t *testing.T) { testAuthenticatedUDPRelayAndFallback(t, false) })
+	t.Run("ordered", func(t *testing.T) { testAuthenticatedUDPRelayAndFallback(t, true) })
+}
+func testAuthenticatedUDPRelayAndFallback(t *testing.T, ordered bool) {
 	h := NewHub(nil, Config{})
 	server := NewServer(h, tls.Certificate{})
 	closeUDP, e := server.ListenDatagrams("127.0.0.1:0")
@@ -146,7 +185,7 @@ func TestAuthenticatedUDPRelayAndFallback(t *testing.T) {
 	var sockets []*net.UDPConn
 	var codecs []*tunnel.DatagramCodec
 	for i := 0; i < 2; i++ {
-		s := &Session{UID: uint64(i + 1), Account: "udp-test", P2P: uint32(2001 + i), UDPPort: uint16(40001 + i), Bound: true, P2PUntil: time.Now().Add(time.Minute), Room: room, Channels: map[uint32]*Channel{}, Output: make(chan tunnel.Frame, 8), Done: make(chan struct{})}
+		s := &Session{udpOrdered: ordered, UID: uint64(i + 1), Account: "udp-test", P2P: uint32(2001 + i), UDPPort: uint16(40001 + i), Bound: true, P2PUntil: time.Now().Add(time.Minute), Room: room, Channels: map[uint32]*Channel{}, Output: make(chan tunnel.Frame, 8), Done: make(chan struct{})}
 		h.Mutex.Lock()
 		h.Sessions[s.UID] = s
 		room.Members[s.UID] = &Member{Session: s}
@@ -188,7 +227,11 @@ func TestAuthenticatedUDPRelayAndFallback(t *testing.T) {
 	packet[23] = 4
 	protocol.WriteUint32(packet, 24, b.P2P)
 	packet[28] = 99
-	encoded, _ := codecs[0].Seal(a.UDPPort, packet)
+	wireData := packet
+	if ordered {
+		wireData = tunnel.PackUDPEpoch(0, packet)
+	}
+	encoded, _ := codecs[0].Seal(a.UDPPort, wireData)
 	sockets[0].Write(encoded)
 	select {
 	case f := <-b.Output:
@@ -204,6 +247,9 @@ func TestAuthenticatedUDPRelayAndFallback(t *testing.T) {
 		t.Fatal(e)
 	}
 	port, data, e := codecs[1].Open(buf[:n])
+	if ordered && e == nil {
+		_, data, e = tunnel.UnpackUDPEpoch(data)
+	}
 	if e != nil || port != b.UDPPort || protocol.ReadUint16(data, 2) != 1009 || data[24] != 99 {
 		t.Fatal("reply", e)
 	}

@@ -9,17 +9,18 @@ import (
 )
 
 func TestPortOwnerIdentity(t *testing.T) {
-	l, e := net.Listen("tcp", "127.0.0.1:18084")
+	l, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
-		t.Skip("test port occupied")
+		t.Fatal(e)
 	}
 	defer l.Close()
-	rows, e := portOwners()
+	port := l.Addr().(*net.TCPAddr).Port
+	rows, e := portOwners(port)
 	if e != nil {
 		t.Fatal(e)
 	}
 	for _, p := range rows {
-		if p.PID == uint32(os.Getpid()) && p.Port == 18084 && p.Protocol == "TCP" {
+		if p.PID == uint32(os.Getpid()) && p.Port == port && p.Protocol == "TCP" {
 			if p.Name == "" || p.Image == "" || p.Created == 0 || p.CanStop {
 				t.Fatalf("unsafe owner: %+v", p)
 			}

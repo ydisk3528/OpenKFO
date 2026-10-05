@@ -36,7 +36,7 @@ func (h *Hub) rebornEvent(s *Session, m protocol.Message) error {
 	if member.BattleEvents == nil {
 		member.BattleEvents = map[battleEventKey]battleSequence{}
 	}
-	member.BattleEvents[key] = battleSequence{sequence, string(p)}
+	member.BattleEvents[key] = battleSequence{Sequence: sequence, Payload: string(p)}
 	h.broadcast(r, m, s.UID)
 	return nil
 }

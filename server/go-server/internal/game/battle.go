@@ -9,11 +9,6 @@ import (
 	"kungfu.local/server/internal/protocol"
 )
 
-type battleSequence struct {
-	Sequence uint32
-	Payload  string
-}
-
 type battleEventKey struct {
 	Kind  uint32
 	Actor uint64
@@ -287,13 +282,20 @@ func (hub *Hub) battleMessage(session *Session, channel *Channel, message protoc
 		member.BattleEvents = make(map[battleEventKey]battleSequence)
 	}
 	previous, seen := member.BattleEvents[key]
-	// A3FBB0 -> 7D1730 assigns a new event counter to every native 8121.
-	// A changed amount/effect at the same sequence is not another health or
-	// BUFF/skill event. Native generic effects advance +19 for each event.
-	if seen && ((sequence == previous.Sequence && (id == protocol.BattleEventHealth || id == protocol.BattleEventBuff || id == protocol.BattleEventSkillEffect || string(payload) == previous.Payload)) || int32(sequence-previous.Sequence) < 0) {
-		return nil
+	if id == protocol.BattleEventHealth && room.Type().IsCompetitive() {
+		// Health packets are deltas: an unseen, slightly late receipt must
+		// not be discarded as though it were an obsolete position snapshot.
+		next, accepted := acceptHealthSequence(previous, seen, sequence)
+		if !accepted {
+			return nil
+		}
+		member.BattleEvents[key] = next
+	} else {
+		if seen && ((sequence == previous.Sequence && (id == protocol.BattleEventHealth || id == protocol.BattleEventBuff || id == protocol.BattleEventSkillEffect || string(payload) == previous.Payload)) || int32(sequence-previous.Sequence) < 0) {
+			return nil
+		}
+		member.BattleEvents[key] = battleSequence{Sequence: sequence, Payload: string(payload)}
 	}
-	member.BattleEvents[key] = battleSequence{sequence, string(payload)}
 	if id == protocol.BattleEventTargetSelection {
 		room.recordPairSelection(session, payload)
 	}

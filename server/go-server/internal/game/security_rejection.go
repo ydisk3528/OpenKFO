@@ -46,6 +46,20 @@ func (hub *Hub) recordSecurityRejection(session *Session, channel *Channel, mess
 }
 
 func (hub *Hub) recordSecurityAudit(session *Session, channel *Channel, message protocol.Message, cause error, forwarded bool) {
+	// Logging is diagnostic only. Bound even the snapshot/hex work on the
+	// combat lane; keep the first ten samples and report suppressed counts.
+	now := time.Now()
+	if now.Sub(session.auditSampleAt) >= 5*time.Second {
+		session.auditSampleAt = now
+		session.auditSamples = 0
+	}
+	if session.auditSamples >= 10 {
+		session.auditSuppressed++
+		return
+	}
+	session.auditSamples++
+	suppressed := session.auditSuppressed
+	session.auditSuppressed = 0
 	action := "安全验证未通过：仅丢弃消息，保留连接"
 	if forwarded {
 		action = "BUFF归属校验告警：已放行转发，保留连接"
@@ -69,19 +83,20 @@ func (hub *Hub) recordSecurityAudit(session *Session, channel *Channel, message 
 		payload = payload[:512]
 	}
 	record := struct {
-		Time    string `json:"time"`
-		Account string `json:"account"`
-		UID     uint64 `json:"uid"`
-		Action  string `json:"action"`
-		Reason  string `json:"reason"`
-		Channel uint32 `json:"channel"`
-		Message uint32 `json:"message"`
-		Event   uint32 `json:"event"`
-		Room    uint16 `json:"room"`
-		Serial  uint32 `json:"battle_serial"`
-		Bytes   int    `json:"bytes"`
-		Payload string `json:"payload_hex_prefix"`
-	}{time.Now().Format(time.RFC3339Nano), session.Account, session.UID,
+		Suppressed uint64 `json:"suppressed_since_previous_sample,omitempty"`
+		Time       string `json:"time"`
+		Account    string `json:"account"`
+		UID        uint64 `json:"uid"`
+		Action     string `json:"action"`
+		Reason     string `json:"reason"`
+		Channel    uint32 `json:"channel"`
+		Message    uint32 `json:"message"`
+		Event      uint32 `json:"event"`
+		Room       uint16 `json:"room"`
+		Serial     uint32 `json:"battle_serial"`
+		Bytes      int    `json:"bytes"`
+		Payload    string `json:"payload_hex_prefix"`
+	}{suppressed, now.Format(time.RFC3339Nano), session.Account, session.UID,
 		action, cause.Error(), channel.ID, message.ID, subID,
 		roomID, serial, len(message.Payload), hex.EncodeToString(payload)}
 	// Capture only immutable values; the worker must never read live room/session state.

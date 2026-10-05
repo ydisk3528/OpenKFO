@@ -82,7 +82,7 @@ class _LauncherPageState extends State<LauncherPage> {
     }
   }
   bool busy = true, ready = false, gameReady = false, hide = false, fps = true, autoStartMod = false;
-  FrameMode frameMode = FrameMode.high125;
+  final FrameMode frameMode = FrameMode.high125;
   String status = '正在准备启动器…', health = '正在检查服务器…';
   bool updateBlocked = true;
   Map<String, dynamic>? release;
@@ -125,7 +125,7 @@ class _LauncherPageState extends State<LauncherPage> {
       gameReady = await LauncherService.isGameDirectory(service.game);
       if (await preferences.exists()) {
         final m = jsonDecode(await preferences.readAsString());
-        // 每次打开统一默认推荐帧率，其他模式仅用于本次启动器会话。
+        // 统一使用约 125 FPS，忽略历史帧率选择。
         fps = m['fps'] != false;
         hide = m['hide'] == true;
         autoStartMod = m['auto_start_mod'] == true;
@@ -175,27 +175,6 @@ class _LauncherPageState extends State<LauncherPage> {
   void loadFields() {
     account.text = accounts[selected - 1]['Account'] ?? '';
     password.text = accounts[selected - 1]['Password'] ?? '';
-  }
-
-  Future<void> selectFrameMode(FrameMode? requestedMode) async {
-    final mode = requestedMode == FrameMode.configZero ? FrameMode.high125 : requestedMode;
-    if (mode == null || mode == frameMode) return;
-    if (mode != FrameMode.high125) {
-      final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
-        title: const Text('帧率模式提醒'),
-        content: const Text('建议统一使用约 125 FPS 模式。玩家帧率不统一可能会造成卡顿。是否仍使用所选模式？'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('使用推荐模式')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('仍然使用')),
-        ],
-      ));
-      if (!mounted) return;
-      if (accepted != true) {
-        setState(() => frameMode = FrameMode.high125);
-        return;
-      }
-    }
-    if (mounted) setState(() => frameMode = mode);
   }
 
   Future<void> save() async {
@@ -473,6 +452,43 @@ class _LauncherPageState extends State<LauncherPage> {
     super.dispose();
   }
 
+  Future<void> portSettings() async {
+    final owner = widget.preview ? null : await service.liveBridgeOwner();
+    if (!mounted) return;
+    final fields = [for(final value in service.localPorts) TextEditingController(text:'$value')];
+    var automatic = service.autoPorts;
+    String? failure;
+    try {
+      await showDialog<void>(context:context,builder:(dialog) => StatefulBuilder(builder:(dialog,update) => AlertDialog(
+        title:const Text('端口设置'),
+        content:SizedBox(width:440,child:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+          if(owner?['Ports'] is List) Text('当前使用：${(owner!['Ports'] as List).join(' / ')}'),
+          const SizedBox(height:16),
+          for(var i=0;i<3;i++) Padding(padding:const EdgeInsets.only(bottom:12),child:TextField(
+            controller:fields[i],enabled:!automatic,keyboardType:TextInputType.number,
+            decoration:InputDecoration(labelText:['登录端口','SDK 端口','游戏端口（TCP / UDP）'][i],border:const OutlineInputBorder()),
+          )),
+          SwitchListTile(contentPadding:EdgeInsets.zero,title:const Text('自动分配'),value:automatic,onChanged:(v)=>update(()=>automatic=v)),
+          Text(automatic?'启动游戏时由系统分配空闲端口，组件保持占用并同步游戏配置。':'使用上面填写的端口；发生占用时可切换为自动分配。'),
+          if(failure!=null) Padding(padding:const EdgeInsets.only(top:12),child:Text(failure!,style:const TextStyle(color:Colors.red))),
+        ]))),
+        actions:[
+          TextButton(onPressed:()=>update(() { automatic=false; for(var i=0;i<3;i++) fields[i].text='${[38184,38180,38181][i]}'; }),child:const Text('恢复默认')),
+          TextButton(onPressed:()=>Navigator.pop(dialog),child:const Text('取消')),
+          FilledButton(onPressed:() async {
+            try {
+              final ports=fields.map((f)=>int.tryParse(f.text.trim())??0).toList();
+              LauncherService.validatePorts(ports);
+              if(!widget.preview) await service.savePortSettings(ports,automatic);
+              if(dialog.mounted) Navigator.pop(dialog);
+              report('端口设置已保存，下次启动游戏生效');
+            } catch(e) { if(dialog.mounted) update(()=>failure=publicError(e)); }
+          },child:const Text('保存')),
+        ],
+      )));
+    } finally { for(final field in fields) field.dispose(); }
+  }
+
   Future<void> settings() async {
     await showDialog<void>(context: context, builder: (c) => StatefulBuilder(
       builder: (c, update) => AlertDialog(
@@ -485,6 +501,9 @@ class _LauncherPageState extends State<LauncherPage> {
             const SizedBox(height: 8),
             OutlinedButton.icon(icon: const Icon(Icons.folder_open), label: const Text('设置游戏目录'),
               onPressed: ready && !busy ? () async { Navigator.pop(c); await chooseGameDirectory(); } : null),
+
+            OutlinedButton.icon(icon:const Icon(Icons.settings_ethernet),label:const Text('端口设置'),
+              onPressed:() { Navigator.pop(c); portSettings(); }),
 
           ],
         ))),
@@ -595,12 +614,13 @@ class _LauncherPageState extends State<LauncherPage> {
         ]),
         const SizedBox(height: 18),
         Row(children: [
-          Expanded(child: DropdownButtonFormField<FrameMode>(value: frameMode, isExpanded: true,
-            decoration: const InputDecoration(labelText: '帧率模式 · 重启游戏生效', floatingLabelBehavior: FloatingLabelBehavior.never, border: OutlineInputBorder(), isDense: true),
-            items: const [
-              DropdownMenuItem(value: FrameMode.normal, child: Text('普通模式')),
-              DropdownMenuItem(value: FrameMode.high125, child: Text('约 125 FPS（推荐，实验性功能）')),
-            ], onChanged: busy ? null : selectFrameMode)),
+          Expanded(child: DropdownButtonFormField<FrameMode>(
+            value: frameMode,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: '帧率模式', border: OutlineInputBorder(), isDense: true),
+            items: const [DropdownMenuItem(value: FrameMode.high125, child: Text('约 125 FPS（实验性功能）'))],
+            onChanged: busy ? null : (_) {},
+          )),
           const SizedBox(width: 12),
           Switch(value: fps, onChanged: busy ? null : (v) => setState(() => fps = v)), const Text('显示 FPS', style: TextStyle(color: Color(0xffffdd57))),
           const SizedBox(width: 8),

@@ -22,11 +22,14 @@ import (
 )
 
 func TestAuthenticatedWebSocketTLSHandoff(t *testing.T) {
-	t.Run("websocket", func(t *testing.T) { testAuthenticatedTransport(t, false) })
-	t.Run("direct_tls", func(t *testing.T) { testAuthenticatedTransport(t, true) })
+	t.Run("websocket", func(t *testing.T) { testAuthenticatedTransport(t, false, false, true) })
+	t.Run("direct_tls", func(t *testing.T) { testAuthenticatedTransport(t, true, false, true) })
+	t.Run("ordered_direct_tls", func(t *testing.T) { testAuthenticatedTransport(t, true, true, true) })
+	t.Run("ordered_websocket", func(t *testing.T) { testAuthenticatedTransport(t, false, true, true) })
+	t.Run("ordered_requested_without_udp_listener", func(t *testing.T) { testAuthenticatedTransport(t, true, true, false) })
 }
 
-func testAuthenticatedTransport(t *testing.T, direct bool) {
+func testAuthenticatedTransport(t *testing.T, direct, ordered, udpEnabled bool) {
 	dsn := os.Getenv("KK_TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("isolated MySQL required")
@@ -55,6 +58,13 @@ func testAuthenticatedTransport(t *testing.T, direct bool) {
 	}
 	hub := NewHub(store, Config{ConfigHash: strings.Repeat("a", 64)})
 	server := NewServer(hub, certificate)
+	if udpEnabled {
+		stopUDP, err := server.ListenDatagrams("127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stopUDP()
+	}
 	endpoint := httptest.NewTLSServer(server.Handler())
 	defer endpoint.Close()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -127,9 +137,21 @@ func testAuthenticatedTransport(t *testing.T, direct bool) {
 		return frame
 	}
 	passwordHash := sha256.Sum256([]byte("xfmRn9z7K1wTfvBYhpCwZmE8yLWN1oLvtransport123"))
-	send(tunnel.Frame{Op: "auth", Account: account.Account, Password: hex.EncodeToString(passwordHash[:]), ConfigHash: hub.Config.ConfigHash, Port: 18001})
-	if reply := receive(); reply.UID != uid || reply.Error != "" {
+	send(tunnel.Frame{Op: "auth", UDPOrder: ordered, Kind: "udp-drain-v1", Account: account.Account, Password: hex.EncodeToString(passwordHash[:]), ConfigHash: hub.Config.ConfigHash, Port: 18001})
+	if reply := receive(); reply.UID != uid || reply.Error != "" || (reply.UDP != nil) != udpEnabled || (reply.UDP != nil && reply.UDP.Order != ordered) {
 		t.Fatal("authentication rejected")
+	}
+	// Native bootstrap must work over TCP even without a UDP listener/path.
+	probe := make([]byte, 24+141)
+	protocol.WriteUint16(probe, 0, 1)
+	protocol.WriteUint16(probe, 2, 1001)
+	var epoch uint32
+	if ordered && udpEnabled {
+		epoch = 1
+	}
+	send(tunnel.Frame{Op: "udp", Port: 18001, Data: probe, Value: epoch})
+	if reply := receive(); reply.Op != "udp" || len(reply.Data) < 24 || protocol.ReadUint16(reply.Data, 2) != 1002 {
+		t.Fatal("native TCP fallback bootstrap failed")
 	}
 	send(tunnel.Frame{Op: "ready"})
 	send(tunnel.Frame{Op: "open", Channel: 1, Kind: "sdk"})
@@ -162,7 +184,7 @@ func testAuthenticatedTransport(t *testing.T, direct bool) {
 		return messages[0]
 	}
 	sendGame(2, 1010, hello)
-	for _, expected := range []uint32{1131, 1020, 1230, 1120, 1035, 7080, 7070, 1151} {
+	for _, expected := range []uint32{1131, 1020, 1230, 1120, 1035, 7080, 7070, 1038, 1151, protocol.MsgPlayerPreferences} {
 		if reply := readGame(2); reply.ID != expected {
 			t.Fatalf("expected %d got %d", expected, reply.ID)
 		}
