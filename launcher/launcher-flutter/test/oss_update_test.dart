@@ -25,6 +25,26 @@ class OssFixture extends UpdateService {
 }
 void main() {
   const base = 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/';
+  test('receipt write failure rolls back resources and config hash together', () async {
+    final root = await Directory.systemTemp.createTemp('update-rollback-');
+    addTearDown(() => root.delete(recursive: true));
+    final service = OfflineLauncher(root.path)..game = root.path..config = {
+      'url': 'tls://example.invalid:19091', 'config_hash': hashBytes([1]),
+    };
+    final original = jsonEncode(service.config);
+    await File(service.configPath).writeAsString(original);
+    await writeAtomic('${root.path}/Data/config.spf2', [1]);
+    // An unwritable receipt destination fails after the new hash was saved.
+    await Directory('${root.path}/flutter-client-installed.json').create();
+    final manifest = UpdateService.normalizeOss({'version':'v2','target':'client','config_hash':hashBytes([2]),'files':[
+      {'path':'Data/config.spf2','url':'${base}releases/v2/config','size':1,'sha256':hashBytes([2])},
+    ]}, 'v2', client:true);
+    final update = OssFixture(service, {'${base}releases/v2/config':[2]});
+    await expectLater(update.installClient(manifest, (_) {}), throwsA(isA<FileSystemException>()));
+    expect(await File('${root.path}/Data/config.spf2').readAsBytes(), [1]);
+    expect(await File(service.configPath).readAsString(), original);
+    expect(service.config['config_hash'], hashBytes([1]));
+  });
   test('skipping release A installs its retained resources together with release B', () async {
     final root = await Directory.systemTemp.createTemp('oss-skip-release-');
     addTearDown(() => root.delete(recursive: true));

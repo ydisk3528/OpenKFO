@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'frame_mode.dart';
+import 'connection_error.dart';
+import 'embedded_certificates.dart';
 
 String hashBytes(List<int> bytes) => sha256.convert(bytes).toString();
 Future<String> fileHash(String path) async =>
@@ -66,7 +68,8 @@ class LauncherService {
       if (r['id'] is! String || !RegExp(r'^[a-z0-9-]+$').hasMatch(r['id']) || !ids.add(r['id']) ||
           r['name'] is! String || (r['name'] as String).isEmpty || uri == null || !['tls', 'wss'].contains(uri.scheme) ||
           uri.host.isEmpty || (uri.scheme == 'tls' && !uri.hasPort) || (port == null || port < 1 || port > 65535) || uri.hasQuery || uri.hasFragment || uri.userInfo.isNotEmpty ||
-          r['server_certificate'] is! String || !components.containsKey(r['server_certificate'])) {
+          r['server_certificate'] is! String || !(components.containsKey(r['server_certificate']) ||
+              (config['embedded_certificates'] == true && embeddedCertificates.containsKey(r['server_certificate'])))) {
         throw Exception('区服配置无效，请重新下载完整启动器。');
       }
       realms.add(r);
@@ -82,7 +85,8 @@ class LauncherService {
 
   Future<void> _applyRealm(Map<String, dynamic> r) async {
     final certificate = r['server_certificate'] as String;
-    await component(certificate); // Verify the pin before changing endpoints.
+    if (config['embedded_certificates'] != true) await component(certificate);
+    else if (!embeddedCertificates.containsKey(certificate)) throw Exception('内置证书不匹配，请更新完整启动器。');
     config = Map<String, dynamic>.from(_baseConfig)
       ..['url'] = r['url']
       ..['server_certificate'] = p.join('launcher-files', certificate);
@@ -105,11 +109,7 @@ class LauncherService {
     for (var n = 1; n <= 8; n++) {
       if (await state(n) != null) throw Exception('切换区服前，请先关闭所有游戏窗口。');
     }
-    // The shared bridge owns fixed local ports and exits 30 seconds after the last game.
-    for (final port in [18084, 18000, 18001]) {
-      try { final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, port); await socket.close(); }
-      on SocketException { throw Exception('登录组件仍在退出，请关闭游戏后等待约30秒，再切换区服。'); }
-    }
+    if (await liveBridgeOwner() != null) throw Exception('登录组件仍在退出，请关闭游戏后等待约30秒，再切换区服。');
     await _applyRealm(r);
     await writeAtomic(realmSelection.path, utf8.encode(jsonEncode({'id': realmId})));
   }
@@ -117,6 +117,49 @@ class LauncherService {
   late String game;
   String credentialsKey = 'LS1KuGmfVgqfuRT2';
   LauncherService(this.root);
+  List<int> localPorts = [38184, 38180, 38181];
+  bool autoPorts = false;
+  File get portSettingsFile => File(p.join(root, 'local-ports.json'));
+  static void validatePorts(List<int> ports) {
+    if (ports.length != 3 || ports.any((v) => v < 1 || v > 65535) || ports.toSet().length != 3) {
+      throw const FormatException('请填写三个不同的端口，范围为 1–65535。');
+    }
+  }
+  Future<void> loadPortSettings() async {
+    if (!await portSettingsFile.exists()) return;
+    final data = jsonDecode(await portSettingsFile.readAsString()) as Map;
+    final ports = (data['ports'] as List).cast<int>();
+    validatePorts(ports);
+    localPorts = ports;
+    autoPorts = data['automatic'] == true;
+  }
+  Future<void> savePortSettings(List<int> ports, bool automatic) async {
+    validatePorts(ports);
+    for (var n = 1; n <= 8; n++) {
+      if (await state(n) != null) throw StateError('请先关闭所有游戏窗口，再更改端口。');
+    }
+    if (await liveBridgeOwner() != null) throw StateError('登录组件仍在退出，请关闭游戏后等待约30秒再更改端口。');
+    await writeAtomic(portSettingsFile.path, utf8.encode(jsonEncode({'ports': ports, 'automatic': automatic})));
+    localPorts = List<int>.from(ports);
+    autoPorts = automatic;
+  }
+  Future<Map<String,dynamic>?> liveBridgeOwner() async {
+    try {
+      final data = jsonDecode(await File(p.join(shared,'bridge-owner.json')).readAsString());
+      if (data is! Map<String,dynamic> || data['PID'] is! int || data['Created'] is! int) return null;
+      final owner = data;
+      final alive = await native({...owner, 'Op':'window', 'Action':'status', 'Image':bridgeExecutable});
+      if (alive == true) return {...owner,'Compatible':true};
+      // A previous component build can still consume shared start requests.
+      // Identify its lifetime before treating the owner marker as stale.
+      try {
+        final created = await native({'Op':'info','PID':owner['PID']});
+        if (created == owner['Created']) return {...owner,'Compatible':false};
+      } on Exception { /* Exited owner; PID may no longer exist. */ }
+      return null;
+    } on FileSystemException { return null; }
+      on FormatException { return null; }
+  }
   String get payload => p.join(root, 'launcher-files');
   String get support => p.join(root, 'LauncherSupport.exe');
   Future<String> fpsExecutable() async {
@@ -147,27 +190,41 @@ class LauncherService {
   }
   Future<dynamic> native(Map<String, dynamic> request) async {
     final process = await Process.start(support, [], workingDirectory: root);
-    process.stdin.write(jsonEncode(request));
-    await process.stdin.close();
+    return nativeReply(process, request);
+  }
+
+  static Future<dynamic> nativeReply(Process process, Map<String, dynamic> request,
+      {Duration timeout = const Duration(seconds: 15)}) async {
+    // Drain both pipes immediately, including while sending the request.
     final output = utf8.decoder.bind(process.stdout).join();
     final errors = utf8.decoder.bind(process.stderr).join();
-    final text = await output;
-    await errors;
-    if (await process.exitCode != 0) throw Exception('本地辅助组件执行失败');
+    Future<int> send() async {
+      process.stdin.write(jsonEncode(request));
+      await process.stdin.close();
+      return 0;
+    }
+    late List<Object> reply;
+    try {
+      reply = await Future.wait<Object>([output, errors, process.exitCode, send()], eagerError: true).timeout(timeout);
+    } on TimeoutException {
+      throw TimeoutException('本地辅助组件响应超时，请重试；仍失败请检查完整启动器和安全软件。');
+    } finally {
+      process.kill();
+    }
+    final text = reply[0] as String;
+    if (reply[2] != 0) throw Exception('本地辅助组件执行失败');
     final response = jsonDecode(text) as Map<String, dynamic>;
     if (response['ok'] != true) throw Exception(response['error']);
     return response['result'];
   }
 
   Future<void> init() async {
+    await loadPortSettings();
     components = jsonDecode(
       await File(p.join(payload, 'files.json')).readAsString(),
     );
     for (final name in [
       'bridge.json',
-      'launcher-certificates/online/origin.crt',
-      'launcher-certificates/online/login.crt',
-      'launcher-certificates/online/login.key',
     ]) {
       final target = p.join(root, name);
       if (!await File(target).exists()) {
@@ -175,6 +232,18 @@ class LauncherService {
       }
     }
     config = jsonDecode(await File(configPath).readAsString());
+    // Upgrade existing online settings without relying on loose certificate files.
+    if (config['embedded_certificates'] != false && !local && ['server_certificate','login_certificate','login_key'].every((key) =>
+        embeddedCertificates.containsKey((config[key] as String? ?? '').replaceAll('\\', '/').replaceFirst(RegExp(r'^launcher-files/'), '')))) {
+      config['embedded_certificates'] = true;
+    }
+    if (config['embedded_certificates'] != true) {
+      for (final name in ['launcher-certificates/online/origin.crt','launcher-certificates/online/login.crt','launcher-certificates/online/login.key']) {
+        if (components.containsKey(name) && !await File(p.join(root,name)).exists()) {
+          await writeAtomic(p.join(root,name), await component(name));
+        }
+      }
+    }
     config.putIfAbsent('update_version_url', () => 'https://openkfo.oss-cn-hangzhou.aliyuncs.com/version/version.json');
     // When enabled, the game-server mirror is tried first and OSS is the fallback.
     if (serverVersionUrl.isNotEmpty) {
@@ -316,24 +385,52 @@ class LauncherService {
   Future<List<int>> verifiedCertificate(String key) async {
     final name=(config[key] as String).replaceAll('\\','/');
     final bundled=name.startsWith('launcher-files/') ? name.substring(15) : name;
+    if (config['embedded_certificates'] == true) {
+      final encoded = embeddedCertificates[bundled];
+      if (encoded == null) throw Exception('内置证书不匹配，请更新完整启动器。');
+      return base64Decode(encoded);
+    }
     if (components.containsKey(bundled)) return component(bundled);
     if (local) return File(resolve(name)).readAsBytes();
     throw Exception('配套证书缺失或配置不匹配，请重新解压完整启动器；不要复制旧版证书。');
   }
   Future<String> connectionScope() async => hashBytes(utf8.encode(jsonEncode([
     endpoint.toString(),config['config_hash'],p.normalize(p.join(game,clientExecutable)).toLowerCase(),
+    localPorts, autoPorts,
     for(final key in ['server_certificate','login_certificate','login_key']) hashBytes(await verifiedCertificate(key)),
   ])));
   Future<List<Map<String,dynamic>>> portConflicts() async {
-    final rows=(await native({'Op':'port_owners'}) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
-    Map<String,dynamic>? owner;
-    try { final value=jsonDecode(await File(p.join(shared,'bridge-owner.json')).readAsString()); if(value is Map<String,dynamic>) owner=value; }
-    on FileSystemException { } on FormatException { }
-    final scope=await connectionScope();
-    return rows.where((r) => !(owner!=null && owner['PID']==r['PID'] && owner['Created']==r['Created'] && owner['Scope']==scope &&
-      p.normalize(r['Image'] as String? ?? '').toLowerCase()==p.normalize(bridgeExecutable).toLowerCase())).toList();
+    final live = await liveBridgeOwner();
+    if (live != null && (live['Compatible'] != true || live['Scope'] != await connectionScope())) {
+      throw StateError('现有登录组件配置不同，请关闭游戏并等待组件退出后再启动。');
+    }
+    if (autoPorts || live != null) return [];
+    await enableAutomaticPortsIfUnavailable();
+    return [];
+  }
+  Future<void> enableAutomaticPortsIfUnavailable() async {
+    if (autoPorts) return;
+    final sockets = <ServerSocket>[];
+    RawDatagramSocket? udp;
+    var unavailable = false;
+    try {
+      for (final port in localPorts) {
+        sockets.add(await ServerSocket.bind(InternetAddress.loopbackIPv4, port, shared: false));
+      }
+      udp = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, localPorts[2], reuseAddress: false);
+    } on SocketException {
+      unavailable = true;
+    } finally {
+      udp?.close();
+      for (final socket in sockets) { await socket.close(); }
+    }
+    if (unavailable) await savePortSettings(localPorts, true);
   }
   Future<void> restoreCertificates() async {
+    if (config['embedded_certificates'] == true) {
+      for (final key in ['server_certificate','login_certificate','login_key']) { await verifiedCertificate(key); }
+      return;
+    }
     for(final key in ['server_certificate','login_certificate','login_key']) {
       final bytes=await verifiedCertificate(key), target=resolve(config[key]);
       if (!await File(target).exists() || await fileHash(target)!=hashBytes(bytes)) await writeAtomic(target,bytes);
@@ -342,12 +439,11 @@ class LauncherService {
   Future<String> health() async {
     for (var attempt=0; attempt<2; attempt++) {
       try { return await checkHealth(); }
-      on HandshakeException { throw Exception('安全连接校验失败，请检查系统日期时间，并重新解压完整启动器；仍失败请联系管理员检查服务端证书。'); }
       on TimeoutException {
-        if(attempt==1) throw Exception('连接检查超时（已重试一次）。请稍后重试；若其他玩家也无法连接，请管理员检查服务和隧道状态。');
+        if(attempt==1) rethrow;
       }
       on SocketException {
-        if(attempt==1) throw Exception('无法连接登录服务（已重试一次）。请检查网络、代理和防火墙是否允许启动器联网；仍失败请联系管理员检查服务。');
+        if(attempt==1) rethrow;
       }
       await Future<void>.delayed(const Duration(milliseconds:500));
     }
@@ -358,10 +454,11 @@ class LauncherService {
     if (endpoint.scheme == 'wss') {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
       try {
-        final request = await client.getUrl(endpoint.replace(scheme: 'https', path: '/health', query: null));
+        final request = await client.getUrl(endpoint.replace(scheme: 'https', path: '/health', query: null))
+            .timeout(const Duration(seconds: 8));
         request.followRedirects = false;
         final response = await request.close().timeout(const Duration(seconds: 8));
-        if (response.statusCode != 200) throw Exception('服务器检查失败（HTTP ${response.statusCode}）。${response.statusCode == 403 ? '访问被拒绝，请管理员检查访问规则。' : response.statusCode >= 500 ? '服务或隧道暂不可用，请稍后重试并联系管理员。' : '请联系管理员检查服务配置。'}');
+        if (response.statusCode != 200) throw await serviceHttpFailure(response, '服务器检查');
         final data = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 8)));
         if (data['status'] != 'ok' || data['service'] != 'kungfu-go') throw Exception('服务器状态异常');
         final key = data['launcher_credentials_key'];
@@ -540,13 +637,13 @@ class LauncherService {
     )) {
       await install(name, p.join(game, p.basename(name)));
     }
-    final cert = await File(resolve(config['login_certificate'])).readAsBytes();
+    final cert = await verifiedCertificate('login_certificate');
     await writeAtomic(p.join(game, 'zz.crt'), cert);
-    await install('client-config.xml', p.join(game, 'Data', 'config.xml'));
-    await writeAtomic(
-      p.join(game, 'server.ini'),
-      ascii.encode('[server]\r\nip=127.0.0.1\r\nport=18084\r\n'),
-    );
+    // The bridge writes actual bound ports before starting the game. Do not
+    // overwrite an active bridge's SDK configuration when opening more windows.
+    if (await liveBridgeOwner() == null) {
+      await install('client-config.xml', p.join(game, 'Data', 'config.xml'));
+    }
     final settings = File(p.join(game, 'Settings.xml'));
     if (await settings.exists()) {
       await updatePlayerSettings((original) {
@@ -577,12 +674,17 @@ class LauncherService {
     try {
       await lock.lock(FileLock.exclusive);
       if ((await portConflicts()).isNotEmpty) throw Exception('本地端口占用情况已变化，请再次点击启动游戏重新检查。');
+      if (await liveBridgeOwner() == null) {
+        for (var number=1; number<=8; number++) {
+          if (await state(number) != null) throw StateError('游戏仍由旧版组件运行，请先退出游戏，再使用新的端口设置启动。');
+        }
+      }
       await restoreCertificates();
       await prepare();
       var s = await state(n);
       if (s == null) {
         await restoreKeySettings();
-        await updatePlayerSettings((original) => applyFrameMode(original, frameMode));
+        await updatePlayerSettings((original) => applyFrameMode(original, FrameMode.high125));
         final c = Map<String, dynamic>.from(config)
           ..addAll({
             'client_directory': game,
@@ -590,9 +692,10 @@ class LauncherService {
             'client_release': verifiedRelease ?? const String.fromEnvironment('LAUNCHER_VERSION', defaultValue: 'development'),
             'client_executable': clientExecutable,
             'client_sha256': await fileHash(p.join(game, clientExecutable)),
-            'login_port': 18084,
-            'sdk_port': 18000,
-            'game_port': 18001,
+            'login_port': localPorts[0],
+            'sdk_port': localPorts[1],
+            'game_port': localPorts[2],
+            'auto_ports': autoPorts,
             'control_directory': shared,
           });
         for (final key in [
@@ -600,7 +703,7 @@ class LauncherService {
           'login_certificate',
           'login_key',
         ]) {
-          c[key] = resolve(config[key]);
+          c[key] = config['embedded_certificates'] == true ? config[key] : resolve(config[key]);
         }
         final path = p.join(
           root,
@@ -611,7 +714,7 @@ class LauncherService {
         await writeAtomic(path, utf8.encode(jsonEncode(c)));
         await writeAtomic(
           p.join(shared, 'performance-$n.json'),
-          utf8.encode(jsonEncode({'high_frame_rate': frameMode == FrameMode.high125, 'unlimited_frame_rate': frameMode == FrameMode.configZero, 'show_fps': fps})),
+          utf8.encode(jsonEncode({'high_frame_rate': true, 'unlimited_frame_rate': false, 'show_fps': fps})),
         );
         await Process.start(
           bridgeExecutable,

@@ -7,6 +7,7 @@ import "kungfu.local/server/internal/tunnel"
 // No room/state locks are held while either transport performs network I/O.
 func (s *Session) writeDatagrams(send func(tunnel.Frame) bool, ready ...func() bool) {
 	fallback := false
+	epoch := uint32(0)
 	for {
 		select {
 		case <-s.Done:
@@ -17,16 +18,29 @@ func (s *Session) writeDatagrams(send func(tunnel.Frame) bool, ready ...func() b
 			if len(ready) > 0 {
 				useUDP = ready[0]()
 			}
-			if useUDP && fallback {
-				useUDP = s.udpDrain.Confirm(s.Done, func(n uint32) bool {
-					return s.enqueue(tunnel.Frame{Op: "pong", Kind: "udp-down-drain", Value: n}, s.Output)
-				})
+			f.Value = epoch
+			if useUDP && fallback && !s.udpOrdered {
+				useUDP = s.udpDrain.Ready(s.Done)
 			}
 			if !useUDP || !send(f) {
+				if s.udpOrdered {
+					epoch++
+					if epoch == 0 {
+						s.Close()
+						return
+					}
+					f.Value = epoch
+				}
 				if !s.enqueue(f, s.Output) {
 					return
 				}
 				fallback = true
+				if s.udpOrdered {
+					continue
+				}
+				s.udpDrain.FallbackSent(s.Done, func(n uint32) bool {
+					return s.enqueue(tunnel.Frame{Op: "pong", Kind: "udp-down-drain", Value: n}, s.Output)
+				})
 			} else {
 				fallback = false
 			}

@@ -5,6 +5,7 @@ import 'package:archive/archive.dart';
 import 'package:path/path.dart' as p;
 
 import 'launcher_service.dart';
+import 'connection_error.dart';
 
 bool safeRelative(String name) =>
     name.isNotEmpty &&
@@ -257,7 +258,7 @@ class UpdateService {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
     try {
-      final request = await client.getUrl(url);
+      final request = await client.getUrl(url).timeout(const Duration(seconds: 15));
       request.followRedirects = false;
       if (url.path.endsWith('.json')) {
         request.headers.set('Cache-Control', 'no-cache');
@@ -268,7 +269,7 @@ class UpdateService {
       );
       if (missing && response.statusCode == 404) return null;
       if (response.statusCode != 200) {
-        throw Exception('更新服务返回 ${response.statusCode}');
+        throw await serviceHttpFailure(response, '更新服务');
       }
       final bytes = <int>[];
       final refresh = Stopwatch()..start();
@@ -631,6 +632,7 @@ class UpdateService {
     }
     final stage = await Directory.systemTemp.createTemp('OpenKFO-client-');
     final backups = <String, List<int>?>{};
+    final previousConfig = Map<String, dynamic>.from(launcher.config);
     try {
       for (final e in files.entries) {
         final dest = p.join(launcher.game, e.key);
@@ -649,6 +651,11 @@ class UpdateService {
       await File(p.join(stage.path, 'recovery.json')).writeAsString(
         jsonEncode({'target': launcher.game, 'files': backups.keys.toList()}),
       );
+      // Metadata belongs to the same update transaction as the resource files.
+      for (final path in [launcher.configPath, p.join(launcher.game, 'flutter-client-installed.json')]) {
+        final file = File(path);
+        backups[path] = await file.exists() ? await file.readAsBytes() : null;
+      }
       var installed = 0, installedBytes = 0;
       for (final e in files.entries) {
         onProgress?.call(
@@ -706,6 +713,7 @@ class UpdateService {
         ),
       );
     } catch (_) {
+      launcher.config..clear()..addAll(previousConfig);
       onProgress?.call(
         UpdateProgress('更新失败，正在恢复原文件', '', 0, files.length, 0, 0, 0, 0),
       );

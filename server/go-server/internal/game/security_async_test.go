@@ -8,7 +8,32 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestSecurityAuditBurstBoundedBeforeBackgroundWork(t *testing.T) {
+	h := NewHub(nil, Config{})
+	h.SecurityLogDirectory = t.TempDir()
+	jobs := 0
+	var last func()
+	h.SubmitSecurityAudit = func(job func()) bool { jobs++; last = job; return true }
+	s := &Session{UID: 7, Account: "burst"}
+	c := &Channel{ID: 2}
+	m := protocol.Message{ID: 8071, Payload: []byte{1, 2, 3, 4}}
+	for i := 0; i < 10000; i++ {
+		h.recordSecurityRejection(s, c, m, fmt.Errorf("unknown actor"))
+	}
+	if jobs != 10 || s.auditSuppressed != 9990 {
+		t.Fatalf("jobs %d skipped %d", jobs, s.auditSuppressed)
+	}
+	s.auditSampleAt = time.Now().Add(-6 * time.Second)
+	h.recordSecurityRejection(s, c, m, fmt.Errorf("unknown actor"))
+	last()
+	b, err := os.ReadFile(filepath.Join(h.SecurityLogDirectory, "burst_offline.log"))
+	if err != nil || !strings.Contains(string(b), `"suppressed_since_previous_sample":9990`) {
+		t.Fatalf("%s %v", b, err)
+	}
+}
 
 func TestSecurityAuditSnapshotsBeforeBackgroundWrite(t *testing.T) {
 	h := NewHub(nil, Config{})

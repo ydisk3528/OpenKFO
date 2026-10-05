@@ -31,6 +31,7 @@ const accountControl = 1001
 const passwordControl = 1002
 
 type request struct {
+	Ports                                           []int
 	Port                                            int
 	Protocol                                        string
 	Op, Path, Key, Account, Password, Image, Action string
@@ -307,7 +308,7 @@ func window(r request) (any, error) {
 func run(r request) (any, error) {
 	switch r.Op {
 	case "port_owners":
-		return portOwners()
+		return portOwners(r.Ports...)
 	case "stop_port_owner":
 		return nil, stopPortOwner(r)
 	case "info":

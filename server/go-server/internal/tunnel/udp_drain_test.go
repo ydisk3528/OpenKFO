@@ -1,60 +1,59 @@
 package tunnel
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-func TestUDPDrainRequiresMatchingAck(t *testing.T) {
+func TestUDPDrainNonblockingAndOrdered(t *testing.T) {
 	d := &UDPDrain{Supported: true}
 	done := make(chan struct{})
-	sent := make(chan uint32, 1)
-	result := make(chan bool, 1)
-	go func() { result <- d.Confirm(done, func(n uint32) bool { sent <- n; return true }) }()
-	n := <-sent
-	d.Ack(n + 1)
-	select {
-	case <-result:
-		t.Fatal("wrong ack accepted")
-	case <-time.After(20 * time.Millisecond):
+	var fences []uint32
+	send := func(n uint32) bool { fences = append(fences, n); return true }
+	d.FallbackSent(done, send)
+	if d.Ready(done) || len(fences) != 1 {
+		t.Fatal("unacknowledged fence")
 	}
-	d.Ack(n)
-	select {
-	case ok := <-result:
-		if !ok {
-			t.Fatal("matching ack rejected")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("ack ignored")
+	for i := 0; i < 1000; i++ {
+		d.FallbackSent(done, send)
+	}
+	if len(fences) != 1 {
+		t.Fatal("fence flood")
+	}
+	d.Ack(fences[0])
+	if d.Ready(done) {
+		t.Fatal("old ACK bypassed newer TCP traffic")
+	}
+	d.FallbackSent(done, send)
+	if len(fences) != 2 {
+		t.Fatal("missing fresh fence")
+	}
+	d.Ack(fences[0])
+	if d.Ready(done) {
+		t.Fatal("stale ACK")
+	}
+	d.Ack(fences[1])
+	if !d.Ready(done) {
+		t.Fatal("safe recovery denied")
+	}
+	close(done)
+	if d.Ready(done) {
+		t.Fatal("closed recovered")
 	}
 }
-func TestUDPDrainLegacyAndClosed(t *testing.T) {
+func TestUDPDrainLegacyFailureAndWrap(t *testing.T) {
+	done := make(chan struct{})
 	d := &UDPDrain{}
-	if d.Confirm(make(chan struct{}), func(uint32) bool { t.Fatal("legacy peer probed"); return true }) {
-		t.Fatal("legacy resumed")
+	d.FallbackSent(done, func(uint32) bool { t.Fatal("legacy fence"); return true })
+	if d.Ready(done) {
+		t.Fatal("legacy recovered")
 	}
 	d.Supported = true
-	done := make(chan struct{})
-	close(done)
-	if d.Confirm(done, func(uint32) bool { return true }) {
-		t.Fatal("closed resumed")
+	d.FallbackSent(done, func(uint32) bool { return false })
+	if !d.Disabled || d.Ready(done) {
+		t.Fatal("send failure")
 	}
-}
-
-func TestUDPDrainTimeoutCanRecoverAfterBackoff(t *testing.T) {
-	d := &UDPDrain{Supported: true}
-	done := make(chan struct{})
-	if d.Confirm(done, func(uint32) bool { return true }) {
-		t.Fatal("missing acknowledgement accepted")
-	}
-	if d.Disabled || !time.Now().Before(d.retryAfter) {
-		t.Fatal("timeout permanently disabled recovery")
-	}
-	if d.Confirm(done, func(uint32) bool { t.Fatal("retry ignored backoff"); return true }) {
-		t.Fatal("backoff bypassed")
-	}
-	d.retryAfter = time.Now().Add(-time.Second)
-	if !d.Confirm(done, func(n uint32) bool { d.Ack(n); return true }) {
-		t.Fatal("UDP did not recover after timeout")
+	d = &UDPDrain{Supported: true, next: ^uint32(0)}
+	d.Ack(d.next)
+	d.FallbackSent(done, func(uint32) bool { t.Fatal("wrapped fence"); return true })
+	if !d.Disabled {
+		t.Fatal("wrap allowed")
 	}
 }

@@ -7,7 +7,14 @@ class Probe extends LauncherService {
  Probe(String root):super(root);
  List<Map<String,dynamic>> rows=[];
  int calls=0;
- @override Future<dynamic> native(Map<String,dynamic> r) async => rows;
+ @override Future<dynamic> native(Map<String,dynamic> r) async {
+  final matches=rows.where((row)=>row['PID']==r['PID']);
+  if(matches.isEmpty) return null;
+  final row=matches.first;
+  if(r['Op']=='info') return row['Created'];
+  if(r['Op']=='window') return row['Created']==r['Created'] && row['Image']==r['Image'];
+  return null;
+ }
  @override Future<String> checkHealth() async { if(calls++==0) throw const SocketException('temporary'); return 'ok'; }
 }
 void main() {
@@ -28,8 +35,13 @@ void main() {
    await marker.writeAsString(jsonEncode({'PID':100,'Created':200,'Scope':await l.connectionScope()}));
    expect(await l.portConflicts(),isEmpty);
    await marker.writeAsString(jsonEncode({'PID':100,'Created':201,'Scope':await l.connectionScope()}));
-   expect(await l.portConflicts(),hasLength(1));
-   await marker.writeAsString('[]'); expect(await l.portConflicts(),hasLength(1));
+   expect(await l.liveBridgeOwner(),isNull);
+   await marker.writeAsString(jsonEncode({'PID':100,'Created':200,'Scope':'other-realm'}));
+   await expectLater(l.portConflicts(),throwsStateError);
+   l.rows.first['Image']='old-component.exe';
+   expect((await l.liveBridgeOwner())?['Compatible'],false);
+   await expectLater(l.portConflicts(),throwsStateError);
+   await marker.writeAsString('[]'); expect(await l.liveBridgeOwner(),isNull);
    expect(await l.health(),'ok'); expect(l.calls,2);
    await File('${dir.path}/launcher-files/cert.crt').writeAsString('tampered');
    await expectLater(l.restoreCertificates(),throwsException);

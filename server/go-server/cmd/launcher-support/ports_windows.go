@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,10 +27,24 @@ type portOwner struct {
 	CanStop  bool
 }
 
-func portOwners() ([]portOwner, error) {
+func portOwners(ports ...int) ([]portOwner, error) {
+	if len(ports) == 0 {
+		ports = []int{18084, 18000, 18001}
+	}
+	if len(ports) > 16 {
+		return nil, errors.New("端口数量无效")
+	}
+	var values []string
+	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			return nil, errors.New("端口必须为1至65535")
+		}
+		values = append(values, strconv.Itoa(port))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	script := `$ErrorActionPreference='Stop'; $rows=@(); foreach($t in @('TCP','UDP')) { if($t -eq 'TCP') {$all=Get-NetTCPConnection | Where-Object State -eq Listen} else {$all=Get-NetUDPEndpoint}; foreach($r in $all) {if($r.LocalPort -in @(18084,18000,18001) -and $r.LocalAddress -in @('127.0.0.1','0.0.0.0','::','::1')) {$rows+=@{PID=[int]$r.OwningProcess;Port=[int]$r.LocalPort;Protocol=$t}}}}; ConvertTo-Json -Compress -InputObject @($rows)`
+	script = strings.Replace(script, "@(18084,18000,18001)", "@("+strings.Join(values, ",")+")", 1)
 	cmd := exec.CommandContext(ctx, filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	data, err := cmd.Output()
@@ -62,7 +77,7 @@ func portOwners() ([]portOwner, error) {
 	return rows, nil
 }
 func stopPortOwner(r request) error {
-	rows, err := portOwners()
+	rows, err := portOwners(r.Port)
 	if err != nil {
 		return err
 	}

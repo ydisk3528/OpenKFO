@@ -17,6 +17,7 @@ const datagramHeader = 30
 var ErrDatagram = errors.New("invalid secure datagram")
 
 type DatagramGrant struct {
+	Order bool   `json:"order,omitempty"`
 	Drain bool   `json:"drain_ack,omitempty"`
 	ID    []byte `json:"id"`
 	Key   []byte `json:"key"`

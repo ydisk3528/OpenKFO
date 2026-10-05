@@ -220,7 +220,7 @@ func (h *Hub) extendedBattleEvent(s *Session, msg protocol.Message) (bool, error
 	if m.BattleEvents == nil {
 		m.BattleEvents = map[battleEventKey]battleSequence{}
 	}
-	m.BattleEvents[key] = battleSequence{sequence, string(p)}
+	m.BattleEvents[key] = battleSequence{Sequence: sequence, Payload: string(p)}
 	if commit != nil {
 		commit()
 	}

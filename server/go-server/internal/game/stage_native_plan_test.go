@@ -1,3 +1,5 @@
+//go:build clientarchive
+
 package game
 
 import (

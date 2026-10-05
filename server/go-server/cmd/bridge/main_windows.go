@@ -55,7 +55,7 @@ func main() {
 		}
 	}
 	if err == nil {
-		launcher, alreadyRunning, lockErr := bridge.AcquireLauncher(config.LoginPort)
+		launcher, alreadyRunning, lockErr := bridge.AcquireLauncher(config.LoginPort, config.ControlDirectory)
 		if lockErr != nil {
 			err = lockErr
 		} else {

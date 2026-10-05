@@ -50,6 +50,7 @@ func (s *remoteSession) enqueueUDPFallback(f tunnel.Frame) bool {
 func (s *remoteSession) writeUDPFallback() {
 	var lastSlow time.Time
 	fallback := false
+	epoch := uint32(0)
 	for {
 		select {
 		case <-s.done:
@@ -58,12 +59,30 @@ func (s *remoteSession) writeUDPFallback() {
 			started := time.Now()
 			var err error
 			useUDP := s.udpTransport != nil && len(f.Data) >= 24 && protocol.ReadUint16(f.Data, 2) == 1008 && s.udpTransport.ready()
-			if useUDP && fallback {
-				useUDP = s.udpDrain.Confirm(s.done, func(n uint32) bool { return s.send(tunnel.Frame{Op: "ping", Kind: "udp-drain", Value: n}) == nil })
+			if useUDP && fallback && !s.udpOrdered {
+				useUDP = s.udpDrain.Ready(s.done)
 			}
-			if !useUDP || !s.udpTransport.send(f.Port, f.Data) {
+			data := f.Data
+			if s.udpOrdered {
+				data = tunnel.PackUDPEpoch(epoch, data)
+			}
+			if !useUDP || !s.udpTransport.send(f.Port, data) {
+				if s.udpOrdered {
+					epoch++
+					if epoch == 0 {
+						s.close()
+						return
+					}
+					f.Value = epoch
+				}
 				err = s.send(f)
 				fallback = true
+				if err == nil && !s.udpOrdered {
+					s.udpDrain.FallbackSent(s.done, func(n uint32) bool {
+						err = s.send(tunnel.Frame{Op: "ping", Kind: "udp-drain", Value: n})
+						return err == nil
+					})
+				}
 			} else {
 				fallback = false
 			}
