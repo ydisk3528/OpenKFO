@@ -573,6 +573,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Map<String, List<Map<String, dynamic>>> variantsEdit = {};
   bool variantEditing = false;
   List<Map<String, dynamic>>? _variantRulesSnapshot;
+  Map<String, dynamic>? _variantHitPropertiesSnapshot;
   bool _variantDirtySnapshot = false;
   Map<String, dynamic>? _variantOccupiedSnapshot;
 
@@ -2404,15 +2405,19 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       );
     }
     final stage = Map<String, dynamic>.from(stages[index] as Map);
+    final rule = index < rules.length ? rules[index] : null;
+    final ruleProperties = rule?['properties'] as Map? ?? const {};
     final hits = <String, Map<String, dynamic>>{};
     for (final h in (stage['hits'] as List? ?? const [])) {
       final hit = Map<String, dynamic>.from(h as Map);
       final id = '${hit['id']}';
       hits[id] = {
         ...hit,
-        'values': hitProperties[id] is Map
-            ? _hitValues(hitProperties[id])
-            : _hitValues(hit),
+        'values': {
+          ..._hitValues(hit),
+          ..._hitValues(ruleProperties[id]),
+          ..._hitValues(hitProperties[id]),
+        },
       };
     }
     for (final branch in variantRowsFor(state)) {
@@ -2428,21 +2433,29 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           'id': id,
           'variant': '${branch['condition']}',
           'buff': source?['buff'] ?? '0',
-          'values': Map<String, dynamic>.from(
-            (canonical is Map ? canonical['values'] : null) as Map? ??
-                const <String, dynamic>{},
-          ),
+          'values': {
+            ..._hitValues(source ?? hitProperties[template]),
+            ..._hitValues(canonical),
+            if (row['damage'] != null) 'SkillDamage': row['damage'],
+          },
         };
       }
     }
-    final rule = index < rules.length ? rules[index] : null;
     return _VariantHitContext(
       hits,
       {
+        for (final entry in hits.entries)
+          entry.key: _hitValues(entry.value),
         for (final entry in ((rule?['properties'] as Map?) ?? const {}).entries)
-          '${entry.key}': _ruleValues(entry.value),
+          '${entry.key}': {
+            ..._hitValues(hits['${entry.key}']),
+            ..._ruleValues(entry.value),
+          },
         for (final entry in hitProperties.entries)
-          '${entry.key}': _hitValues(entry.value),
+          '${entry.key}': {
+            ..._hitValues(hits['${entry.key}']),
+            ..._hitValues(entry.value),
+          },
       },
       {for (final id in (stage['property_ids'] as List? ?? const [])) '$id'},
       {...variantOccupiedIDs},
@@ -2459,9 +2472,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   void applyHitProperties(String state, Map<String, dynamic> values) {
     values.forEach((id, value) {
       if (value is Map && value.isNotEmpty) {
-        hitProperties['$id'] = _hitValues(value);
-      } else {
-        hitProperties.remove('$id');
+        final current = _hitValues(hitProperties['$id']);
+        hitProperties['$id'] = {
+          ...current,
+          ..._hitValues(value),
+        };
       }
     });
     final referenced = <String>{};
@@ -2588,6 +2603,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               },
           },
       ];
+      _variantHitPropertiesSnapshot = Map<String, dynamic>.from(
+        jsonDecode(jsonEncode(hitProperties)) as Map,
+      );
       _variantDirtySnapshot = dirty;
       _variantOccupiedSnapshot = {
         for (final id in variantOccupiedIDs) id: true,
@@ -2603,9 +2621,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         rules = _variantRulesSnapshot!;
         dirty = _variantDirtySnapshot;
       }
+      if (_variantHitPropertiesSnapshot != null) {
+        hitProperties = _variantHitPropertiesSnapshot!;
+      }
       if (_variantOccupiedSnapshot != null) {
         variantOccupiedIDs = _variantOccupiedSnapshot!.keys.toSet();
       }
+      _variantHitPropertiesSnapshot = null;
       _variantRulesSnapshot = null;
       _variantOccupiedSnapshot = null;
       editorVersion++;
@@ -2892,7 +2914,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             '${(hit as Map)['id']}': {
               ...Map<String, dynamic>.from(hit),
               if (hitProperties['${hit['id']}'] is Map)
-                'values': _hitValues(hitProperties['${hit['id']}']),
+                'values': {
+                  ..._hitValues(hit),
+                  ..._hitValues(hitProperties['${hit['id']}']),
+                },
             },
         };
         for (final id in ids) {
@@ -2901,9 +2926,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           hits[id] = {
             ...source,
             'id': id,
-            'values': hitProperties[id] is Map
-                ? _hitValues(hitProperties[id])
-                : _hitValues(source['values']),
+            'values': {
+              ..._hitValues(source),
+              ..._hitValues(hitProperties[id]),
+            },
           };
         }
         stage['hits'] = hits.values.toList();
@@ -10203,9 +10229,10 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
         if (id.isNotEmpty) {
           final damage = num.tryParse('${s['damage'] ?? ''}');
           overrides[id] = {
+            ...?widget.hits[source]?['values'] as Map?,
+            if (damage != null) 'SkillDamage': damage,
             if (widget.hitOverrides[source] is Map)
               ...Map<String, dynamic>.from(widget.hitOverrides[source] as Map),
-            if (damage != null) 'SkillDamage': damage,
           };
         }
         rows.add(
@@ -10285,6 +10312,10 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
       final source = '${segment['skillproid'] ?? ''}'.trim();
       if (hasTemplateValues(source)) return source;
     }
+    for (final entry in widget.hits.entries) {
+      if ('${entry.value['variant'] ?? ''}'.isEmpty &&
+          hasTemplateValues(entry.key)) return entry.key;
+    }
     return '';
   }
 
@@ -10322,7 +10353,11 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     final source = row.templateSkillproid.trim();
     final hit =
         widget.hits[id] ?? (source.isEmpty ? null : widget.hits[source]);
-    final initial = Map<String, dynamic>.from(overrides[id] ?? const {});
+    final initial = <String, dynamic>{
+      ...?hit?['values'] as Map?,
+      ...?widget.hitOverrides[source] as Map?,
+      ...?overrides[id],
+    };
     if (!widget.hits.containsKey(id) &&
         row.segmentDamage.isNotEmpty &&
         !overrides.containsKey(id)) {
@@ -10348,11 +10383,12 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     );
     if (result == null || !mounted) return;
     setState(() {
-      overrides[id] = result;
-      if (row.segmentDamage.isNotEmpty) {
-        row.segmentDamage =
-            '${result['SkillDamage'] ?? original['SkillDamage'] ?? ''}';
-      }
+      overrides[id] = {
+        ...?hit?['values'] as Map?,
+        ...result,
+      };
+      row.segmentDamage =
+          '${overrides[id]?['SkillDamage'] ?? ''}';
       error = '';
     });
   }
@@ -10417,16 +10453,20 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     }
     // 只回带这一段仍挂着的号：段被删掉时，它的命中属性数值也一起撤掉
     // （真删属性节点靠后端应用时清孤儿，这里先保证规则不再引用它）。
-    final keep = {
-      for (final s in segments)
-        if ('${s['skillproid'] ?? ''}'.isNotEmpty) '${s['skillproid']}',
-    };
-    final hitProperties = <String, dynamic>{
-      for (final id in keep)
-        id: Map<String, dynamic>.from(
-          overrides[id] ?? const <String, dynamic>{},
-        ),
-    };
+    final hitProperties = <String, dynamic>{};
+    for (final s in segments) {
+      final id = '${s['skillproid'] ?? ''}'.trim();
+      if (id.isEmpty) continue;
+      final source = '${s['template_skillproid'] ?? ''}'.trim();
+      hitProperties[id] = {
+        // 这是完整快照，不是删除式 patch：新分支换掉原段时，模板的
+        // SkillDamage 和高级字段仍要随新 ID 一起提交。
+        ...?widget.hits[source]?['values'] as Map?,
+        ...?widget.hitOverrides[source] as Map?,
+        ...?widget.hits[id]?['values'] as Map?,
+        ...?overrides[id],
+      };
+    }
     Navigator.pop(context, {
       'condition': cond,
       'segments': segments,

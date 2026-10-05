@@ -123,11 +123,24 @@ class WeaponWorkspace {
     Map<String, dynamic> hitProperties = const {},
   }) {
     final pageValues = <String, dynamic>{
-      for (final rule in rules)
-        for (final entry in ((rule['properties'] as Map?) ?? const {}).entries)
-          '${entry.key}': _ruleValues(entry.value),
-      ...hitProperties.map((id, value) => MapEntry(id, _ruleValues(value))),
+      for (final stage in (weapon['stages'] as List? ?? const []))
+        for (final hit in ((stage as Map)['hits'] as List? ?? const []))
+          '${(hit as Map)['id']}': _ruleValues(hit),
     };
+    for (final rule in rules) {
+      for (final entry in ((rule['properties'] as Map?) ?? const {}).entries) {
+        pageValues['${entry.key}'] = {
+          ...?pageValues['${entry.key}'] as Map?,
+          ..._ruleValues(entry.value),
+        };
+      }
+    }
+    for (final entry in hitProperties.entries) {
+      pageValues[entry.key] = {
+        ...?pageValues[entry.key] as Map?,
+        ..._ruleValues(entry.value),
+      };
+    }
     final sharedHitProperties = _canonicalHitProperties(
       weapon,
       variants,

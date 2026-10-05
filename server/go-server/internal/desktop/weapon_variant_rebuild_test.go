@@ -231,6 +231,42 @@ func TestBuildVariantKeepsPreallocatedNumbers(t *testing.T) {
 	}
 }
 
+func TestBuildVariantPreservesExplicitZeroDamage(t *testing.T) {
+	const template = `<PropertyItem SkillProId="5210111" SkillDamage="8" RepulseTarget="1" />`
+	alloc := &variantAllocator{
+		occupied: map[string]bool{},
+		reserved: map[string]bool{},
+		sources:  map[string]string{"5210111": template},
+		template: template,
+		nextID:   variantSkillProPrefix,
+		usage:    map[string]int{},
+		updates:  map[string]float64{},
+		retired:  map[string]bool{},
+	}
+	base := `<AnmDesc id="521011"><Anm id="1" name="600180" startframe="0" endframe="4" /></AnmDesc>`
+	segments := []VariantAnm{{
+		Name: "600180", Start: 0, End: 4,
+		SkillProID: "910000106", TemplateSkillProID: "5210111",
+		Damage: 0, DamagePresent: true,
+	}}
+	built, props, err := buildVariant(base, "521011", "406", segments, map[string]bool{}, alloc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 1 || !props[0].hasOverride || props[0].damage != 0 {
+		t.Fatalf("显式零伤害没有保留 presence：props=%+v", props)
+	}
+	if !strings.Contains(built, `skillproid="910000106"`) {
+		t.Fatalf("分支没有挂最终命中属性号：%s", built)
+	}
+	if err := alloc.record(props); err != nil {
+		t.Fatal(err)
+	}
+	if len(alloc.added) != 1 || !strings.Contains(alloc.added[0], `SkillDamage="0"`) {
+		t.Fatalf("显式零伤害没有写入克隆属性：%v", alloc.added)
+	}
+}
+
 // 纯单元：号就是被替换掉那一块里的号时，原样保留（原生号也不重铸）。
 func TestBuildVariantKeepsReusableNumbers(t *testing.T) {
 	alloc := &variantAllocator{

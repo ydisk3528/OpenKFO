@@ -48,6 +48,9 @@ type VariantAnm struct {
 	Start  int     `json:"start"`
 	End    int     `json:"end"`
 	Damage float64 `json:"damage,omitempty"`
+	// DamagePresent distinguishes an omitted/null damage from an explicit 0.
+	// It is populated by JSON decoding and is not serialized as a separate field.
+	DamagePresent bool `json:"-"`
 	// TemplateSkillProID 明确克隆源；带此字段的新段把 SkillProID 当最终分支号。
 	TemplateSkillProID string `json:"template_skillproid,omitempty"`
 	// ReplayTimes 是卡帧数：>0 时这一段画面定格，用来把多段判定挤进几帧。
@@ -73,6 +76,7 @@ func (segment *VariantAnm) UnmarshalJSON(data []byte) error {
 	if len(row.Damage) == 0 || string(row.Damage) == "null" {
 		return nil
 	}
+	segment.DamagePresent = true
 	text := strings.TrimSpace(string(row.Damage))
 	if len(text) > 0 && text[0] == '"' {
 		if err := json.Unmarshal(row.Damage, &text); err != nil {
@@ -630,7 +634,7 @@ func buildVariant(base, id, condition string, segments []VariantAnm, reusable ma
 					want, source = native, ""
 				}
 			}
-			if err := attach(anm, want, source, segment.Damage, segment.Damage != 0); err != nil {
+			if err := attach(anm, want, source, segment.Damage, segment.DamagePresent || segment.Damage != 0); err != nil {
 				return "", nil, err
 			}
 			rebuilt = append(rebuilt, anm)

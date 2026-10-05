@@ -973,6 +973,140 @@ void main() {
     });
   }
 
+  testWidgets('253011 branch save preserves base and inherited hit values', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final base = <String, dynamic>{
+      'SkillDamage': '8',
+      'RepulseTarget': '1',
+      'StandHurt': '42',
+    };
+    final baseline = <String, dynamic>{
+      'id': 253011,
+      'name': '属性保留测试',
+      'type': '测试',
+      'combos': <dynamic>[],
+      'stages': [
+        {
+          'stage': 2041,
+          'state': '2041',
+          'label': '2041',
+          'action': '2001011041',
+          'property_ids': ['900000533', '900000534'],
+          'hits': [
+            {'id': '900000533', 'values': base, 'buff': '0'},
+            {
+              'id': '900000534',
+              'values': {'SkillDamage': '12', 'RepulseTarget': '0'},
+              'buff': '0',
+            },
+          ],
+          'supported': true,
+          'reason': '',
+        },
+      ],
+    };
+    Future<dynamic> api(Map<String, dynamic> request) async {
+      switch (request['operation']) {
+        case 'weapon_list':
+          return {
+            'weapons': [baseline],
+            'fields': [
+              {'key': 'SkillDamage', 'name': '基础伤害', 'min': 0, 'max': 10000},
+              {'key': 'RepulseTarget', 'name': '击退', 'min': 0, 'max': 1, 'oneshot': true},
+              {'key': 'StandHurt', 'name': '受击动作号', 'min': 0, 'max': 9999, 'oneshot': true},
+            ],
+            'effects': <dynamic>[],
+            'hit_options': <String, dynamic>{},
+            'buffs': <dynamic>[],
+            'drafts': <String, dynamic>{},
+            'applied': <String, dynamic>{},
+            'created': <String, dynamic>{},
+          };
+        case 'weapon_detail':
+          return {
+            'weapon': jsonDecode(jsonEncode(baseline)),
+            'drafts': <String, dynamic>{},
+            // A canonical edit is sparse; it must not replace archive values.
+            'hit_properties': {'900000533': {'values': {'RepulseTarget': 1}}},
+            'ustates': [{'id': 406, 'name': '测试状态'}],
+            'chain_info': {
+              'variant_bases': {
+                '2041': [
+                  {'name': 'first_hit', 'start': 0, 'end': 8, 'skillproid': '900000533', 'damage': 8},
+                  {'name': 'second_hit', 'start': 9, 'end': 16, 'skillproid': '900000534', 'damage': 12},
+                ],
+              },
+              'variant_skillpro_min': 910000106,
+              'variant_skillpro_max': 910000120,
+            },
+            'combo_rule_info': <String, dynamic>{},
+          };
+        case 'client_directory_get':
+        case 'shop_images':
+          return <String, dynamic>{};
+        default:
+          fail('Unexpected RPC: ${request['operation']}');
+      }
+    }
+    await tester.pumpWidget(MaterialApp(home: WeaponConfigPage(api: api)));
+    await tester.pumpAndSettle();
+    final dynamic page = tester.state(find.byType(WeaponConfigPage));
+    await page.select(baseline);
+    await tester.pumpAndSettle();
+    page.startVariantEdit();
+    final opening = page.variantAddFor('2041');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('406（测试状态）'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('添加一段（默认卡帧）'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextFormField, '动画名').last, 'new_hit');
+    await tester.enterText(find.widgetWithText(TextFormField, '止').last, '8');
+    await tester.tap(find.text('增加命中属性').last);
+    await tester.pumpAndSettle();
+    expect(find.text('命中属性 910000106 · 分支 406'), findsOneWidget);
+    final damageField = find.widgetWithText(TextFormField, '基础伤害').last;
+    expect(tester.widget<TextFormField>(damageField).controller!.text, '8');
+    await tester.enterText(damageField, '0');
+    await tester.tap(find.text('确定').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确定').last);
+    await opening;
+    await tester.pumpAndSettle();
+    await page.saveVariants();
+    await tester.pumpAndSettle();
+    final hits = page.weapon['stages'][0]['hits'] as List;
+    expect((hits.firstWhere((hit) => hit['id'] == '900000533') as Map)['values'], {...base, 'RepulseTarget': 1});
+    expect(page.hitProperties['910000106']['SkillDamage'], 0);
+    expect(page.hitProperties['910000106']['RepulseTarget'], 1);
+    expect(page.hitProperties['910000106']['StandHurt'], '42');
+    expect(page.variants['2041'][0]['segments'][0]['damage'], 0);
+    final restored = WeaponWorkspace.fromJson(page.workspace.toJson());
+    expect(restored.hitProperties['900000533']['values']['SkillDamage'], 8);
+    expect(restored.hitProperties['900000533']['values']['StandHurt'], 42);
+    expect(restored.hitProperties['910000106']['values']['SkillDamage'], 0);
+    expect(restored.hitProperties['910000106']['values']['StandHurt'], 42);
+    page.startVariantEdit();
+    final reopening = page.variantEditRow('2041', Map<String, dynamic>.from(page.variants['2041'][0] as Map));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(ActionChip).last);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextFormField>(find.widgetWithText(TextFormField, '基础伤害').last).controller!.text, '0');
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消').last);
+    await reopening;
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('selection generation ignores an older detail response', (
     tester,
   ) async {
