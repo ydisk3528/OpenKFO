@@ -33,6 +33,277 @@ type clientBaseline struct {
 	AppliedHash string `json:"applied_hash,omitempty"`
 }
 
+// ActiveProfile identifies the SPF2 generation whose author state is currently
+// loaded into settings.json. Profiles are keyed by the pristine baseline hash,
+// not by the live applied package hash: applying edits must not create a new
+// author-state namespace.
+const weaponProfileDir = "profiles"
+
+func profileKeyForBaseline(entry *clientBaseline, folder string) string {
+	if entry != nil && strings.TrimSpace(entry.SourceHash) != "" {
+		return strings.ToLower(strings.TrimSpace(entry.SourceHash))
+	}
+	if entry != nil {
+		if data, err := os.ReadFile(configPath(entry.Directory)); err == nil {
+			return strings.ToLower(digest(data))
+		}
+	}
+	return "unidentified"
+}
+
+func weaponProfilePath(folder, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "unidentified"
+	}
+	return filepath.Join(folder, weaponProfileDir, key+".json")
+}
+
+func persistWeaponState(path string, state *weaponState) error {
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, encoded)
+}
+
+func archiveWeaponProfile(folder, key string, state *weaponState) error {
+	if strings.TrimSpace(key) == "" || state == nil {
+		return nil
+	}
+	path := weaponProfilePath(folder, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return persistWeaponState(path, state)
+}
+
+func emptyWeaponState(baselines map[string]*clientBaseline, profile string) weaponState {
+	return weaponState{
+		Drafts:          map[string][]Rule{},
+		Applied:         map[string][]Rule{},
+		Created:         map[string]Blueprint{},
+		Combos:          map[string]int{},
+		Baselines:       baselines,
+		ActiveProfile:   profile,
+		Remaps:          map[string]map[int]*StageRemap{},
+		FrameSwitches:   map[string]map[int]frameSwitchStageEdit{},
+		Counters:        map[string]map[int]*CounterEdit{},
+		BlockElements:   map[string]map[int]map[string][]BlockElement{},
+		Scopes:          map[string]map[int]map[string][]FrameSwitchAttr{},
+		Cleared:         map[string]map[int]bool{},
+		ExtraProperties: map[string]ExtraProperty{},
+		HitProperties:   map[string]HitProperty{},
+		Variants:        map[string]map[int][]VariantEdit{},
+		Chains:          map[string][]ComboTransition{},
+		ComboRules:      map[string]ComboRuleSet{},
+		PropertyClones:  map[string]map[string]string{},
+		StageEffects:    map[string]map[int][]StageEffect{},
+		EffectRows:      map[string][]EffectRow{},
+		UStates:         map[string]UStateEdit{},
+		LuaScripts:      map[string]map[string]string{},
+	}
+}
+
+// activateWeaponProfile switches the in-memory author state to the selected
+// client's SPF2 generation. The old state remains recoverable in profiles/;
+// it is never merged into a new baseline implicitly.
+func migrateLegacyWorkspaces(folder, profile string) error {
+	legacy := weaponWorkspaceFolder(folder)
+	entries, err := os.ReadDir(legacy)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	target := weaponWorkspaceFolder(folder, profile)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "weapon-") || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		from := filepath.Join(legacy, entry.Name())
+		to := filepath.Join(target, entry.Name())
+		if _, err := os.Stat(to); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.MkdirAll(target, 0700); err != nil {
+			return err
+		}
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func activateWeaponProfile(folder string, statePath string, state *weaponState, client string, persist ...bool) (entry *clientBaseline, profile string, err error) {
+	persistState := len(persist) == 0 || persist[0]
+	entry = state.baselineFor(client)
+	if persistState {
+		if err = ensureBaseline(entry, folder, false); err != nil {
+			return nil, "", err
+		}
+	} else if _, statErr := os.Stat(entry.path(folder)); os.IsNotExist(statErr) {
+		// 预检只在内存中推导将要采集的真实身份，不能沿用遗失基线的旧 hash。
+		source, readErr := loadArchive(configPath(client))
+		if readErr != nil {
+			return nil, "", readErr
+		}
+		if err = source.verify(); err != nil {
+			return nil, "", fmt.Errorf("客户端配置包校验失败：%w", err)
+		}
+		entry.SourceHash = digest(source.data)
+		entry.AppliedHash = ""
+	} else if statErr != nil {
+		return nil, "", statErr
+	}
+	profile = profileKeyForBaseline(entry, folder)
+	if state.ActiveProfile == "" {
+		// Legacy settings.json has no profile marker. Keep its current author
+		// state for the current baseline and move old root workspaces under the
+		// same profile so an explicit rebase can cleanly start a new namespace.
+		if persistState {
+			if err = migrateLegacyWorkspaces(folder, profile); err != nil {
+				return nil, "", err
+			}
+		}
+		state.ActiveProfile = profile
+		if persistState {
+			if err = persistWeaponState(statePath, state); err != nil {
+				return nil, "", err
+			}
+		}
+		return entry, profile, nil
+	}
+	if state.ActiveProfile == profile {
+		return entry, profile, nil
+	}
+
+	oldProfile := state.ActiveProfile
+	if persistState {
+		if err = archiveWeaponProfile(folder, oldProfile, state); err != nil {
+			return nil, "", err
+		}
+	}
+	loaded := emptyWeaponState(state.Baselines, profile)
+	path := weaponProfilePath(folder, profile)
+	if raw, readErr := os.ReadFile(path); readErr == nil {
+		if err = json.Unmarshal(raw, &loaded); err != nil {
+			return nil, "", fmt.Errorf("读取客户端配置档失败：%w", err)
+		}
+		loaded.Baselines = state.Baselines
+		loaded.ActiveProfile = profile
+	} else if !os.IsNotExist(readErr) {
+		return nil, "", readErr
+	}
+	loaded.SourceHash = entry.SourceHash
+	loaded.AppliedHash = entry.AppliedHash
+	*state = loaded
+	if persistState {
+		if err = persistWeaponState(statePath, state); err != nil {
+			return nil, "", err
+		}
+	}
+	return entry, profile, nil
+}
+
+// resetWeaponProfileAfterRebase archives the old SPF2 generation and starts a
+// clean author state for the newly captured baseline. This is intentionally
+// explicit: merely opening a client with an unapplied draft must not erase it.
+func resetWeaponProfileAfterRebase(folder, statePath string, state *weaponState, entry *clientBaseline) (string, error) {
+	oldProfile := state.ActiveProfile
+	if oldProfile == "" {
+		oldProfile = strings.TrimSpace(state.SourceHash)
+	}
+	if oldProfile == "" {
+		oldProfile = "legacy"
+	}
+	if err := archiveWeaponProfile(folder, oldProfile, state); err != nil {
+		return "", err
+	}
+	profile := profileKeyForBaseline(entry, folder)
+	fresh := emptyWeaponState(state.Baselines, profile)
+	fresh.SourceHash = entry.SourceHash
+	fresh.AppliedHash = entry.AppliedHash
+	*state = fresh
+	if err := persistWeaponState(statePath, state); err != nil {
+		return "", err
+	}
+	return profile, nil
+}
+
+func hasWeaponAuthorState(state *weaponState) bool {
+	return state != nil && (len(state.Drafts) > 0 || len(state.Applied) > 0 ||
+		len(state.Created) > 0 || len(state.Remaps) > 0 || len(state.Variants) > 0 ||
+		len(state.HitProperties) > 0 || len(state.UStates) > 0 || len(state.LuaScripts) > 0)
+}
+
+func ensureWeaponStateMaps(state *weaponState) {
+	if state.Drafts == nil {
+		state.Drafts = map[string][]Rule{}
+	}
+	if state.Applied == nil {
+		state.Applied = map[string][]Rule{}
+	}
+	if state.Created == nil {
+		state.Created = map[string]Blueprint{}
+	}
+	if state.Combos == nil {
+		state.Combos = map[string]int{}
+	}
+	if state.Remaps == nil {
+		state.Remaps = map[string]map[int]*StageRemap{}
+	}
+	if state.FrameSwitches == nil {
+		state.FrameSwitches = map[string]map[int]frameSwitchStageEdit{}
+	}
+	if state.Counters == nil {
+		state.Counters = map[string]map[int]*CounterEdit{}
+	}
+	if state.BlockElements == nil {
+		state.BlockElements = map[string]map[int]map[string][]BlockElement{}
+	}
+	if state.Scopes == nil {
+		state.Scopes = map[string]map[int]map[string][]FrameSwitchAttr{}
+	}
+	if state.Cleared == nil {
+		state.Cleared = map[string]map[int]bool{}
+	}
+	if state.ExtraProperties == nil {
+		state.ExtraProperties = map[string]ExtraProperty{}
+	}
+	if state.HitProperties == nil {
+		state.HitProperties = map[string]HitProperty{}
+	}
+	if state.Variants == nil {
+		state.Variants = map[string]map[int][]VariantEdit{}
+	}
+	if state.Chains == nil {
+		state.Chains = map[string][]ComboTransition{}
+	}
+	if state.ComboRules == nil {
+		state.ComboRules = map[string]ComboRuleSet{}
+	}
+	if state.PropertyClones == nil {
+		state.PropertyClones = map[string]map[string]string{}
+	}
+	if state.StageEffects == nil {
+		state.StageEffects = map[string]map[int][]StageEffect{}
+	}
+	if state.EffectRows == nil {
+		state.EffectRows = map[string][]EffectRow{}
+	}
+	if state.UStates == nil {
+		state.UStates = map[string]UStateEdit{}
+	}
+	if state.LuaScripts == nil {
+		state.LuaScripts = map[string]map[string]string{}
+	}
+}
+
 func normalizeDir(dir string) string {
 	cleaned := filepath.ToSlash(filepath.Clean(dir))
 	return strings.ToLower(cleaned)

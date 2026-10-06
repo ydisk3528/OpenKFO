@@ -1,12 +1,217 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kungfu_item_manager/weapon_config.dart';
 import 'package:kungfu_item_manager/weapon_workspace.dart';
 
+Future<dynamic> _pumpProfileIsolationPage(
+  WidgetTester tester,
+  Future<dynamic> Function(Map<String, dynamic>) respond,
+) async {
+  tester.view.physicalSize = const Size(1600, 1200);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  final weapon = <String, dynamic>{
+    'id': 1, 'name': '隔离测试', 'type': '测试', 'description': '',
+    'combos': <dynamic>[],
+    'stages': [
+      {'stage': 1, 'state': '1', 'label': 'C', 'action': '2001001',
+       'property_ids': <String>[], 'hits': <dynamic>[],
+       'supported': true, 'reason': ''},
+    ],
+  };
+  Future<dynamic> api(Map<String, dynamic> request) async {
+    if (request['operation'] == 'client_directory_get') return <String, dynamic>{};
+    if (request['operation'] == 'weapon_list' || request['operation'] == 'weapon_detail') {
+      return {
+        'active_profile': 'profile-a', 'source_hash': 'hash-a',
+        'revision': 'profile-isolation', 'weapon': weapon, 'weapons': [weapon],
+        'fields': <dynamic>[], 'effects': <dynamic>[], 'buffs': <dynamic>[],
+        'hit_options': <String, dynamic>{}, 'applied': <String, dynamic>{},
+        'drafts': <String, dynamic>{}, 'created': <String, dynamic>{},
+        'states': [1, 2], 'ustates': <dynamic>[], 'undeployed': <dynamic>[],
+        'chain_info': <String, dynamic>{},
+        'combo_rule_info': {'rules': <String, dynamic>{}, 'editable': true},
+      };
+    }
+    return respond(request);
+  }
+  await tester.pumpWidget(MaterialApp(home: WeaponConfigPage(api: api)));
+  await tester.pumpAndSettle();
+  final dynamic page = tester.state(find.byType(WeaponConfigPage));
+  await page.select(weapon);
+  await tester.pumpAndSettle();
+  return page;
+}
+
 void main() {
+  for (final operation in ['weapon_combo_chain', 'weapon_combo_rule', 'weapon_stage_track']) {
+    for (final failure in [false, true]) {
+      testWidgets('profile isolation ignores stale $operation ${failure ? 'error' : 'response'}', (tester) async {
+        final response = Completer<dynamic>();
+        final requests = <Map<String, dynamic>>[];
+        final dynamic page = await _pumpProfileIsolationPage(tester, (request) {
+          requests.add(Map<String, dynamic>.from(request));
+          return response.future;
+        });
+        final Future<dynamic> pending = operation == 'weapon_combo_chain'
+            ? page.refreshChain(1)
+            : operation == 'weapon_combo_rule'
+                ? page.refreshComboRule(1)
+                : page.openStageTrack(0);
+        await tester.pump();
+        expect(requests.single['weapon'], 1);
+        expect(requests.single['active_profile'], 'profile-a');
+        expect(requests.single['source_hash'], 'hash-a');
+        // 保持武器和 generation 不变，单独覆盖 profile/hash 隔离。
+        page.data = <String, dynamic>{
+          ...page.data,
+          'active_profile': failure ? 'profile-a' : 'profile-b',
+          'source_hash': failure ? 'hash-b' : 'hash-a',
+        };
+        page.comboChain = <Map<String, String>>[{'old': '1', 'new': '2', 'key': '1'}];
+        page.comboRuleInfo = <String, dynamic>{'sentinel': 'new-context'};
+        page.comboRuleFailure = 'new-context';
+        page.stageTracks = <String, Map<String, dynamic>>{'new': {'state': 'new'}};
+        page.scopeSaved = <String, Map<String, List<Map<String, dynamic>>>>{'new': {}};
+        page.busy = true;
+        page.failed = false;
+        page.message = 'new-context';
+        if (failure) {
+          response.completeError(StateError('old-context-error'));
+        } else {
+          response.complete({'active_profile': 'profile-a', 'source_hash': 'hash-a'});
+        }
+        await pending;
+        await tester.pump();
+        expect(page.comboChain.single['new'], '2');
+        expect(page.comboRuleInfo['sentinel'], 'new-context');
+        expect(page.comboRuleFailure, 'new-context');
+        expect(page.stageTracks.keys, ['new']);
+        expect(page.scopeSaved.keys, ['new']);
+        expect(page.busy, isTrue);
+        expect(page.failed, isFalse);
+        expect(page.message, 'new-context');
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(tester.takeException(), isNull);
+      });
+    }
+    testWidgets('profile isolation rejects mismatched $operation identity', (tester) async {
+      final dynamic page = await _pumpProfileIsolationPage(tester, (_) async => {
+        'active_profile': 'profile-b', 'source_hash': 'hash-b',
+        'chain': [{'old': '1', 'new': '2', 'key': '1'}],
+        'rules': {'max': [{'skill': 'bad', 'max_combo': '9'}]},
+        'tracks': [{'state': '1'}],
+      });
+      if (operation == 'weapon_combo_chain') {
+        await page.refreshChain(1);
+        expect(page.comboChain, isEmpty);
+        expect(page.message, contains('客户端配置档已切换'));
+      } else if (operation == 'weapon_combo_rule') {
+        await page.refreshComboRule(1);
+        expect(page.comboRuleInfo, isEmpty);
+        expect(page.comboRuleFailure, contains('客户端配置档已切换'));
+      } else {
+        await page.openStageTrack(0);
+        expect(page.stageTracks, isEmpty);
+        expect(page.message, contains('客户端配置档已切换'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('profile isolation ignores stale property catalog before allocation', (tester) async {
+    final response = Completer<dynamic>();
+    final dynamic page = await _pumpProfileIsolationPage(tester, (request) {
+      expect(request['operation'], 'weapon_remap_options');
+      expect(request['active_profile'], 'profile-a');
+      expect(request['source_hash'], 'hash-a');
+      return response.future;
+    });
+    final adding = page.addPropertyFor('1');
+    await tester.pump();
+    page.data = <String, dynamic>{...page.data, 'source_hash': 'hash-b'};
+    response.complete({'properties': [{'id': '101', 'values': <String, dynamic>{}}]});
+    await adding;
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(page.extraProperties, isEmpty);
+    expect(page.remaps, isEmpty);
+    expect(page.dirty, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('profile isolation ignores old stage track dialog submission', (tester) async {
+    final dynamic page = await _pumpProfileIsolationPage(tester, (request) async {
+      expect(request['operation'], 'weapon_stage_track');
+      return {
+        'active_profile': 'profile-a', 'source_hash': 'hash-a',
+        'tracks': [
+          {'state': '1', 'frames': 10, 'segments': [
+            {'id': 'clip-1', 'name': 'clip', 'start': 0, 'end': 10, 'scope': <dynamic>[]},
+          ]},
+        ],
+        'saved': <String, dynamic>{},
+      };
+    });
+    final opening = page.openStageTrack(0);
+    await tester.pumpAndSettle();
+    final field = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextFormField)).first;
+    await tester.enterText(field, '42');
+    page.data = <String, dynamic>{...page.data, 'active_profile': 'profile-b', 'source_hash': 'hash-b'};
+    page.scopeSaved = <String, Map<String, List<Map<String, dynamic>>>>{'new': {}};
+    page.stageTracks = <String, Map<String, dynamic>>{'new': {'state': 'new'}};
+    page.message = 'new-context';
+    await tester.tap(find.widgetWithText(FilledButton, '保存攻击范围'));
+    await opening;
+    await tester.pumpAndSettle();
+    expect(page.scopeSaved.keys, ['new']);
+    expect(page.stageTracks.keys, ['new']);
+    expect(page.dirty, isFalse);
+    expect(page.message, 'new-context');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('profile isolation blocks old clear confirmation and state editor commit', (tester) async {
+    final dynamic page = await _pumpProfileIsolationPage(tester, (request) async {
+      fail('不应发送请求：$request');
+    });
+    final confirming = page.clearChain();
+    await tester.pumpAndSettle();
+    page.data = <String, dynamic>{...page.data, 'source_hash': 'hash-b'};
+    page.comboChain = <Map<String, String>>[{'old': '1', 'new': '2', 'key': '1'}];
+    await tester.tap(find.widgetWithText(FilledButton, '清除'));
+    await confirming;
+    await tester.pumpAndSettle();
+    expect(page.comboChain.single['new'], '2');
+    expect(page.dirty, isFalse);
+
+    page.addStatePick = '2';
+    final editing = page.defineState();
+    await tester.pumpAndSettle();
+    final action = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)).first;
+    await tester.enterText(action, '2001002');
+    page.data = <String, dynamic>{...page.data, 'active_profile': 'profile-b'};
+    page.addStatePick = 'new-context';
+    await tester.tap(find.widgetWithText(FilledButton, '提交重映射'));
+    await tester.pumpAndSettle();
+    expect(page.weapon['stages'], hasLength(1));
+    expect(page.remaps, isEmpty);
+    expect(page.extraProperties, isEmpty);
+    expect(page.dirty, isFalse);
+    await tester.tap(find.widgetWithText(TextButton, '关闭'));
+    await editing;
+    await tester.pumpAndSettle();
+    expect(page.addStatePick, 'new-context');
+    expect(tester.takeException(), isNull);
+  });
+
   test('weapon workspace round trips an isolated complete snapshot', () {
     final workspace = WeaponWorkspace.fromPage(
       weapon: {'id': 253450, 'name': '狂暴·紫金八面锤'},
@@ -276,8 +481,8 @@ void main() {
         {'weapon': '1', 'state': 2011, 'kind': 'stage'},
       ],
     });
-    final restoredHit =
-        (WeaponWorkspace.fromJson(workspace.toJson()).hitProperties)['910000001'];
+    final restoredHit = (WeaponWorkspace.fromJson(workspace.toJson())
+        .hitProperties)['910000001'];
     expect(restoredHit, {
       'id': '910000001',
       'action': '77',
@@ -291,6 +496,242 @@ void main() {
     expect((restoredHit as Map)['id'], '910000001');
     expect((restoredHit['values'] as Map)['SkillDamage'], 4.5);
   });
+
+  test(
+    'workspace decodes sparse canonical values with stage and rule fallbacks',
+    () {
+      final restored = WeaponWorkspace.fromJson({
+        'weapon': {
+          'id': 1,
+          'stages': [
+            {
+              'state': '2011',
+              'hits': [
+                {
+                  'id': '910000001',
+                  'values': {
+                    'SkillDamage': '8',
+                    'RepulseTarget': '0',
+                    'StandHurt': '42',
+                  },
+                },
+                {
+                  'id': '910000002',
+                  'values': {'SkillDamage': '99'},
+                },
+              ],
+            },
+          ],
+        },
+        'rules': [
+          {
+            'stage': 2011,
+            'properties': {
+              '910000001': {'RepulseTarget': 1, 'TargetFlurr': 2},
+              '910000002': {'SkillDamage': 99},
+            },
+          },
+        ],
+        'hit_properties': {
+          '910000001': {
+            'values': {'RepulseTarget': 0},
+            'template': '253521',
+          },
+        },
+      });
+
+      expect(restored.hitProperties['910000001'], {
+        'id': '910000001',
+        'template': '253521',
+        'values': {
+          'SkillDamage': '8',
+          'RepulseTarget': 0,
+          'StandHurt': '42',
+          'TargetFlurr': 2,
+        },
+      });
+      expect(restored.hitProperties.keys, ['910000001']);
+      expect(
+        WeaponWorkspace.fromJson(restored.toJson()).hitProperties,
+        restored.hitProperties,
+      );
+    },
+  );
+
+  test(
+    'workspace migrates stage values and baseline drafts without canonical',
+    () {
+      final stageSnapshot = WeaponWorkspace.fromJson({
+        'weapon': {
+          'id': 1,
+          'stages': [
+            {
+              'hits': [
+                {
+                  'id': '101',
+                  'values': {'SkillDamage': '8', 'StandHurt': '42'},
+                },
+              ],
+            },
+          ],
+        },
+        'rules': [
+          {
+            'properties': {
+              '101': {'SkillDamage': 0},
+            },
+          },
+        ],
+      });
+      expect(stageSnapshot.hitProperties['101']['values'], {
+        'SkillDamage': 0,
+        'StandHurt': '42',
+      });
+      final draftSnapshot = WeaponWorkspace.fromJson({
+        'weapon': {'id': 1},
+        'data': {
+          'drafts': {
+            '1': [
+              {
+                'properties': {
+                  '101': {'SkillDamage': 0},
+                },
+              },
+            ],
+          },
+        },
+      });
+      expect(draftSnapshot.hitProperties['101']['values'], {'SkillDamage': 0});
+    },
+  );
+
+  test('empty canonical hit properties are authoritative', () {
+    final restored = WeaponWorkspace.fromJson({
+      'weapon': {
+        'id': 1,
+        'stages': [
+          {
+            'state': '2011',
+            'hits': [
+              {
+                'id': '910000001',
+                'values': {'SkillDamage': '8'},
+              },
+            ],
+          },
+        ],
+      },
+      'rules': [
+        {
+          'stage': 2011,
+          'properties': {
+            '910000001': {'SkillDamage': 8},
+          },
+        },
+      ],
+      'hit_properties': <String, dynamic>{},
+    });
+
+    expect(restored.hitProperties, isEmpty);
+  });
+
+  test(
+    'workspace preserves canonical metadata through fromPage round trip',
+    () {
+      WeaponWorkspace snapshot(Map<String, dynamic> canonical) =>
+          WeaponWorkspace.fromPage(
+            weapon: {
+              'id': 1,
+              'stages': [
+                {
+                  'state': '2011',
+                  'action': '2001001',
+                  'property_ids': ['910000001', '910000002'],
+                  'hits': [
+                    {
+                      'id': '910000001',
+                      'values': {'SkillDamage': 8},
+                    },
+                    {
+                      'id': '910000002',
+                      'values': {'SkillDamage': 99},
+                    },
+                  ],
+                },
+              ],
+            },
+            data: const {},
+            rules: [
+              {
+                'stage': 2011,
+                'properties': {
+                  '910000002': {'SkillDamage': 99},
+                },
+              },
+            ],
+            comboChain: const [],
+            comboDeadEnds: const [],
+            frameSwitches: const [],
+            frameEdits: const {},
+            frameSaved: const {},
+            counters: const [],
+            counterEdits: const {},
+            counterSaved: const {},
+            blockElements: const [],
+            blockElementsSaved: const {},
+            blockElementsEdit: const {},
+            variants: const {
+              '2011': [
+                {
+                  'condition': 406,
+                  'segments': [
+                    {'skillproid': '910000002'},
+                  ],
+                },
+              ],
+            },
+            variantsSaved: const {},
+            variantBases: const {},
+            variantOccupiedIDs: const {},
+            stageTracks: const {},
+            scopeSaved: const {},
+            comboRuleInfo: const {},
+            comboRuleMaxDraft: const [],
+            comboRuleBlackDraft: const [],
+            comboRuleWhiteDraft: const [],
+            hitProperties: canonical,
+            variantsEdit: const {
+              '2011': [
+                {'condition': 406, 'remove': true, 'segments': []},
+              ],
+            },
+          );
+      final canonical = <String, dynamic>{
+        '910000001': {
+          'template': '253521',
+          'values': {'RepulseTarget': 0},
+          'notes': {'source': '模板'},
+        },
+        '910000003': {'template': '253522'},
+      };
+      final workspace = snapshot(canonical);
+      final restored = WeaponWorkspace.fromJson(workspace.toJson());
+
+      expect(restored.hitProperties.keys, ['910000001', '910000003']);
+      expect(restored.hitProperties['910000001']['template'], '253521');
+      expect(restored.hitProperties['910000001']['notes'], {'source': '模板'});
+      expect(restored.hitProperties['910000001']['values'], {
+        'SkillDamage': 8,
+        'RepulseTarget': 0,
+      });
+      expect(restored.hitProperties['910000003']['template'], '253522');
+      expect(restored.hitProperties['910000003']['values'], isEmpty);
+      expect(snapshot({}).hitProperties, isEmpty);
+      expect(snapshot({}).variantsEdit['2011']!.single['remove'], isTrue);
+      canonical['910000001']['notes']['source'] = '已修改';
+      expect(workspace.hitProperties['910000001']['notes']['source'], '模板');
+    },
+  );
 
   test('workspace variants normalize legacy string conditions to integers', () {
     final restored = WeaponWorkspace.fromJson({
@@ -1010,15 +1451,48 @@ void main() {
         },
       ],
     };
+    Map<String, dynamic>? realFixture;
+    final fixturePath = Platform.environment['OPENKFO_HIT_UI_FIXTURE'];
+    if (fixturePath != null && fixturePath.isNotEmpty) {
+      realFixture = jsonDecode(File(fixturePath).readAsStringSync()) as Map<String, dynamic>;
+      final realWeapon = realFixture['weapon'] as Map;
+      final realStage = (realWeapon['stages'] as List).cast<Map>().firstWhere(
+        (stage) => '${stage['state']}' == '2041',
+      );
+      final firstHit = (realStage['hits'] as List).first as Map;
+      expect(firstHit['id'], '900000533');
+      base
+        ..clear()
+        ..addAll(Map<String, dynamic>.from(firstHit['values'] as Map));
+      baseline
+        ..addAll(Map<String, dynamic>.from(realWeapon))
+        ..['stages'] = [Map<String, dynamic>.from(realStage)];
+    }
+    final expectedBase = {
+      for (final entry in base.entries) entry.key: num.parse('${entry.value}'),
+    };
+    Map<String, dynamic>? savedWorkspace;
     Future<dynamic> api(Map<String, dynamic> request) async {
       switch (request['operation']) {
         case 'weapon_list':
           return {
             'weapons': [baseline],
-            'fields': [
+            'fields': realFixture?['fields'] ?? [
               {'key': 'SkillDamage', 'name': '基础伤害', 'min': 0, 'max': 10000},
-              {'key': 'RepulseTarget', 'name': '击退', 'min': 0, 'max': 1, 'oneshot': true},
-              {'key': 'StandHurt', 'name': '受击动作号', 'min': 0, 'max': 9999, 'oneshot': true},
+              {
+                'key': 'RepulseTarget',
+                'name': '击退',
+                'min': 0,
+                'max': 1,
+                'oneshot': true,
+              },
+              {
+                'key': 'StandHurt',
+                'name': '受击动作号',
+                'min': 0,
+                'max': 9999,
+                'oneshot': true,
+              },
             ],
             'effects': <dynamic>[],
             'hit_options': <String, dynamic>{},
@@ -1032,13 +1506,31 @@ void main() {
             'weapon': jsonDecode(jsonEncode(baseline)),
             'drafts': <String, dynamic>{},
             // A canonical edit is sparse; it must not replace archive values.
-            'hit_properties': {'900000533': {'values': {'RepulseTarget': 1}}},
-            'ustates': [{'id': 406, 'name': '测试状态'}],
+            'hit_properties': {
+              '900000533': {
+                'values': {'RepulseTarget': 1},
+              },
+            },
+            'ustates': [
+              {'id': 406, 'name': '测试状态'},
+            ],
             'chain_info': {
               'variant_bases': {
                 '2041': [
-                  {'name': 'first_hit', 'start': 0, 'end': 8, 'skillproid': '900000533', 'damage': 8},
-                  {'name': 'second_hit', 'start': 9, 'end': 16, 'skillproid': '900000534', 'damage': 12},
+                  {
+                    'name': 'first_hit',
+                    'start': 0,
+                    'end': 8,
+                    'skillproid': '900000533',
+                    'damage': 8,
+                  },
+                  {
+                    'name': 'second_hit',
+                    'start': 9,
+                    'end': 16,
+                    'skillproid': '900000534',
+                    'damage': 12,
+                  },
                 ],
               },
               'variant_skillpro_min': 910000106,
@@ -1046,6 +1538,11 @@ void main() {
             },
             'combo_rule_info': <String, dynamic>{},
           };
+        case 'weapon_workspace_save':
+          savedWorkspace = jsonDecode(jsonEncode(request['workspace'])) as Map<String, dynamic>;
+          return {'message': 'saved', 'saved_at': 'test'};
+        case 'weapon_workspace_load':
+          return {'exists': true, 'payload': savedWorkspace};
         case 'client_directory_get':
         case 'shop_images':
           return <String, dynamic>{};
@@ -1053,6 +1550,7 @@ void main() {
           fail('Unexpected RPC: ${request['operation']}');
       }
     }
+
     await tester.pumpWidget(MaterialApp(home: WeaponConfigPage(api: api)));
     await tester.pumpAndSettle();
     final dynamic page = tester.state(find.byType(WeaponConfigPage));
@@ -1067,13 +1565,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('添加一段（默认卡帧）'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextFormField, '动画名').last, 'new_hit');
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '动画名').last,
+      'new_hit',
+    );
     await tester.enterText(find.widgetWithText(TextFormField, '止').last, '8');
     await tester.tap(find.text('增加命中属性').last);
     await tester.pumpAndSettle();
     expect(find.text('命中属性 910000106 · 分支 406'), findsOneWidget);
     final damageField = find.widgetWithText(TextFormField, '基础伤害').last;
-    expect(tester.widget<TextFormField>(damageField).controller!.text, '8');
+    expect(tester.widget<TextFormField>(damageField).controller!.text, '${base['SkillDamage']}');
     await tester.enterText(damageField, '0');
     await tester.tap(find.text('确定').last);
     await tester.pumpAndSettle();
@@ -1083,22 +1584,52 @@ void main() {
     await page.saveVariants();
     await tester.pumpAndSettle();
     final hits = page.weapon['stages'][0]['hits'] as List;
-    expect((hits.firstWhere((hit) => hit['id'] == '900000533') as Map)['values'], {...base, 'RepulseTarget': 1});
-    expect(page.hitProperties['910000106']['SkillDamage'], 0);
-    expect(page.hitProperties['910000106']['RepulseTarget'], 1);
-    expect(page.hitProperties['910000106']['StandHurt'], '42');
+    expect(
+      (hits.firstWhere((hit) => hit['id'] == '900000533') as Map)['values'],
+      {...expectedBase, 'RepulseTarget': 1},
+    );
+    final expectedBranch = {...expectedBase, 'RepulseTarget': 1, 'SkillDamage': 0};
+    expect(page.hitProperties['910000106'], expectedBranch);
     expect(page.variants['2041'][0]['segments'][0]['damage'], 0);
     final restored = WeaponWorkspace.fromJson(page.workspace.toJson());
-    expect(restored.hitProperties['900000533']['values']['SkillDamage'], 8);
-    expect(restored.hitProperties['900000533']['values']['StandHurt'], 42);
-    expect(restored.hitProperties['910000106']['values']['SkillDamage'], 0);
-    expect(restored.hitProperties['910000106']['values']['StandHurt'], 42);
+    expect(restored.hitProperties['900000533']['values'], {...expectedBase, 'RepulseTarget': 1});
+    expect(restored.hitProperties['910000106']['values'], expectedBranch);
+    await page.saveWorkspace();
+    await tester.pumpAndSettle();
+    await page.select(baseline);
+    await tester.pumpAndSettle();
+    await page.loadWorkspace();
+    await tester.pumpAndSettle();
+    expect(page.hitProperties['900000533'], {...expectedBase, 'RepulseTarget': 1});
+    expect(page.hitProperties['910000106'], expectedBranch);
+    final loadedHits = page.weapon['stages'][0]['hits'] as List;
+    for (final id in ['900000533', '910000106']) {
+      final hit = loadedHits.cast<Map>().firstWhere((hit) => hit['id'] == id);
+      final expected = id == '900000533' ? {...expectedBase, 'RepulseTarget': 1} : expectedBranch;
+      final editors = page.numberEditors(hit, page.rules[0], true, damage: false) as Padding;
+      for (final dropdown in (editors.child as Wrap).children.cast<SizedBox>()) {
+        final field = dropdown.child as DropdownButtonFormField<int>;
+        final key = field.decoration.labelText!.split('（')[1].split('）')[0];
+        expect(field.initialValue, expected[key]);
+      }
+    }
     page.startVariantEdit();
-    final reopening = page.variantEditRow('2041', Map<String, dynamic>.from(page.variants['2041'][0] as Map));
+    final reopening = page.variantEditRow(
+      '2041',
+      Map<String, dynamic>.from(page.variants['2041'][0] as Map),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byType(ActionChip).last);
     await tester.pumpAndSettle();
-    expect(tester.widget<TextFormField>(find.widgetWithText(TextFormField, '基础伤害').last).controller!.text, '0');
+    expect(
+      tester
+          .widget<TextFormField>(
+            find.widgetWithText(TextFormField, '基础伤害').last,
+          )
+          .controller!
+          .text,
+      '0',
+    );
     await tester.tap(find.text('取消').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('取消').last);
@@ -1342,7 +1873,10 @@ void main() {
         'action': '2002001',
         'property_id': id,
         'template_property_id': '101',
-        'template_stage_data': {'frames': [1, 2, 3], 'raw_frames': '<Frames/>'},
+        'template_stage_data': {
+          'frames': [1, 2, 3],
+          'raw_frames': '<Frames/>',
+        },
       });
       expect(page.weapon['stages'][0]['action'], '2002001');
       expect(page.weapon['stages'][0]['property_ids'], ['101', id]);

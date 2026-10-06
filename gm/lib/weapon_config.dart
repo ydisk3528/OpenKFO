@@ -26,26 +26,73 @@ const packageSections = <String, String>{
   'effect': '特效',
 };
 
+const _ruleFieldKeys = <String>{
+  'SkillDamage',
+  'SkillEnhanceDamage',
+  'RepulseTarget',
+  'TripTarget',
+  'TargetFlurr',
+  'StandHurt',
+  'StandHurtDown',
+  'StandHurtFly',
+  'FlyHurt',
+  'JumpHurtDown',
+  'JumpHurtFall',
+};
+
+Map<String, dynamic> _extractHitValues(Object? value) {
+  if (value is Map && value['values'] is Map) {
+    return {
+      for (final entry in (value['values'] as Map).entries)
+        '${entry.key}': entry.value,
+    };
+  }
+  if (value is Map) {
+    const metadata = <String>{
+      'id',
+      'values',
+      'buff',
+      'variant',
+      'references',
+      'owner_weapon',
+      'action',
+      'state',
+      'condition',
+      'segment_id',
+      'kind',
+      'template',
+      'source',
+      'preallocated',
+      'removed',
+    };
+    return {
+      for (final entry in value.entries)
+        if (!metadata.contains('${entry.key}')) '${entry.key}': entry.value,
+    };
+  }
+  return {};
+}
+
+Map<String, dynamic> _mergeHitValueMaps(Iterable<Object?> sources) {
+  final result = <String, dynamic>{};
+  for (final source in sources) {
+    result.addAll(_extractHitValues(source));
+  }
+  return result;
+}
+
 class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Map<String, dynamic>? data, weapon;
   WeaponWorkspace? workspace;
   Map<String, dynamic> remaps = {}, cleared = {}, extraProperties = {};
 
-  Map<String, dynamic> _hitValues(Object? value) {
-    if (value is Map && value['values'] is Map) {
-      return Map<String, dynamic>.from(value['values'] as Map);
-    }
-    if (value is Map) {
-      return {
-        for (final entry in value.entries)
-          if (entry.key != 'id' &&
-              entry.key != 'values' &&
-              entry.key != 'buff' &&
-              entry.key != 'variant')
-            '${entry.key}': entry.value,
-      };
-    }
-    return {};
+  Map<String, dynamic> _hitValues(Object? value) => _extractHitValues(value);
+
+  Map<String, dynamic> _mergeHitValues(Iterable<Object?> sources) =>
+      _mergeHitValueMaps(sources);
+
+  dynamic _hitField(String id, String field, [dynamic fallback]) {
+    return _hitValues(hitProperties[id])[field] ?? fallback;
   }
 
   Map<String, dynamic> _ruleValues(Object? value) {
@@ -55,7 +102,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final parsed = entry.value is num
           ? entry.value as num
           : num.tryParse('${entry.value}'.trim());
-      if (parsed != null && parsed.isFinite) {
+      if (_ruleFieldKeys.contains('${entry.key}') &&
+        parsed != null &&
+        parsed.isFinite) {
         result['${entry.key}'] = parsed;
       }
     }
@@ -99,8 +148,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> load({int? prefer, bool refresh = true}) async {
     final generation = ++_loadGeneration;
     final selectedId = prefer ?? weapon?['id'] as int?;
-    ++_selectionGeneration;
+    final selectionGeneration = ++_selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     setState(() {
+      clearWeaponDetails();
+      weapon = null;
+      rules = [];
       busy = true;
       failed = false;
     });
@@ -116,7 +170,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       } catch (_) {
         // The card falls back to whatever was shown before.
       }
-      if (!mounted || generation != _loadGeneration) return;
+      if (generation != _loadGeneration ||
+          !_sameWeaponContext(selectionGeneration, null, profile, hash)) return;
       final selected = (result['weapons'] as List).where(
         (w) => selectedId != null && w['id'] == selectedId,
       );
@@ -137,7 +192,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await select(Map<String, dynamic>.from(selected.first));
       }
     } catch (e) {
-      if (mounted && generation == _loadGeneration) {
+      if (generation == _loadGeneration &&
+          _sameWeaponContext(selectionGeneration, null, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -156,22 +212,27 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Future<void> refreshWorkspaceStatus() async {
     final selected = weapon;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (selected == null) return;
     try {
       final result = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_workspace_status',
           'weapon': selected['id'],
+          ..._profileContextFor(profile, hash),
         }),
       );
-      if (!mounted || weapon?['id'] != selected['id']) return;
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         workspaceExists = result['exists'] == true;
         workspaceSavedAt =
             '${result['payload'] is Map ? (result['payload'] as Map)['saved_at'] ?? '' : ''}';
       });
     } catch (_) {
-      if (mounted)
+      if (_sameWeaponContext(generation, selected['id'], profile, hash))
         setState(() {
           workspaceExists = false;
           workspaceSavedAt = '';
@@ -181,6 +242,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Future<void> saveWorkspace() async {
     final selected = weapon;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (selected == null || busy) return;
     final currentWorkspace = _snapshotWorkspace();
     setState(() {
@@ -194,10 +258,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await widget.api({
           'operation': 'weapon_workspace_save',
           'weapon': selected['id'],
+          ..._profileContextFor(profile, hash),
           'workspace': currentWorkspace.toJson(),
         }),
       );
-      if (!mounted) return;
+      if (!mounted ||
+          generation != _selectionGeneration ||
+          weapon?['id'] != selected['id'] ||
+          activeProfile != profile ||
+          sourceHash != hash) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         busy = false;
         workspaceExists = true;
@@ -206,7 +276,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         message = '${result['message'] ?? '当前武器暂存已保存'}';
       });
     } catch (e) {
-      if (mounted)
+      if (mounted &&
+          generation == _selectionGeneration &&
+          weapon?['id'] == selected['id'] &&
+          activeProfile == profile &&
+          sourceHash == hash)
         setState(() {
           busy = false;
           failed = true;
@@ -217,6 +291,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Future<void> loadWorkspace() async {
     final selected = weapon;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (selected == null || busy) return;
     setState(() {
       busy = true;
@@ -228,6 +305,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await widget.api({
           'operation': 'weapon_workspace_load',
           'weapon': selected['id'],
+          ..._profileContextFor(profile, hash),
         }),
       );
       if (result['exists'] != true || result['payload'] is! Map) {
@@ -236,7 +314,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final restored = WeaponWorkspace.fromJson(
         Map<String, dynamic>.from(result['payload'] as Map),
       );
-      if (!mounted) return;
+      if (!mounted ||
+          generation != _selectionGeneration ||
+          weapon?['id'] != selected['id'] ||
+          activeProfile != profile ||
+          sourceHash != hash) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         _restoreWorkspace(restored);
         workspace = restored;
@@ -248,7 +331,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         message = '暂存副本已加载到当前武器内存；点击“应用到游戏”才会写入客户端。';
       });
     } catch (e) {
-      if (mounted)
+      if (mounted &&
+          generation == _selectionGeneration &&
+          weapon?['id'] == selected['id'] &&
+          activeProfile == profile &&
+          sourceHash == hash)
         setState(() {
           busy = false;
           failed = true;
@@ -259,6 +346,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Future<void> deleteWorkspace() async {
     final selected = weapon;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (selected == null || busy || !workspaceExists) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -277,7 +367,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !_sameWeaponContext(generation, selected['id'], profile, hash)) return;
     setState(() {
       busy = true;
       message = '正在删除当前武器暂存副本…';
@@ -287,17 +377,19 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await widget.api({
           'operation': 'weapon_workspace_delete',
           'weapon': selected['id'],
+          ..._profileContextFor(profile, hash),
         }),
       );
-      if (mounted)
-        setState(() {
-          busy = false;
-          workspaceExists = false;
-          workspaceSavedAt = '';
-          message = '${result['message'] ?? '暂存已删除'}';
-        });
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
+      setState(() {
+        busy = false;
+        workspaceExists = false;
+        workspaceSavedAt = '';
+        message = '${result['message'] ?? '暂存已删除'}';
+      });
     } catch (e) {
-      if (mounted)
+      if (_sameWeaponContext(generation, selected['id'], profile, hash))
         setState(() {
           busy = false;
           failed = true;
@@ -376,18 +468,69 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// server's config.json `config_hash`.
   String get clientConfigHash => '${_clientInfo['config_hash'] ?? ''}';
 
+  String get activeProfile => '${data?['active_profile'] ?? ''}';
+  String get sourceHash => '${data?['source_hash'] ?? ''}';
+
+  Map<String, dynamic> _profileContextFor(String profile, String hash) => {
+    if (profile.isNotEmpty) 'active_profile': profile,
+    if (hash.isNotEmpty) 'source_hash': hash,
+  };
+
+  bool _sameWeaponContext(int generation, dynamic id, String profile, String hash) =>
+      mounted && generation == _selectionGeneration && weapon?['id'] == id &&
+      activeProfile == profile && sourceHash == hash;
+
+  void _validateProfileResponse(Map result, String profile, String hash) {
+    final responseProfile = '${result['active_profile'] ?? ''}';
+    final responseHash = '${result['source_hash'] ?? ''}';
+    if ((profile.isNotEmpty && responseProfile.isNotEmpty && responseProfile != profile) ||
+        (hash.isNotEmpty && responseHash.isNotEmpty && responseHash != hash)) {
+      throw StateError('客户端配置档已切换，请刷新武器配置');
+    }
+  }
+
+  Future<dynamic> Function(Map<String, dynamic>) _apiForWeaponContext(
+    int generation, dynamic id, String profile, String hash,
+  ) => (request) async {
+    if (!_sameWeaponContext(generation, id, profile, hash)) {
+      throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+    }
+    final result = await widget.api({
+      ...request,
+      ..._profileContextFor(profile, hash),
+    });
+    if (!_sameWeaponContext(generation, id, profile, hash)) {
+      throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+    }
+    if (result is Map) _validateProfileResponse(result, profile, hash);
+    return result;
+  };
+
   Future<void> reloadClient() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     try {
       final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'client_directory_get'}),
+        await widget.api({
+          'operation': 'client_directory_get',
+          ..._profileContextFor(profile, hash),
+        }),
       );
-      if (mounted) setState(() => _clientInfo = result);
+      if (!_sameWeaponContext(generation, id, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
+      setState(() => _clientInfo = result);
     } catch (_) {
       // The card simply keeps the previous picture.
     }
   }
 
   Future<void> chooseClient(/* optional initial pick */) async {
+    final previousGeneration = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final picked = await showDialog<String>(
       context: context,
       builder: (_) => ClientPickerDialog(
@@ -399,9 +542,14 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (picked == null || picked.isEmpty || !mounted) return;
-    final prefer = weapon?['id'] as int?;
+    if (picked == null || picked.isEmpty ||
+        !_sameWeaponContext(previousGeneration, id, profile, hash)) return;
+    final prefer = id as int?;
+    final generation = ++_selectionGeneration;
     setState(() {
+      clearWeaponDetails();
+      weapon = null;
+      rules = [];
       busy = true;
       failed = false;
       message = '正在切换客户端…';
@@ -410,8 +558,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = await widget.api({
         'operation': 'client_directory_set',
         'directory': picked,
+        ..._profileContextFor(profile, hash),
       });
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, null, profile, hash)) return;
       setState(() {
         busy = false;
         _clientInfo = Map<String, dynamic>.from(result is Map ? result : {});
@@ -419,7 +568,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       });
       await load(prefer: prefer);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, null, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -430,6 +579,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> rebaseClient() async {
+    final previousGeneration = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -451,23 +604,31 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
-    final prefer = weapon?['id'] as int?;
+    if (confirmed != true ||
+        !_sameWeaponContext(previousGeneration, id, profile, hash)) return;
+    final prefer = id as int?;
+    final generation = ++_selectionGeneration;
     setState(() {
+      clearWeaponDetails();
+      weapon = null;
+      rules = [];
       busy = true;
       failed = false;
       message = '正在重新采集基线…';
     });
     try {
-      final result = await widget.api({'operation': 'weapon_client_rebase'});
-      if (!mounted) return;
+      final result = await widget.api({
+        'operation': 'weapon_client_rebase',
+        ..._profileContextFor(profile, hash),
+      });
+      if (!_sameWeaponContext(generation, null, profile, hash)) return;
       setState(() {
         busy = false;
         message = '${(result as Map)['message'] ?? '已重新采集基线'}';
       });
       await load(prefer: prefer);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, null, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -671,6 +832,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     Map<String, dynamic>? snapshot,
   }) async {
     final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     try {
       final result =
           snapshot ??
@@ -678,12 +841,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             await widget.api({
               'operation': 'weapon_combo_chain',
               'weapon': weaponId,
+              ..._profileContextFor(profile, hash),
             }),
           );
-      if (!mounted ||
-          generation != _selectionGeneration ||
-          weapon?['id'] != weaponId)
-        return;
+      if (!_sameWeaponContext(generation, weaponId, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         comboChain = [
           for (final e in (result['chain'] as List? ?? []))
@@ -772,9 +934,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         scopeSaved = {};
       });
     } catch (error) {
-      if (mounted &&
-          generation == _selectionGeneration &&
-          weapon?['id'] == weaponId) {
+      if (_sameWeaponContext(generation, weaponId, profile, hash)) {
         setState(() {
           failed = true;
           message = '动作分支与连招读取失败：$error';
@@ -877,6 +1037,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> frameAdd(String state) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final added = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _FrameSwitchDialog(
@@ -885,7 +1049,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         keys: frameKeys,
       ),
     );
-    if (added == null || !mounted) return;
+    if (added == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final list = [for (final e in frameListFor(state)) e]..add(added);
     setState(() => frameEdits[state] = list);
   }
@@ -919,6 +1083,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 清掉这把武器的全部帧级连招定制，动作块回到原样。
   /// 破坏性操作（清空定制）前的二次确认，返回 true 才继续。
   Future<bool> confirmDestructive(String title, String detail) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -936,7 +1104,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    return ok ?? false;
+    return ok == true && _sameWeaponContext(generation, id, profile, hash);
   }
 
   Future<void> clearFrameSwitches() async {
@@ -980,6 +1148,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> clearChain() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -997,7 +1169,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() {
       comboChain = [];
       chainDraft = [];
@@ -1013,6 +1185,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     Map<String, dynamic>? snapshot,
   }) async {
     final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     try {
       final result =
           snapshot ??
@@ -1020,12 +1194,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             await widget.api({
               'operation': 'weapon_combo_rule',
               'weapon': weaponId,
+              ..._profileContextFor(profile, hash),
             }),
           );
-      if (!mounted ||
-          generation != _selectionGeneration ||
-          weapon?['id'] != weaponId)
-        return;
+      if (!_sameWeaponContext(generation, weaponId, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         comboRuleInfo = result;
         comboRuleFailure = '';
@@ -1035,9 +1208,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     } catch (error) {
       // 读不出来时不再静默隐藏：把原因显示在卡片上。否则「后端是旧二进制」
       // 和「这把武器本来就没有限制」在界面上完全一样，只能靠猜。
-      if (mounted &&
-          generation == _selectionGeneration &&
-          weapon?['id'] == weaponId) {
+      if (_sameWeaponContext(generation, weaponId, profile, hash)) {
         setState(() {
           comboRuleInfo = {};
           comboRuleFailure = '$error';
@@ -1998,6 +2169,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> counterEditState(String state) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _CounterDialog(
@@ -2006,7 +2181,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         initial: counterFor(state),
       ),
     );
-    if (result == null || !mounted) return;
+    if (result == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() => counterEdits[state] = result.isEmpty ? null : result);
   }
 
@@ -2196,6 +2371,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 给还没有招架的状态添加：先选状态。
   Future<void> counterPickStateAdd() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final all = [for (final s in (data?['states'] as List? ?? [])) '$s'];
     if (all.isEmpty) return;
     final picked = await showDialog<String>(
@@ -2208,7 +2387,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     await counterEditState(picked);
   }
 
@@ -2413,31 +2592,53 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final id = '${hit['id']}';
       hits[id] = {
         ...hit,
-        'values': {
-          ..._hitValues(hit),
-          ..._hitValues(ruleProperties[id]),
-          ..._hitValues(hitProperties[id]),
-        },
+        'values': _mergeHitValues([
+          hit,
+          ruleProperties[id],
+          hitProperties[id],
+        ]),
       };
     }
+    // 模板必须优先取当前状态第一段真实命中段，不能被旧分支或 map 遍历顺序改变。
+    final firstStageHit = (stage['hits'] as List? ?? const []).cast<Map?>().firstWhere(
+      (hit) => '${hit?['id'] ?? ''}'.trim().isNotEmpty,
+      orElse: () => null,
+    );
+    final defaultTemplateID = '${firstStageHit?['id'] ?? ''}'.trim();
     for (final branch in variantRowsFor(state)) {
       for (final segment in (branch['segments'] as List? ?? const [])) {
         final row = segment as Map;
         final id = '${row['skillproid'] ?? ''}'.trim();
         if (id.isEmpty || hits.containsKey(id)) continue;
-        final template = '${row['template_skillproid'] ?? id}';
-        final source = hits[template];
-        final canonical = hitProperties[id] ?? source ?? hitProperties[template];
+        final requestedTemplate =
+            '${row['template_skillproid'] ?? ''}'.trim();
+        final template = requestedTemplate.isNotEmpty
+            ? requestedTemplate
+            : defaultTemplateID;
+        final source = hits[template] ??
+            (template.isEmpty ? null : {
+              'id': template,
+              'values': _mergeHitValues([
+                hitProperties[template],
+                ruleProperties[template],
+              ]),
+            });
+        final canonical = hitProperties[id];
         hits[id] = {
-          if (canonical is Map) ...Map<String, dynamic>.from(canonical),
+          ...?source,
+          if (canonical is Map)
+            for (final entry in canonical.entries)
+              if (entry.key != 'values') '${entry.key}': entry.value,
           'id': id,
           'variant': '${branch['condition']}',
           'buff': source?['buff'] ?? '0',
-          'values': {
-            ..._hitValues(source ?? hitProperties[template]),
-            ..._hitValues(canonical),
-            if (row['damage'] != null) 'SkillDamage': row['damage'],
-          },
+          'values': _mergeHitValues([
+            source,
+            hitProperties[template],
+            ruleProperties[template],
+            canonical,
+            if (row['damage'] != null) {'SkillDamage': row['damage']},
+          ]),
         };
       }
     }
@@ -2522,20 +2723,44 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       if (stage.isNotEmpty) {
         final stageRow = stage.first;
         keep.addAll(
-          (stageRow['property_ids'] as List? ?? const []).map((id) => '$id'),
+          (stageRow['property_ids'] as List? ?? const [])
+              .map((id) => '$id')
+              .where((id) => !isVariantSkillProID(id)),
         );
         keep.addAll(
-          (stageRow['hits'] as List? ?? const []).map(
-            (hit) => '${(hit as Map)['id']}',
-          ),
+          (stageRow['hits'] as List? ?? const [])
+              .map((hit) => '${(hit as Map)['id']}')
+              .where((id) => !isVariantSkillProID(id)),
         );
-        keep.addAll(referencedHitIDs('${stageRow['state']}'));
       }
-      if (properties != null) keep.addAll(properties.keys.map((id) => '$id'));
-      final current = <String, dynamic>{
-        for (final id in keep)
-          if (hitProperties[id] is Map) id: _ruleValues(hitProperties[id]),
+      // Variant segments are rendered from variants, not from the base rule.
+      // Do not revive stale branch IDs from rules.properties either.
+      if (properties != null) {
+        keep.addAll(
+          properties.keys
+              .map((id) => '$id')
+              .where((id) => !isVariantSkillProID(id)),
+        );
+      }
+      final stageHits = <String, dynamic>{
+        if (stage.isNotEmpty)
+          for (final hit in (stage.first['hits'] as List? ?? const []))
+            '${(hit as Map)['id']}': hit,
       };
+      final current = <String, dynamic>{};
+      for (final id in keep) {
+        if (hitProperties[id] is! Map) continue;
+        final values = _ruleValues(_mergeHitValues([
+          stageHits[id],
+          properties?[id],
+          hitProperties[id],
+        ]));
+        final shared = hitProperties[id] as Map;
+        hitProperties[id] = shared['values'] is Map
+            ? {...shared, 'values': values}
+            : values;
+        current[id] = values;
+      }
       if (current.isEmpty) {
         rule.remove('properties');
       } else {
@@ -2686,6 +2911,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 给某状态添加/修改一条分支：先选状态，再编辑条件与段。
   Future<void> variantAddFor(String state) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final ctx = variantHitContext(state);
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -2694,7 +2923,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         stateLabel: chainStateLabel(state),
         initial: null,
         baseSegments: variantBaseSegments(state),
-        api: widget.api,
+        api: _apiForWeaponContext(generation, id, profile, hash),
         hits: ctx.hits,
         hitOverrides: ctx.overrides,
         fields: (data?['fields'] as List? ?? const []),
@@ -2712,7 +2941,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         maximum: ctx.maximum,
       ),
     );
-    if (result == null || !mounted) return;
+    if (result == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final condition = int.tryParse('${result['condition']}') ?? 0;
     if (condition <= 0) return;
     variantPut(
@@ -2729,6 +2958,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 编辑已有的某条分支（current / new / edit 都走这里，先回填现值）。
   Future<void> variantEditRow(String state, Map<String, dynamic> row) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final ctx = variantHitContext(state);
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -2737,7 +2970,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         stateLabel: chainStateLabel(state),
         initial: row,
         baseSegments: variantBaseSegments(state),
-        api: widget.api,
+        api: _apiForWeaponContext(generation, id, profile, hash),
         hits: ctx.hits,
         hitOverrides: ctx.overrides,
         fields: (data?['fields'] as List? ?? const []),
@@ -2755,7 +2988,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         maximum: ctx.maximum,
       ),
     );
-    if (result == null || !mounted) return;
+    if (result == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final condition = int.tryParse('${result['condition']}') ?? 0;
     if (condition <= 0) return;
     variantPut(
@@ -2776,6 +3009,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 挑一个状态来加分支。
   Future<void> variantPickStateAndAdd() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final all = [for (final s in (data?['states'] as List? ?? [])) '$s'];
     if (all.isEmpty) return;
     final picked = await showDialog<String>(
@@ -2788,7 +3025,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     await variantAddFor(picked);
   }
 
@@ -2867,13 +3104,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 'name': '${(s as Map)['name']}',
                 'start': s['start'],
                 'end': s['end'],
-                if (variantHitContext(state)
-                            .overrides['${s['skillproid']}']?['SkillDamage'] !=
+                if (_hitValues(variantHitContext(state)
+                            .overrides['${s['skillproid']}'])['SkillDamage'] !=
                         null ||
                     s['damage'] != null)
                   'damage': _normalizeVariantDamage(
-                    variantHitContext(state)
-                            .overrides['${s['skillproid']}']?['SkillDamage'] ??
+                    _hitValues(variantHitContext(state)
+                            .overrides['${s['skillproid']}'])['SkillDamage'] ??
                         s['damage'],
                   ),
                 // 这三个是「原位编辑」的凭据：后端拿 skillproid 判这一段是不是
@@ -3292,6 +3529,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> blockElementEditOne(String state, String tag) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final list = blockListFor(state, tag);
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -3302,12 +3543,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ustates: ustateOptions,
       ),
     );
-    if (result == null || !mounted) return;
+    if (result == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     blockSet(state, tag, [result]);
   }
 
   /// 给某个状态添加：先选状态，再选元素类型。
   Future<void> blockElementPickAndAdd() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final all = [for (final s in (data?['states'] as List? ?? [])) '$s'];
     if (all.isEmpty || blockElementGroups.isEmpty) return;
     final state = await showDialog<String>(
@@ -3320,7 +3565,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (state == null || !mounted) return;
+    if (state == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final options = <Map<String, String>>[];
     for (final g in blockElementGroups) {
       for (final e in (g['elements'] as List? ?? [])) {
@@ -3344,7 +3589,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       builder: (_) =>
           _SimplePickDialog(title: '添加哪种元素', hint: '搜索名称', options: options),
     );
-    if (tag == null || !mounted) return;
+    if (tag == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     await blockElementEditOne(state, tag);
   }
 
@@ -3664,6 +3909,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 给还没有帧级连招的状态添加：先选状态。
   Future<void> framePickStateAndAdd() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final all = [for (final s in (data?['states'] as List? ?? [])) '$s'];
     if (all.isEmpty) return;
     final picked = await showDialog<String>(
@@ -3676,7 +3925,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     await frameAdd(picked);
   }
 
@@ -4071,6 +4320,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   Future<void> select(Map<String, dynamic> value) async {
     final generation = ++_selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     setState(() {
       clearWeaponDetails();
       weapon = null;
@@ -4080,9 +4331,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
     });
     try {
       final result = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_detail', 'weapon': value['id']}),
+        await widget.api({'operation': 'weapon_detail', 'weapon': value['id'], ..._profileContextFor(profile, hash)}),
       );
-      if (!mounted || generation != _selectionGeneration) return;
+      if (!mounted || generation != _selectionGeneration ||
+          activeProfile != profile || sourceHash != hash) return;
+      _validateProfileResponse(result, profile, hash);
       final detail = Map<String, dynamic>.from(result['weapon'] as Map);
       setState(() {
         final weapons = [
@@ -4148,32 +4401,38 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         detail['id'],
         snapshot: Map<String, dynamic>.from(result['chain_info'] as Map),
       );
-      if (!mounted || generation != _selectionGeneration) return;
+      if (!_sameWeaponContext(generation, detail['id'], profile, hash)) return;
       await refreshComboRule(
         detail['id'],
         snapshot: Map<String, dynamic>.from(result['combo_rule_info'] as Map),
       );
-      if (!mounted || generation != _selectionGeneration) return;
+      if (!_sameWeaponContext(generation, detail['id'], profile, hash)) return;
       setState(() {
         workspace = _snapshotWorkspace();
         workspaceExists = false;
         workspaceSavedAt = '';
       });
     } catch (error) {
-      if (mounted && generation == _selectionGeneration) {
+      if (mounted && generation == _selectionGeneration &&
+          activeProfile == profile && sourceHash == hash) {
         setState(() {
           failed = true;
           message = '武器 ${value['id']} 配置读取失败：$error';
         });
       }
     } finally {
-      if (mounted && generation == _selectionGeneration) {
+      if (mounted && generation == _selectionGeneration &&
+          activeProfile == profile && sourceHash == hash) {
         setState(() => busy = false);
       }
     }
   }
 
   Future<bool> discard() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (!dirty) return true;
     final action = await showDialog<String>(
       context: context,
@@ -4196,10 +4455,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (!mounted || action == null) return false;
+    if (!_sameWeaponContext(generation, id, profile, hash) || action == null) return false;
     if (action == 'save') {
       await execute('weapon_save');
-      return !dirty;
+      return _sameWeaponContext(generation, id, profile, hash) && !dirty;
     }
     return true;
   }
@@ -4214,9 +4473,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Map<String, List<Map<String, dynamic>>> stageEffects = {};
 
   Future<Map<String, dynamic>> _loadEffectView(int id) async {
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     final view = Map<String, dynamic>.from(
-      await widget.api({'operation': 'weapon_effect_view', 'weapon': id}),
+      await widget.api({'operation': 'weapon_effect_view', 'weapon': id, ..._profileContextFor(profile, hash)}),
     );
+    if (!_sameWeaponContext(generation, id, profile, hash)) {
+      throw StateError('当前武器已切换');
+    }
+    _validateProfileResponse(view, profile, hash);
     final baseRegistered = <String, Map<String, dynamic>>{
       for (final row in (view['registered'] as List? ?? []))
         '${(row as Map)['effect_id']}': Map<String, dynamic>.from(row),
@@ -4260,10 +4526,13 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> openEffectEditor() async {
     final selected = weapon;
     if (selected == null || busy) return;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     setState(() => busy = true);
     try {
       final view = await _loadEffectView(selected['id'] as int);
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
       setState(() => busy = false);
       final saved = await showDialog<bool>(
         context: context,
@@ -4272,7 +4541,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           editable: canEdit(selected['id']),
           view: view,
           onSubmit: (rows) async {
-            if (!canEdit(selected['id'])) return;
+            if (!_sameWeaponContext(generation, selected['id'], profile, hash) ||
+                !canEdit(selected['id'])) return;
             setState(() {
               effectRows = [
                 for (final row in rows) Map<String, dynamic>.from(row),
@@ -4284,11 +4554,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           },
         ),
       );
-      if (saved == true && mounted) {
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
+      if (saved == true) {
         setState(() => message = '特效登记已写入当前武器内存；点击“保存方案”提交暂存。');
       }
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selected['id'], profile, hash)) {
         setState(() {
           busy = false;
           message = '$e';
@@ -4302,11 +4573,14 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> openStageEffects(int index) async {
     final selected = weapon;
     if (selected == null || busy) return;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     final stage = Map<String, dynamic>.from(selected['stages'][index] as Map);
     setState(() => busy = true);
     try {
       final view = await _loadEffectView(selected['id'] as int);
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
       setState(() => busy = false);
       final state = '${stage['state']}';
       Map<String, dynamic> stageEffectRow(Map row) => {
@@ -4332,7 +4606,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           rows: current,
           thumbs: _effectThumbs,
           onSubmit: (rows) async {
-            if (!canEdit(selected['id'])) return;
+            if (!_sameWeaponContext(generation, selected['id'], profile, hash) ||
+                !canEdit(selected['id'])) return;
             setState(() {
               stageEffects[state] = [
                 for (final row in rows) Map<String, dynamic>.from(row),
@@ -4344,11 +4619,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           },
         ),
       );
-      if (saved == true && mounted) {
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
+      if (saved == true) {
         setState(() => message = '招式特效已写入当前武器内存；点击“保存方案”提交暂存。');
       }
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selected['id'], profile, hash)) {
         setState(() {
           busy = false;
           message = '$e';
@@ -4360,6 +4636,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   Future<void> repairEffects() async {
     final selected = weapon;
     if (selected == null || busy) return;
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
     setState(() {
       busy = true;
       message = '';
@@ -4369,9 +4648,11 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         await widget.api({
           'operation': 'weapon_effects_preview',
           'weapon': selected['id'],
+          ..._profileContextFor(profile, hash),
         }),
       );
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
+      _validateProfileResponse(preview, profile, hash);
       final additions = preview['additions'] as List;
       final issues = preview['issues'] as List;
       final confirm = await showDialog<bool>(
@@ -4408,8 +4689,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           ],
         ),
       );
-      if (confirm != true || !mounted) return;
+      if (confirm != true || !_sameWeaponContext(generation, selected['id'], profile, hash)) return;
       final view = await _loadEffectView(selected['id'] as int);
+      if (!_sameWeaponContext(generation, selected['id'], profile, hash)) return;
       final merged = <String, Map<String, dynamic>>{
         for (final row in (view['registered'] as List? ?? []))
           '${(row as Map)['effect_id']}': {
@@ -4431,13 +4713,22 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         message = '已将 ${additions.length} 条攻击特效登记合并到当前内存；点击“保存方案”提交暂存。';
       });
     } catch (e) {
-      if (mounted) setState(() => message = '$e');
+      if (_sameWeaponContext(generation, selected['id'], profile, hash)) {
+        setState(() => message = '$e');
+      }
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (_sameWeaponContext(generation, selected['id'], profile, hash)) {
+        setState(() => busy = false);
+      }
     }
   }
 
   Future<void> execute(String operation) async {
+    final selectedWeaponID = weapon?['id'];
+    final generation = _selectionGeneration;
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (selectedWeaponID == null) return;
     if (operation == 'weapon_save') {
       await saveWorkspace();
       return;
@@ -4467,8 +4758,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           ],
         ),
       );
-      if (confirmed != true || !mounted) return;
+      if (confirmed != true || !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     }
+    if (!_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     if (weapon != null) {
       workspace = _snapshotWorkspace();
     }
@@ -4478,22 +4770,37 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       message = '';
     });
     try {
-      final result = await widget.api({
+      final request = <String, dynamic>{
         'operation': operation,
         'weapon': weapon!['id'],
         'rules': rules,
+        ..._profileContextFor(profile, hash),
         'workspace': workspace?.toJson(),
         'revision': data!['revision'],
-      });
-      if (!mounted) return;
+      };
+      final result = await widget.api(request);
+      if (!mounted ||
+          generation != _selectionGeneration ||
+          weapon?['id'] != selectedWeaponID ||
+          activeProfile != profile ||
+          sourceHash != hash) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         dirty = false;
         message = result['message'];
       });
+      final reloadGeneration = _selectionGeneration + 1;
       await reloadSelectedWeapon();
-      if (operation != 'weapon_save') await reloadClient();
+      if (operation != 'weapon_save' &&
+          _sameWeaponContext(reloadGeneration, selectedWeaponID, profile, hash)) {
+        await reloadClient();
+      }
     } catch (e) {
-      if (mounted) {
+      if (mounted &&
+          generation == _selectionGeneration &&
+          weapon?['id'] == selectedWeaponID &&
+          activeProfile == profile &&
+          sourceHash == hash) {
         setState(() {
           busy = false;
           failed = true;
@@ -4511,6 +4818,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   ///
   /// 同时包含配置与自制武器的模型、贴图、动作资源。
   Future<void> exportPackage() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     if (!(form.currentState?.validate() ?? false)) return;
     final options = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -4519,7 +4830,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         createdCount: created.length,
       ),
     );
-    if (options == null || !mounted) return;
+    if (options == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final include = [for (final s in (options['include'] as List? ?? [])) '$s'];
     if (include.isEmpty) return;
     setState(() {
@@ -4532,7 +4843,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_package',
-          'weapon': weapon!['id'],
+          'weapon': id,
+          ..._profileContextFor(profile, hash),
           'all': options['all'] == true,
           'include': include,
           'applied_only': options['applied_only'] == true,
@@ -4540,7 +4852,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
           'revision': data!['revision'],
         }) as Map,
       );
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, id, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         exportResult = result;
         busy = false;
@@ -4550,7 +4863,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             '把包解压后覆盖到客户端根目录即可。';
       });
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, id, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -4572,6 +4885,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 导出合并包：只把「当前武器」（或全部自建武器）自己的配置条目和素材打成
   /// 一个 zip，导入时逐条合并进目标客户端，不整包覆盖。
   Future<void> exportMergePackage() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final all = await showDialog<bool>(
       context: context,
       builder: (_) => _MergeExportDialog(
@@ -4579,7 +4896,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         createdCount: created.length,
       ),
     );
-    if (all == null || !mounted) return;
+    if (all == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() {
       busy = true;
       failed = false;
@@ -4591,13 +4908,15 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_merge_export',
-          'weapon': weapon!['id'],
+          'weapon': id,
+          ..._profileContextFor(profile, hash),
           'all': all,
           'rules': rules,
           'revision': data!['revision'],
         }) as Map,
       );
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, id, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         exportResult = result;
         busy = false;
@@ -4608,7 +4927,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
             '目标客户端的其他配置不会被改动。';
       });
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, id, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -4620,12 +4939,16 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 导入武器包：选一个合并包 zip，只合并包里武器的配置条目，其余条目不动。
   Future<void> importMergePackage() async {
-    if (!await discard() || !mounted) return;
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!await discard() || !_sameWeaponContext(generation, id, profile, hash)) return;
     final applied = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => WeaponMergePage(api: widget.api)),
     );
-    if (applied == true && mounted) await load();
+    if (applied == true && _sameWeaponContext(generation, id, profile, hash)) await load();
   }
 
   /// 发版包导出结果卡片：路径、分组统计、配置改动、文件清单。
@@ -4926,7 +5249,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> createWeapon() async {
-    if (!(await discard()) || !mounted) return;
+    final generation = _selectionGeneration;
+    final selectedWeaponID = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!(await discard()) ||
+        !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     final blueprint = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _BlueprintDialog(
@@ -4938,7 +5266,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         suggestedID: suggestID(),
         usedIDs: {for (final id in usedIDs) '$id'},
         onUploadIcon: (sourcePath) async {
-          final r = await widget.api({
+          final r = await _apiForWeaponContext(generation, selectedWeaponID, profile, hash)({
             'operation': 'weapon_icon_upload',
             'source_path': sourcePath,
           });
@@ -4946,7 +5274,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         },
       ),
     );
-    if (blueprint == null || !mounted) return;
+    if (blueprint == null || !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     setState(() {
       busy = true;
       failed = false;
@@ -4956,15 +5284,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = await widget.api({
         'operation': 'weapon_create',
         'blueprint': blueprint,
+        ..._profileContextFor(profile, hash),
       });
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         dirty = false;
         message = '${result['message']}';
       });
       await load(prefer: blueprint['id'] as int);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selectedWeaponID, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -4975,7 +5305,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> forget() async {
-    if (!(await discard()) || !mounted) return;
+    final generation = _selectionGeneration;
+    final selectedWeaponID = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!(await discard()) ||
+        !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     final id = weapon!['id'];
     final confirmed = await showDialog<bool>(
       context: context,
@@ -4997,7 +5332,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     setState(() {
       busy = true;
       failed = false;
@@ -5007,15 +5342,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = await widget.api({
         'operation': 'weapon_forget',
         'weapon': id,
+        ..._profileContextFor(profile, hash),
       });
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         dirty = false;
         message = '${result['message']}';
       });
       await load(prefer: 253013);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selectedWeaponID, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -5029,14 +5366,19 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// self-made weapon. The change only lands in settings.json; the next
   /// 「应用到游戏」 rebuilds the client rows from the updated blueprint.
   Future<void> editBlueprintInfo() async {
-    if (!(await discard()) || !mounted) return;
+    final generation = _selectionGeneration;
+    final selectedWeaponID = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!(await discard()) ||
+        !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     final id = weapon!['id'];
     final updated = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _BlueprintInfoDialog(
         initial: blueprintOf(id),
         onUploadIcon: (sourcePath) async {
-          final r = await widget.api({
+          final r = await _apiForWeaponContext(generation, selectedWeaponID, profile, hash)({
             'operation': 'weapon_icon_upload',
             'source_path': sourcePath,
           });
@@ -5044,7 +5386,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         },
       ),
     );
-    if (updated == null || !mounted) return;
+    if (updated == null || !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     setState(() {
       busy = true;
       failed = false;
@@ -5054,16 +5396,18 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = await widget.api({
         'operation': 'weapon_blueprint_update',
         'weapon': id,
+        ..._profileContextFor(profile, hash),
         'blueprint': updated,
       });
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         dirty = false;
         message = '${result['message']}';
       });
       await load(prefer: id);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selectedWeaponID, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -5076,7 +5420,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// Registers (or clears) a combo-table completion for the current weapon.
   /// A donor of 0 clears it.
   Future<void> setCombo(int donor) async {
-    if (!(await discard()) || !mounted) return;
+    final generation = _selectionGeneration;
+    final selectedWeaponID = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!(await discard()) ||
+        !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     final id = weapon!['id'];
     setState(() {
       busy = true;
@@ -5087,16 +5436,18 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = await widget.api({
         'operation': 'weapon_combo',
         'weapon': id,
+        ..._profileContextFor(profile, hash),
         'donor': donor,
       });
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       setState(() {
         dirty = false;
         message = '${result['message']}';
       });
       await load(prefer: id);
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, selectedWeaponID, profile, hash)) {
         setState(() {
           busy = false;
           failed = true;
@@ -5107,7 +5458,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> pickComboDonor() async {
-    if (!(await discard()) || !mounted) return;
+    final generation = _selectionGeneration;
+    final selectedWeaponID = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    if (!(await discard()) ||
+        !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     final id = weapon!['id'];
     final suggested = weapon!['combo_suggestion'] as int? ?? 0;
     final donor = await showDialog<int>(
@@ -5121,7 +5477,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         suggested: suggested,
       ),
     );
-    if (donor == null || !mounted) return;
+    if (donor == null || !_sameWeaponContext(generation, selectedWeaponID, profile, hash)) return;
     await setCombo(donor);
   }
 
@@ -5135,8 +5491,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   String reactionChoice(dynamic hit, Map<String, dynamic> rule) {
-    final original = Map<String, dynamic>.from(hit['values']);
-    final current = {...original, ...?hitProperties['${hit['id']}'] as Map?};
+    final original = _hitValues(hit);
+    final current = _mergeHitValues([
+      hit,
+      (rule['properties'] as Map?)?['${hit['id']}'],
+      hitProperties['${hit['id']}'],
+    ]);
     final fields = (data?['fields'] as List? ?? []).where(
       (f) => f['key'] != 'SkillDamage' && f['key'] != 'SkillEnhanceDamage',
     );
@@ -5293,9 +5653,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         onChanged: !enabled
             ? null
             : (value) => setState(() {
-                final values = Map<String, dynamic>.from(
-                  hitProperties['${hit['id']}'] as Map? ?? const {},
-                );
+                final values = _hitValues(hitProperties['${hit['id']}']);
                 values['${field['key']}'] = value;
                 hitProperties['${hit['id']}'] = values;
                 _projectHitPropertiesToRules();
@@ -5328,8 +5686,8 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               rule,
               enabled,
               field,
-              int.tryParse(
-                    '${hitProperties['${hit['id']}']?[field['key']] ?? hit['values'][field['key']]}',
+                  int.tryParse(
+                    '${_hitField('${hit['id']}', '${field['key']}', hit['values'][field['key']])}',
                   ) ??
                   0,
             )
@@ -5341,7 +5699,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                   '$editorVersion-${rule['stage']}-${hit['id']}-${field['key']}',
                 ),
                 initialValue:
-                    '${hitProperties['${hit['id']}']?[field['key']] ?? hit['values'][field['key']]}',
+                    '${_hitField('${hit['id']}', '${field['key']}', hit['values'][field['key']])}',
                 enabled: enabled,
                 decoration: InputDecoration(
                   labelText: field['name'],
@@ -5364,9 +5722,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                       : null;
                 },
                 onChanged: (text) => setState(() {
-                  final values = Map<String, dynamic>.from(
-                    hitProperties['${hit['id']}'] as Map? ?? const {},
-                  );
+                  final values = _hitValues(hitProperties['${hit['id']}']);
                   values[field['key']] = num.tryParse(text) ?? -1;
                   hitProperties['${hit['id']}'] = values;
                   _projectHitPropertiesToRules();
@@ -5473,28 +5829,29 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 onChanged: !enabled
                     ? null
                     : (value) => setState(() {
-                        final changes = rule.putIfAbsent(
-                          'properties',
-                          () => <String, dynamic>{},
-                        ) as Map;
-                        final values = changes.putIfAbsent(
-                          hit['id'],
-                          () => <String, dynamic>{},
-                        ) as Map;
+                        final id = '${hit['id']}';
+                        final values = _mergeHitValues([
+                          hit,
+                          (rule['properties'] as Map?)?[id],
+                          hitProperties[id],
+                        ]);
                         if (value == 'original') {
-                          values.removeWhere(
-                            (key, _) =>
-                                key != 'SkillDamage' &&
-                                key != 'SkillEnhanceDamage',
-                          );
-                          if (values.isEmpty) changes.remove(hit['id']);
-                          if (changes.isEmpty) rule.remove('properties');
+                          final damage = {
+                            for (final key in ['SkillDamage', 'SkillEnhanceDamage'])
+                              if (values.containsKey(key)) key: values[key],
+                          };
+                          values
+                            ..clear()
+                            ..addAll(_hitValues(hit))
+                            ..addAll(damage);
                         } else {
                           final effect = (data!['effects'] as List).firstWhere(
                             (e) => e['id'] == value,
                           );
-                          values.addAll(effect['values'] as Map);
+                          values.addAll(_hitValues(effect['values']));
                         }
+                        hitProperties[id] = values;
+                        _projectHitPropertiesToRules();
                         editorVersion++;
                         dirty = true;
                       }),
@@ -5782,14 +6139,9 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
                 'buff': suppliedHit?['buff'] ??
                     (templateHit is Map ? templateHit['buff'] : '0') ??
                     '0',
-                'values': Map<String, dynamic>.from(
-                  (suppliedHit?['values'] as Map?) ??
-                      (templateHit is Map && templateHit['values'] is Map
-                          ? templateHit['values'] as Map
-                          : const <String, dynamic>{}),
-                ),
+                'values': _mergeHitValues([templateHit, suppliedHit]),
               };
-          if (property.isNotEmpty && hit != null) {
+        if (property.isNotEmpty && hit != null) {
           hitProperties[property] = _hitValues(hit);
         }
         final row = <String, dynamic>{
@@ -5804,17 +6156,28 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               : value['label'],
           'supported': true, 'reason': '',
           if (action.isNotEmpty) 'action': action,
-          'property_ids': List<dynamic>.from(
-            templateStage['property_ids'] as List? ??
-                (property.isNotEmpty
-                    ? [property]
-                    : previous['property_ids'] as List? ?? const []),
-          ),
+          'property_ids': <dynamic>[
+            ...(templateStage['property_ids'] as List? ??
+                previous['property_ids'] as List? ??
+                const []),
+            if (property.isNotEmpty &&
+                !(templateStage['property_ids'] as List? ??
+                        previous['property_ids'] as List? ??
+                        const [])
+                    .map((id) => '$id')
+                    .contains(property))
+              property,
+          ],
           'hits': [
-            for (final oldHit in (templateStage['hits'] as List? ?? const []))
+            for (final oldHit in (templateStage['hits'] as List? ??
+                previous['hits'] as List? ??
+                const []))
               Map<String, dynamic>.from(oldHit as Map),
-            if ((templateStage['hits'] as List? ?? const []).isEmpty &&
-                hit != null)
+            if (hit != null &&
+                !(templateStage['hits'] as List? ??
+                        previous['hits'] as List? ??
+                        const [])
+                    .any((oldHit) => '${(oldHit as Map)['id']}' == property))
               hit,
           ],
         };
@@ -5892,6 +6255,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 复用模板：把另一把武器某个状态的动作与命中属性复制到本段。
   Future<void> remapFromTemplate(String stateKey) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final picked = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => _RemapTemplateDialog(
@@ -5902,15 +6269,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         self: weapon!['id'] as int,
       ),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final resolved = Map<String, dynamic>.from(
       await widget.api({
         'operation': 'weapon_template_resolve',
         'template_weapon': picked['weapon'],
         'template_stage': picked['state'],
+        ..._profileContextFor(profile, hash),
       }),
     );
-    if (!mounted) return;
+    if (!_sameWeaponContext(generation, id, profile, hash)) return;
+    _validateProfileResponse(resolved, profile, hash);
     final value = <String, dynamic>{
       ...resolved,
       'template_state': '${picked['state']}',
@@ -5967,13 +6336,23 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 新增命中属性节点：克隆一个模板节点到全新编号，再指定给本段。
   Future<void> addPropertyFor(String stateKey) async {
-    Map<String, dynamic> catalog = {};
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
+    Map<String, dynamic> catalog;
     try {
       catalog = Map<String, dynamic>.from(
-        await widget.api({'operation': 'weapon_remap_options'}),
+        await widget.api({
+          'operation': 'weapon_remap_options',
+          ..._profileContextFor(profile, hash),
+        }),
       );
-    } catch (_) {}
-    if (!mounted) return;
+    } catch (_) {
+      return;
+    }
+    if (!_sameWeaponContext(generation, id, profile, hash)) return;
+    _validateProfileResponse(catalog, profile, hash);
     final properties = [
       for (final p in (catalog['properties'] as List? ?? []))
         Map<String, dynamic>.from(p as Map),
@@ -5982,7 +6361,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       context: context,
       builder: (_) => _PropertyPickerDialog(properties: properties),
     );
-    if (template == null || !mounted) return;
+    if (template == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     final newId = allocateProperty(template, properties);
     final source = hitProperties[template];
     final templateRow = properties.firstWhere((row) => '${row['id']}' == template);
@@ -6025,6 +6404,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 状态列，然后走 defineState（同一套定义对话框）。与「状态定义」卡片
   /// 是同一个功能，只是离列表更近。
   Future<void> addAction() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final states = unusedStates;
     if (states.isEmpty) {
       setState(() {
@@ -6070,7 +6453,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() => addStatePick = picked);
     await defineState();
   }
@@ -6078,6 +6461,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 为自建武器定义一个新状态：选一个尚未使用的状态列，再填动作 / 命中属性 /
   /// 动作说明（可从其它武器复用）。提交后该状态出现在招式列表里。
   Future<void> defineState() async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final stateKey = addStatePick;
     if (stateKey == null) {
       setState(() {
@@ -6098,13 +6485,24 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
               weaponId: weapon!['id'] as int,
               initial: const {},
               busy: busy,
-              api: widget.api,
+              isCurrent: () => _sameWeaponContext(generation, id, profile, hash),
+              api: _apiForWeaponContext(generation, id, profile, hash),
               weapons: [
                 for (final w in (data?['weapons'] as List? ?? []))
                   Map<String, dynamic>.from(w as Map),
               ],
-              onCommit: (value) => commitRemap(stateKey, value),
-              onAddProperty: allocateProperty,
+              onCommit: (value) {
+                if (!_sameWeaponContext(generation, id, profile, hash)) {
+                  throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+                }
+                commitRemap(stateKey, value);
+              },
+              onAddProperty: (template, properties) {
+                if (!_sameWeaponContext(generation, id, profile, hash)) {
+                  throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+                }
+                return allocateProperty(template, properties);
+              },
               onSaved: () async {
                 Navigator.of(dialogContext).pop(true);
               },
@@ -6119,13 +6517,17 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (!mounted) return;
+    if (!_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() => addStatePick = null);
   }
 
   /// 删除自建武器的一个状态：清零该动作列，移除重映射与已保存的效果编辑，
   /// 并清掉连招链中涉及该状态的转移。
   Future<void> clearState(String stateKey) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -6146,7 +6548,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true || !_sameWeaponContext(generation, id, profile, hash)) return;
     setState(() {
       final key = '${weapon!['id']}';
       remaps[key] = _stateMap(remaps)..remove(stateKey);
@@ -6402,20 +6804,35 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
 
   /// 结构重映射区块：可编辑的动作 / 命中属性 / 说明，复用模板把结果填进输入框。
   Widget remapSection(int index, Map<String, dynamic> stage) {
+    final generation = _selectionGeneration;
+    final id = weapon!['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final stateKey = '${stage['state']}';
     return _RemapEditor(
-      key: ValueKey('remap-$editorVersion-${weapon!['id']}-$stateKey'),
+      key: ValueKey('remap-$editorVersion-$generation-$id-$profile-$hash-$stateKey'),
       stateKey: stateKey,
       weaponId: weapon!['id'] as int,
       initial: remapFor(stateKey),
       busy: busy,
-      api: widget.api,
+      isCurrent: () => _sameWeaponContext(generation, id, profile, hash),
+      api: _apiForWeaponContext(generation, id, profile, hash),
       weapons: [
         for (final w in (data?['weapons'] as List? ?? []))
           Map<String, dynamic>.from(w as Map),
       ],
-      onCommit: (value) => commitRemap(stateKey, value),
-      onAddProperty: allocateProperty,
+      onCommit: (value) {
+        if (!_sameWeaponContext(generation, id, profile, hash)) {
+          throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+        }
+        commitRemap(stateKey, value);
+      },
+      onAddProperty: (template, properties) {
+        if (!_sameWeaponContext(generation, id, profile, hash)) {
+          throw StateError('武器或客户端配置档已切换，请重新打开编辑器');
+        }
+        return allocateProperty(template, properties);
+      },
       onSaved: () async {},
     );
   }
@@ -6825,8 +7242,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   }
 
   Future<void> copyConfigHash(String hash) async {
+    final generation = _selectionGeneration;
+    final id = weapon?['id'];
+    final profile = activeProfile;
+    final contextHash = sourceHash;
     await Clipboard.setData(ClipboardData(text: hash));
-    if (mounted) {
+    if (_sameWeaponContext(generation, id, profile, contextHash)) {
       setState(() => message = '已复制 config.spf2 的完整 SHA-256');
     }
   }
@@ -7636,6 +8057,10 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
   /// 轨道是从动作块现读的，所以弹窗里能看到刚保存的编辑。
   Future<void> openStageTrack(int index) async {
     if (busy || weapon == null) return;
+    final generation = _selectionGeneration;
+    final id = weapon!['id'];
+    final profile = activeProfile;
+    final hash = sourceHash;
     final stages = weapon!['stages'] as List;
     if (index < 0 || index >= stages.length) return;
     final stage = Map<String, dynamic>.from(stages[index] as Map);
@@ -7648,10 +8073,12 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final result = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_stage_track',
-          'weapon': weapon!['id'],
+          'weapon': id,
+          ..._profileContextFor(profile, hash),
         }),
       );
-      if (!mounted) return;
+      if (!_sameWeaponContext(generation, id, profile, hash)) return;
+      _validateProfileResponse(result, profile, hash);
       final tracks = <String, Map<String, dynamic>>{
         for (final t in (result['tracks'] as List? ?? []))
           '${(t as Map)['state']}': Map<String, dynamic>.from(t),
@@ -7680,15 +8107,15 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
       final changed = await showDialog<Map<String, List<Map<String, dynamic>>>>(
         context: context,
         builder: (_) => _StageTrackDialog(
-          api: widget.api,
-          weapon: weapon!['id'] as int,
+          api: _apiForWeaponContext(generation, id, profile, hash),
+          weapon: id as int,
           stage: stage,
           track: track,
           saved: saved[state] ?? const {},
           ustates: ustateOptions,
         ),
       );
-      if (changed != null && mounted) {
+      if (changed != null && _sameWeaponContext(generation, id, profile, hash)) {
         setState(() {
           final stateScopes = <String, List<Map<String, dynamic>>>{
             ...?scopeSaved[state],
@@ -7704,7 +8131,7 @@ class _WeaponConfigPageState extends State<WeaponConfigPage> {
         });
       }
     } catch (e) {
-      if (mounted) {
+      if (_sameWeaponContext(generation, id, profile, hash)) {
         setState(() {
           busy = false;
           message = '帧轨道读取失败：$e';
@@ -10139,9 +10566,9 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
           templateID = finalID;
           final allocated = reserveID();
           if (allocated.isNotEmpty) finalID = allocated;
-          if (allocated.isNotEmpty && widget.hitOverrides[templateID] is Map) {
-            overrides[finalID] = Map<String, dynamic>.from(
-              widget.hitOverrides[templateID] as Map,
+          if (allocated.isNotEmpty) {
+            overrides[finalID] = _extractHitValues(
+              widget.hitOverrides[templateID],
             );
           }
         }
@@ -10167,9 +10594,8 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     }
     // 深拷一份，取消时不影响外部；段里用到的号才带进来。
     widget.hitOverrides.forEach((id, value) {
-      if (value is Map) {
-        overrides['$id'] = Map<String, dynamic>.from(value);
-      }
+      final values = _extractHitValues(value);
+      if (values.isNotEmpty) overrides['$id'] = values;
     });
     for (final row in rows) {
       final damage = num.tryParse(row.segmentDamage);
@@ -10228,12 +10654,11 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
         final id = source.isEmpty ? '' : reserveID();
         if (id.isNotEmpty) {
           final damage = num.tryParse('${s['damage'] ?? ''}');
-          overrides[id] = {
-            ...?widget.hits[source]?['values'] as Map?,
-            if (damage != null) 'SkillDamage': damage,
-            if (widget.hitOverrides[source] is Map)
-              ...Map<String, dynamic>.from(widget.hitOverrides[source] as Map),
-          };
+          overrides[id] = _mergeHitValueMaps([
+            widget.hits[source],
+            widget.hitOverrides[source],
+            if (damage != null) {'SkillDamage': damage},
+          ]);
         }
         rows.add(
           _VariantRow(
@@ -10284,37 +10709,14 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
   String automaticTemplateFor(int index) {
     final current = rows[index].templateSkillproid.trim();
     if (hasTemplateValues(current)) return current;
-    final start = int.tryParse(rows[index].startCtrl.text.trim()) ?? 0;
-    final end = int.tryParse(rows[index].endCtrl.text.trim()) ?? start;
-    for (final segment in rows) {
-      final source = segment.templateSkillproid.trim().isNotEmpty
-          ? segment.templateSkillproid.trim()
-          : segment.skillproid.trim();
-      final from = int.tryParse(segment.startCtrl.text.trim()) ?? 0;
-      final to = int.tryParse(segment.endCtrl.text.trim()) ?? from;
-      if (hasTemplateValues(source) && from <= end && to >= start)
-        return source;
-    }
-    for (final segment in widget.baseSegments) {
-      final source = '${segment['skillproid'] ?? ''}'.trim();
-      final from = int.tryParse('${segment['start'] ?? 0}') ?? 0;
-      final to = int.tryParse('${segment['end'] ?? from}') ?? from;
-      if (hasTemplateValues(source) && from <= end && to >= start)
-        return source;
-    }
-    for (final segment in rows) {
-      final source = segment.templateSkillproid.trim().isNotEmpty
-          ? segment.templateSkillproid.trim()
-          : segment.skillproid.trim();
-      if (hasTemplateValues(source)) return source;
-    }
-    for (final segment in widget.baseSegments) {
-      final source = '${segment['skillproid'] ?? ''}'.trim();
-      if (hasTemplateValues(source)) return source;
-    }
+    // hits follows the state's actual hit order; new hits inherit its first hit.
     for (final entry in widget.hits.entries) {
       if ('${entry.value['variant'] ?? ''}'.isEmpty &&
           hasTemplateValues(entry.key)) return entry.key;
+    }
+    for (final segment in widget.baseSegments) {
+      final source = '${segment['skillproid'] ?? ''}'.trim();
+      if (hasTemplateValues(source)) return source;
     }
     return '';
   }
@@ -10353,20 +10755,21 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     final source = row.templateSkillproid.trim();
     final hit =
         widget.hits[id] ?? (source.isEmpty ? null : widget.hits[source]);
-    final initial = <String, dynamic>{
-      ...?hit?['values'] as Map?,
-      ...?widget.hitOverrides[source] as Map?,
-      ...?overrides[id],
-    };
+    final initial = _mergeHitValueMaps([
+      hit,
+      widget.hitOverrides[source],
+      overrides[id],
+    ]);
     if (!widget.hits.containsKey(id) &&
         row.segmentDamage.isNotEmpty &&
         !overrides.containsKey(id)) {
       final damage = num.tryParse(row.segmentDamage);
       if (damage != null) initial.putIfAbsent('SkillDamage', () => damage);
     }
+    final originalValues = _mergeHitValueMaps([hit, widget.hitOverrides[source]]);
     final original = <String, dynamic>{
       for (final field in widget.fields)
-        '${field['key']}': '${(hit?['values'] as Map?)?[field['key']] ?? 0}',
+        '${field['key']}': '${originalValues[field['key']] ?? 0}',
     };
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -10383,12 +10786,8 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
     );
     if (result == null || !mounted) return;
     setState(() {
-      overrides[id] = {
-        ...?hit?['values'] as Map?,
-        ...result,
-      };
-      row.segmentDamage =
-          '${overrides[id]?['SkillDamage'] ?? ''}';
+      overrides[id] = _mergeHitValueMaps([initial, result]);
+      row.segmentDamage = '${overrides[id]?['SkillDamage'] ?? ''}';
       error = '';
     });
   }
@@ -10458,14 +10857,14 @@ class _VariantBranchDialogState extends State<_VariantBranchDialog> {
       final id = '${s['skillproid'] ?? ''}'.trim();
       if (id.isEmpty) continue;
       final source = '${s['template_skillproid'] ?? ''}'.trim();
-      hitProperties[id] = {
+      hitProperties[id] = _mergeHitValueMaps([
         // 这是完整快照，不是删除式 patch：新分支换掉原段时，模板的
         // SkillDamage 和高级字段仍要随新 ID 一起提交。
-        ...?widget.hits[source]?['values'] as Map?,
-        ...?widget.hitOverrides[source] as Map?,
-        ...?widget.hits[id]?['values'] as Map?,
-        ...?overrides[id],
-      };
+        widget.hits[source],
+        widget.hitOverrides[source],
+        widget.hits[id],
+        overrides[id],
+      ]);
     }
     Navigator.pop(context, {
       'condition': cond,
@@ -10783,17 +11182,14 @@ class _HitPropertyDialogState extends State<_HitPropertyDialog> {
       }
       out[entry.key] = parsed;
     }
-    // 非伤害字段只在用户真的改过时才写，避免把原生值整套抄进规则。
-    values.forEach((key, value) {
+    // Return the complete edited values so restoring defaults also replaces
+    // previous overrides, while untouched advanced fields remain present.
+    final advancedValues = reaction == 'original' ? widget.original : values;
+    advancedValues.forEach((key, value) {
       if (key == 'SkillDamage' || key == 'SkillEnhanceDamage') return;
-      final original = int.tryParse('${widget.original[key] ?? 0}') ?? 0;
-      if (value is num && value.toInt() != original) out[key] = value;
+      final parsed = value is num ? value : num.tryParse('$value');
+      if (parsed != null && parsed.isFinite) out[key] = parsed;
     });
-    if (reaction == 'original') {
-      out.removeWhere(
-        (key, _) => key != 'SkillDamage' && key != 'SkillEnhanceDamage',
-      );
-    }
     Navigator.pop(context, out);
   }
 
@@ -12121,9 +12517,11 @@ class _RemapEditor extends StatefulWidget {
     required this.onSaved,
     required this.onCommit,
     required this.onAddProperty,
+    required this.isCurrent,
     super.key,
   });
 
+  final bool Function() isCurrent;
   final void Function(Map<String, dynamic>) onCommit;
   final String Function(String, List<Map<String, dynamic>>) onAddProperty;
   final String stateKey;
@@ -12171,7 +12569,7 @@ class _RemapEditorState extends State<_RemapEditor> {
       builder: (_) =>
           _RemapTemplateDialog(weapons: widget.weapons, self: widget.weaponId),
     );
-    if (picked == null || !mounted) return;
+    if (picked == null || !mounted || !widget.isCurrent()) return;
     try {
       final r = Map<String, dynamic>.from(
         await widget.api({
@@ -12180,7 +12578,7 @@ class _RemapEditorState extends State<_RemapEditor> {
           'template_stage': picked['state'],
         }),
       );
-      if (!mounted) return;
+      if (!mounted || !widget.isCurrent()) return;
       setState(() {
         action.text = '${r['action'] ?? ''}';
         property.text = '${r['property_id'] ?? ''}';
@@ -12189,7 +12587,7 @@ class _RemapEditorState extends State<_RemapEditor> {
             : null;
       });
     } catch (e) {
-      if (mounted) {
+      if (mounted && widget.isCurrent()) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('$e')));
       }
@@ -12202,8 +12600,10 @@ class _RemapEditorState extends State<_RemapEditor> {
       catalog = Map<String, dynamic>.from(
         await widget.api({'operation': 'weapon_remap_options'}),
       );
-    } catch (_) {}
-    if (!mounted) return;
+    } catch (_) {
+      return;
+    }
+    if (!mounted || !widget.isCurrent()) return;
     final properties = [
       for (final p in (catalog['properties'] as List? ?? []))
         Map<String, dynamic>.from(p as Map),
@@ -12212,7 +12612,7 @@ class _RemapEditorState extends State<_RemapEditor> {
       context: context,
       builder: (_) => _PropertyPickerDialog(properties: properties),
     );
-    if (template == null || !mounted) return;
+    if (template == null || !mounted || !widget.isCurrent()) return;
     try {
       final newId = widget.onAddProperty(template, properties);
       if (!mounted) return;
@@ -12230,7 +12630,7 @@ class _RemapEditorState extends State<_RemapEditor> {
         };
       });
     } catch (e) {
-      if (mounted) {
+      if (mounted && widget.isCurrent()) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('$e')));
       }
@@ -12261,8 +12661,10 @@ class _RemapEditorState extends State<_RemapEditor> {
     } catch (e) {
       if (mounted) {
         setState(() => saving = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
+        if (widget.isCurrent()) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('$e')));
+        }
       }
     }
   }

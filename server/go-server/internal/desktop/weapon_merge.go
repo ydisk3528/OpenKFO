@@ -399,7 +399,14 @@ func weaponMergeExport(request Request, client string, folder string, base *arch
 				continue // 死引用：渲染不会播它
 			}
 			prefix := action[:4]
-			weapon.AnimationBlocks[prefix] = append(weapon.AnimationBlocks[prefix], blocks[0].original)
+			// 同一个 <AnmDesc id> 在文件里可以有多份副本：原生形态就是
+			// 「一条无条件 + 若干带 <Condition><Ustate>」。动作分支、防护与自身状态、
+			// 招架全都住在条件副本里，只导 blocks[0] 会把它们整批丢掉
+			// （2026-10-06 实测 253450：8 个双副本块在包里只剩 1 份）。
+			// 这里导出全部副本，导入侧本来就能逐份处理。
+			for _, b := range blocks {
+				weapon.AnimationBlocks[prefix] = append(weapon.AnimationBlocks[prefix], b.original)
+			}
 			// 命中属性节点：动作块引用的全部 skillproid。
 			for _, id := range mergePropertyIDs(renderedInfo, action) {
 				if node, ok := propertyNodeText(propertyText, id); ok {
@@ -586,6 +593,7 @@ type mergeImportReport struct {
 // 新增与已存在两类，让用户确认后再真正写盘。参照物就是所选客户端的
 // Data/config.spf2（导入目标本身），所以列出来的正是这次导入会带来的变化。
 type mergePreview struct {
+	Revision  string           `json:"revision"`
 	Reference string           `json:"reference"`
 	New       []map[string]any `json:"new"`
 	Modified  []map[string]any `json:"modified"`
@@ -672,7 +680,12 @@ func weaponMergePreview(request Request, client string) (any, error) {
 		return nil, err
 	}
 	existing := weaponIDsOf(target)
+	packageHash, err := mergePackageHash(request.SourcePath)
+	if err != nil {
+		return nil, err
+	}
 	preview := mergePreview{
+		Revision:  digest([]byte(packageHash + digest(target.data))),
 		Reference: path,
 		New:       []map[string]any{},
 		Modified:  []map[string]any{},
@@ -1100,6 +1113,18 @@ func mergeAnimationBlock(animation, blockText string) (string, int, int, error) 
 		if sameMergeBlock(piece, blockText) {
 			return animation, 0, 0, nil
 		}
+		// 同 id 但内容不同：原生形态允许「一条无条件 + 若干带 <Condition>」并存
+		// （2026-10-06 实测 253450 有 8 个这样的块）。带条件的那份是另一个分支，
+		// 不算覆盖，追加到 </AnmInfo> 之前即可；只有「同 id 同为无条件却内容不同」
+		// 才是真冲突，仍然拒绝，避免默默覆盖别人的数据。
+		if blockHasCondition(node) && !pieceHasCondition(piece) {
+			idx := strings.LastIndex(animation, "</AnmInfo>")
+			if idx < 0 {
+				return "", 0, 0, fmt.Errorf("缺少 AnmInfo 结束标签")
+			}
+			insertion := "\n" + blockText + "\n"
+			return animation[:idx] + insertion + animation[idx:], 0, 1, nil
+		}
 		return "", 0, 0, fmt.Errorf("动作 %s 内容冲突且未完成独立编号分配，未覆盖", id)
 	}
 	idx := strings.LastIndex(animation, "</AnmInfo>")
@@ -1108,6 +1133,33 @@ func mergeAnimationBlock(animation, blockText string) (string, int, int, error) 
 	}
 	insertion := "\n" + blockText + "\n"
 	return animation[:idx] + insertion + animation[idx:], 0, 1, nil
+}
+
+// blockHasCondition reports whether an <AnmDesc> carries a <Condition> child.
+// A conditional copy is a separate state branch, not a revision of the
+// unconditional one, so merging may add it next to an existing same-id block.
+func blockHasCondition(node *xmlNode) bool {
+	if node == nil {
+		return false
+	}
+	found := false
+	node.walk(func(child *xmlNode) {
+		if child.tag == "Condition" {
+			found = true
+		}
+	})
+	return found
+}
+
+// pieceHasCondition is blockHasCondition for a raw <AnmDesc …>…</AnmDesc> substring.
+func pieceHasCondition(piece string) bool {
+	head := piece
+	if end := strings.Index(head, ">"); end >= 0 {
+		head = head[:end]
+	}
+	return strings.Contains(head, "<Condition") ||
+		strings.Contains(piece, "<Condition>") ||
+		strings.Contains(piece, "<Condition ")
 }
 
 // replaceActEffectBlockText 用整块原文替换该武器的特效登记块：已有则原位换

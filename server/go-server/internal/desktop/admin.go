@@ -91,6 +91,8 @@ type Request struct {
 	Target                 string                               `json:"target"`
 	Path                   string                               `json:"path"`
 	Directory              string                               `json:"directory"`
+	ActiveProfile          string                               `json:"active_profile,omitempty"`
+	SourceHash             string                               `json:"source_hash,omitempty"`
 	Blueprint              *Blueprint                           `json:"blueprint,omitempty"`
 	Include                []string                             `json:"include,omitempty"`
 	AppliedOnly            bool                                 `json:"applied_only,omitempty"`

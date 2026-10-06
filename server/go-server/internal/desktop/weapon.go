@@ -2181,6 +2181,45 @@ func inspectState(a *archive, items []Item, state *weaponState) (*inspection, er
 	return inspectFiltered(a, items, weaponIDsInState(state))
 }
 
+func forgetWeaponAuthorState(state *weaponState, key string) {
+	if state == nil || key == "" {
+		return
+	}
+	delete(state.Created, key)
+	delete(state.Drafts, key)
+	delete(state.Applied, key)
+	delete(state.Combos, key)
+	delete(state.Remaps, key)
+	delete(state.Cleared, key)
+	delete(state.Chains, key)
+	delete(state.ComboRules, key)
+	delete(state.FrameSwitches, key)
+	delete(state.Counters, key)
+	delete(state.BlockElements, key)
+	delete(state.Scopes, key)
+	delete(state.Variants, key)
+	delete(state.StageEffects, key)
+	delete(state.EffectRows, key)
+	delete(state.PropertyClones, key)
+
+	// Remove only this weapon's references. A canonical property survives when
+	// another weapon still owns or references it; global Buff/Lua state is never
+	// touched by forgetting a weapon.
+	for id, property := range state.HitProperties {
+		if property.OwnerWeapon != key && !hitPropertyReferencesWeapon(property, key) {
+			continue
+		}
+		deleteHitPropertyForWeapon(state, key, id)
+	}
+	for id, property := range state.ExtraProperties {
+		if property.OwnerWeapon == key {
+			if _, still := state.HitProperties[id]; !still {
+				delete(state.ExtraProperties, id)
+			}
+		}
+	}
+}
+
 func projectionActions(state *weaponState, wanted map[int]bool) []string {
 	if state == nil || wanted == nil {
 		return nil
@@ -2201,12 +2240,13 @@ func projectionActions(state *weaponState, wanted map[int]bool) []string {
 }
 
 type weaponState struct {
-	Drafts      map[string][]Rule    `json:"drafts"`
-	Applied     map[string][]Rule    `json:"applied"`
-	Created     map[string]Blueprint `json:"created,omitempty"`
-	Combos      map[string]int       `json:"combos,omitempty"`
-	SourceHash  string               `json:"source_hash,omitempty"`
-	AppliedHash string               `json:"applied_hash,omitempty"`
+	Drafts        map[string][]Rule    `json:"drafts"`
+	Applied       map[string][]Rule    `json:"applied"`
+	Created       map[string]Blueprint `json:"created,omitempty"`
+	Combos        map[string]int       `json:"combos,omitempty"`
+	SourceHash    string               `json:"source_hash,omitempty"`
+	AppliedHash   string               `json:"applied_hash,omitempty"`
+	ActiveProfile string               `json:"active_profile,omitempty"`
 	// Targets holds one baseline and hash pair per managed client. The edit set
 	// above is shared; each client is rendered onto its own baseline.
 	Baselines map[string]*clientBaseline `json:"baselines,omitempty"`
@@ -2298,6 +2338,7 @@ const (
 func readOnlyWeaponOperation(operation string) bool {
 	switch operation {
 	case "weapon_workspace_status", "weapon_workspace_load",
+		"weapon_merge_preview", "weapon_merge_packages",
 		"weapon_catalog", "weapon_list", "weapon_detail",
 		"weapon_combo_chain",
 		"weapon_combo_rule",
@@ -2372,12 +2413,13 @@ func weaponComboRuleView(source *archive, info *inspection, state *weaponState, 
 	return comboRuleView(source, info, state, strconv.Itoa(weapon), revision)
 }
 
-func weaponHandle(request Request, client string, items []Item, folder string) (any, error) {
-	if request.Operation == "weapon_icon_upload" {
-		return uploadWeaponIcon(client, request.SourcePath)
-	}
+func weaponHandle(request Request, client string, items []Item, folder string) (result any, resultErr error) {
 	if folder == "" {
 		folder = filepath.Join(filepath.Dir(client), "weapon-config")
+	}
+	if request.Operation == "weapon_merge_import" {
+		admin := &Admin{Root: filepath.Dir(filepath.Dir(folder))}
+		return admin.weaponMergeDirect(request, client)
 	}
 	if err := os.MkdirAll(folder, 0700); err != nil {
 		return nil, err
@@ -2386,26 +2428,28 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	// 请求（chain + rule），一个解析包要十几到几十秒，排在后面的必然撞上 30 秒
 	// 上限报「另一项武器配置操作正在进行」。这些操作只读 statePath、不落盘，
 	// 加了锁也保护不了什么。
-	if !readOnlyWeaponOperation(request.Operation) {
+	readOnly := readOnlyWeaponOperation(request.Operation)
+	if !readOnly {
 		release, err := acquireWeaponLock(folder)
 		if err != nil {
 			return nil, err
 		}
 		defer release()
 	}
-	if request.Operation == "weapon_workspace_status" || request.Operation == "weapon_workspace_load" {
-		return loadWeaponWorkspace(folder, request.Weapon)
-	}
-	if request.Operation == "weapon_workspace_save" {
-		return saveWeaponWorkspace(folder, request.Weapon, request.Workspace)
-	}
-	if request.Operation == "weapon_workspace_delete" {
-		return deleteWeaponWorkspace(folder, request.Weapon)
-	}
-	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" || request.Operation == "weapon_effect_view" {
-		return weaponEffects(request, client, items, folder)
-	}
 	statePath := filepath.Join(folder, "settings.json")
+	var err error
+	var releaseProfile func()
+	if readOnly {
+		releaseProfile, err = acquireWeaponLock(folder)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if releaseProfile != nil {
+				releaseProfile()
+			}
+		}()
+	}
 	state := weaponState{Drafts: map[string][]Rule{}, Applied: map[string][]Rule{}, Created: map[string]Blueprint{}}
 	stateBytes, err := os.ReadFile(statePath)
 	if err != nil && !os.IsNotExist(err) {
@@ -2437,9 +2481,6 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if state.HitProperties == nil {
 		state.HitProperties = map[string]HitProperty{}
 	}
-	if err = normalizeHitProperties(&state); err != nil {
-		return nil, err
-	}
 	if state.Chains == nil {
 		state.Chains = map[string][]ComboTransition{}
 	}
@@ -2461,6 +2502,103 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if state.LuaScripts == nil {
 		state.LuaScripts = map[string]map[string]string{}
 	}
+	entry, profile, err := activateWeaponProfile(folder, statePath, &state, client, false)
+	if err != nil {
+		return nil, err
+	}
+	requireProfile := request.Operation == "weapon_workspace_save" || request.Operation == "weapon_workspace_delete" ||
+		(request.Operation == "weapon_apply" && request.Workspace != nil)
+	if err = validateWeaponProfileRequest(request, profile, entry.SourceHash, requireProfile); err != nil {
+		return nil, err
+	}
+	if !readOnly {
+		// Validate before persisting a profile switch: rejected requests must not
+		// replace settings.json or archive an unrelated active editing state.
+		persisted := weaponState{}
+		if len(stateBytes) > 0 {
+			if err = json.Unmarshal(stateBytes, &persisted); err != nil {
+				return nil, err
+			}
+		} else {
+			persisted = emptyWeaponState(nil, "")
+		}
+		entry, profile, err = activateWeaponProfile(folder, statePath, &persisted, client, true)
+		if err != nil {
+			return nil, err
+		}
+		state = persisted
+	}
+	defer func() {
+		if resultErr == nil {
+			if response, ok := result.(map[string]any); ok {
+				withWeaponProfile(response, profile, entry.SourceHash)
+				for _, key := range []string{"chain_info", "combo_rule_info"} {
+					if nested, ok := response[key].(map[string]any); ok {
+						withWeaponProfile(nested, profile, entry.SourceHash)
+					}
+				}
+			}
+		}
+	}()
+	if releaseProfile != nil {
+		releaseProfile()
+		releaseProfile = nil
+	}
+	ensureWeaponStateMaps(&state)
+	if request.Operation == "weapon_icon_upload" {
+		return uploadWeaponIcon(client, request.SourcePath)
+	}
+	if request.Operation == "weapon_effects_preview" || request.Operation == "weapon_effects_apply" || request.Operation == "weapon_effect_view" {
+		response, effectsErr := weaponEffects(request, client, items, folder)
+		if effectsErr != nil {
+			return nil, effectsErr
+		}
+		if request.Operation == "weapon_effects_apply" {
+			current, readErr := os.ReadFile(configPath(client))
+			if readErr != nil {
+				return nil, readErr
+			}
+			entry.AppliedHash = digest(current)
+			state.SourceHash, state.AppliedHash = entry.SourceHash, entry.AppliedHash
+			if err = persistWeaponState(statePath, &state); err != nil {
+				return nil, err
+			}
+		}
+		return response, nil
+	}
+	if err = normalizeHitProperties(&state); err != nil {
+		return nil, err
+	}
+	if request.Operation == "weapon_workspace_status" || request.Operation == "weapon_workspace_load" {
+		if err = validateWeaponProfileRequest(request, profile, entry.SourceHash, false); err != nil {
+			return nil, err
+		}
+		result, loadErr := loadWeaponWorkspace(folder, request.Weapon, profile)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return withWeaponProfile(result, profile, entry.SourceHash), nil
+	}
+	if request.Operation == "weapon_workspace_save" {
+		if err = validateWeaponProfileRequest(request, profile, entry.SourceHash, true); err != nil {
+			return nil, err
+		}
+		result, saveErr := saveWeaponWorkspace(folder, request.Weapon, request.Workspace, profile)
+		if saveErr != nil {
+			return nil, saveErr
+		}
+		return withWeaponProfile(result, profile, entry.SourceHash), nil
+	}
+	if request.Operation == "weapon_workspace_delete" {
+		if err = validateWeaponProfileRequest(request, profile, entry.SourceHash, true); err != nil {
+			return nil, err
+		}
+		result, deleteErr := deleteWeaponWorkspace(folder, request.Weapon, profile)
+		if deleteErr != nil {
+			return nil, deleteErr
+		}
+		return withWeaponProfile(result, profile, entry.SourceHash), nil
+	}
 	// 状态/Buff 定制：除「应用」外都只改 settings.json 的编辑集，不重渲染整个包。
 	// 应用单独走 weaponBuffApply（内部仍复用 prepareClient 的完整守卫链），
 	// 这样就不必经过下面按武器编号解析的那一大段逻辑。
@@ -2474,19 +2612,27 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	// 逐条合并包里武器自己的配置。放在基线校验之前，免得客户端配置被改过
 	// （比如线上更新器）就挡在门外——那正是合并导入要处理的场景。
 	if request.Operation == "weapon_merge_preview" {
-		return weaponMergePreview(request, client)
+		preview, previewErr := weaponMergePreview(request, client)
+		if previewErr != nil {
+			return nil, previewErr
+		}
+		raw, marshalErr := json.Marshal(preview)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		response := map[string]any{}
+		if err = json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		return response, nil
 	}
 	if request.Operation == "weapon_merge_packages" {
 		return weaponMergePackages(folder)
-	}
-	if request.Operation == "weapon_merge_import" {
-		return weaponMergeImport(request, client, folder)
 	}
 	// The edit set is rendered onto whichever client the GM currently points at,
 	// each client directory keeping its own baseline: the user can switch
 	// clients, and a client can be refreshed by its own updater, so a single
 	// shared baseline would silently overwrite those differences.
-	entry := state.baselineFor(client)
 	baseline := entry.path(folder)
 	packagePath := configPath(client)
 	sourcePath := baseline
@@ -2513,7 +2659,11 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	if err != nil {
 		return nil, err
 	}
-	revision := digest(append(append([]byte(nil), current...), stateBytes...))
+	activeStateBytes, marshalErr := json.Marshal(&state)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	revision := digest(append(append([]byte(nil), current...), activeStateBytes...))
 	// Self-made weapons live in the same tables as the shipped ones, so the
 	// inspection, isolation and rendering path below applies to them unchanged.
 	// Combo registrations are layered on top: itemact.txt only says which
@@ -2526,6 +2676,11 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 	// inspection; otherwise rules are validated against the pre-remap stage list
 	// and a newly-defined state is reported as "连招配置格式错误".
 	workspaceApplied := request.Operation == "weapon_apply" && request.Workspace != nil
+	if workspaceApplied {
+		if err = validateWeaponProfileRequest(request, profile, entry.SourceHash, true); err != nil {
+			return nil, err
+		}
+	}
 	key := strconv.Itoa(request.Weapon)
 	if workspaceApplied {
 		if err := validateWorkspacePayload(request.Weapon, request.Workspace); err != nil {
@@ -2583,6 +2738,7 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			"used_ids": usedWeaponIDs(source, state.Created), "undeployed": undeployed,
 			"blueprint_min": blueprintMinID, "blueprint_max": blueprintMaxID,
 			"revision": revision, "folder": folder,
+			"active_profile": profile, "source_hash": entry.SourceHash,
 		}
 		return result, nil
 	}
@@ -2778,18 +2934,10 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 				return nil, fmt.Errorf("该武器不是自建武器")
 			}
 			snapshotState(statePath)
-			delete(state.Created, key)
-			delete(state.Drafts, key)
-			delete(state.Applied, key)
-			delete(state.Combos, key)
-			delete(state.Remaps, key)
-			delete(state.Cleared, key)
-			delete(state.Chains, key)
-			delete(state.ComboRules, key)
-			delete(state.FrameSwitches, key)
-			delete(state.Counters, key)
-			delete(state.BlockElements, key)
-			delete(state.PropertyClones, key)
+			forgetWeaponAuthorState(&state, key)
+			if _, err := deleteWeaponWorkspace(folder, request.Weapon, profile); err != nil {
+				return nil, err
+			}
 			message = "已移除自建武器；重新应用或发布后才会从配置包消失"
 		} else {
 			if request.Blueprint == nil {
@@ -3454,16 +3602,13 @@ func weaponHandle(request Request, client string, items []Item, folder string) (
 			if err = ensureBaseline(entry, folder, true); err != nil {
 				return nil, err
 			}
-			state.SourceHash = entry.SourceHash
-			state.AppliedHash = entry.AppliedHash
-			encoded, err := json.MarshalIndent(state, "", "  ")
-			if err != nil {
+			if _, err = resetWeaponProfileAfterRebase(folder, statePath, &state, entry); err != nil {
 				return nil, err
 			}
-			if err = atomicWrite(statePath, encoded); err != nil {
-				return nil, err
-			}
-			message = "已按该客户端当前配置重新采集基线；旧基线已备份"
+			// The rebase starts an empty author profile. Keep the already loaded
+			// entry and profile variables aligned for the response below.
+			profile = profileKeyForBaseline(entry, folder)
+			message = "已按该客户端当前配置重新采集基线；旧编辑集已归档，当前配置档已隔离"
 		}
 		encoded, err := json.MarshalIndent(state, "", "  ")
 		if err != nil {

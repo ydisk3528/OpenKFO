@@ -73,11 +73,12 @@ func (segment *VariantAnm) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*segment = VariantAnm(row.variantAnmFields)
-	if len(row.Damage) == 0 || string(row.Damage) == "null" {
+	text := strings.TrimSpace(string(row.Damage))
+	if len(row.Damage) == 0 || text == "null" {
 		return nil
 	}
-	segment.DamagePresent = true
-	text := strings.TrimSpace(string(row.Damage))
+	segment.DamagePresent = false
+
 	if len(text) > 0 && text[0] == '"' {
 		if err := json.Unmarshal(row.Damage, &text); err != nil {
 			return err
@@ -92,7 +93,26 @@ func (segment *VariantAnm) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("动作分支 damage 必须为数字：%q", text)
 	}
 	segment.Damage = value
+	segment.DamagePresent = true
 	return nil
+}
+
+func (segment VariantAnm) MarshalJSON() ([]byte, error) {
+	type variantAnmFields VariantAnm
+	row, err := json.Marshal(variantAnmFields(segment))
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]any{}
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return nil, err
+	}
+	if segment.DamagePresent || segment.Damage != 0 {
+		fields["damage"] = segment.Damage
+	} else {
+		delete(fields, "damage")
+	}
+	return json.Marshal(fields)
 }
 
 // applyVariants 把作者定义的分支落盘到 animation/*.xml + skillproperty.xml。
@@ -585,6 +605,48 @@ func buildVariant(base, id, condition string, segments []VariantAnm, reusable ma
 		}
 		rebuilt := make([]*xmlNode, 0, len(segments))
 		used := map[string]bool{}
+		// 2026-10-06：作者删掉中间某个片断后，后面各段仍带着原来的号，
+		// 于是块里出现「1,2,3,4,5,8」这种中间跳号。客户端按片断序遍历，
+		// 遇到空洞后取不到对应状态，释放该分支动作直接崩溃。
+		// 原生数据只存在「重复号」（1,2,2），从不跳号，所以跳号一律判定为删除残留，
+		// 这里按顺序重排为 1..n。重排只动 id，不动 startframe/endframe/
+		// skillproid/子元素 —— 攻击判定与帧区间保持作者原本的设定。
+		renumbered := make([]string, len(segments))
+		seen := map[string]bool{}
+		gapped := false
+		for index, segment := range segments {
+			id := strings.TrimSpace(segment.AnmID)
+			if id == "" {
+				continue
+			}
+			if seen[id] {
+				// 拆段会产生重复号，交给下面的 used 逻辑补号。
+				continue
+			}
+			seen[id] = true
+			renumbered[index] = id
+		}
+		next := 1
+		for _, id := range renumbered {
+			if id == "" {
+				continue
+			}
+			if id != strconv.Itoa(next) {
+				gapped = true
+				break
+			}
+			next++
+		}
+		if gapped {
+			next = 1
+			for index := range segments {
+				if renumbered[index] == "" {
+					continue
+				}
+				renumbered[index] = strconv.Itoa(next)
+				next++
+			}
+		}
 		for index, segment := range segments {
 			var anm *xmlNode
 			hint := hintByID[strings.TrimSpace(segment.AnmID)]
@@ -602,8 +664,11 @@ func buildVariant(base, id, condition string, segments []VariantAnm, reusable ma
 			}
 			// 片断编号：沿用作者给的号，其次沿用模板的原号；重复（拆段时必然重复）
 			// 或没有模板时取下一个没被占用的正整数 —— 块里 id 撞车会让「按 id 定位」
-			// 的范围/防护编辑改错段。
+			// 的范围/防护编辑改错段。删除留下的跳号已在上面重排过了。
 			anmID := strings.TrimSpace(segment.AnmID)
+			if gapped {
+				anmID = renumbered[index]
+			}
 			if anmID == "" {
 				anmID = strings.TrimSpace(anm.get("id"))
 			}
@@ -886,6 +951,40 @@ func variantCurrentBranchUsage(current *archive, key string, stage, condition in
 	return usage, nil
 }
 
+// cloneVariantHitProperty creates a branch-local canonical node. A legacy workspace
+// can reuse one 910... number in multiple states, even when the template properties
+// differ; renaming the shared node would then rewrite unrelated branches.
+func cloneVariantHitProperty(state *weaponState, oldID, newID, weapon string, stage, condition int, segment VariantAnm) error {
+	if state == nil || strings.TrimSpace(newID) == "" {
+		return nil
+	}
+	property, ok := state.HitProperties[oldID]
+	if !ok {
+		property = HitProperty{ID: oldID, OwnerWeapon: weapon, Source: "variant"}
+	}
+	property.ID = newID
+	if property.OwnerWeapon == "" {
+		property.OwnerWeapon = weapon
+	}
+	if property.State == 0 {
+		property.State = stage
+	}
+	if property.Condition == 0 {
+		property.Condition = condition
+	}
+	if property.SegmentID == "" {
+		property.SegmentID = strings.TrimSpace(segment.AnmID)
+	}
+	property.Source = "variant"
+	property.Preallocated = true
+	property.References = appendUniqueHitRef(property.References, HitPropertyRef{
+		Weapon: weapon, State: stage, Condition: condition,
+		Segment: property.SegmentID, Kind: "variant",
+	})
+	state.HitProperties[newID] = property
+	return nil
+}
+
 // reassignConflictingVariantIDs 为应用阶段的预分配分支属性号解决真实占用。
 //
 // 910... 号在 workspace 中只是草稿最终号；用户切换武器、重复应用或外部包
@@ -972,7 +1071,27 @@ func reassignConflictingVariantIDs(current *archive, state *weaponState, candida
 			alloc.reserved[id] = true
 		}
 	}
-	seen := map[string]string{}
+	// oldID may be reused by legacy workspaces across independent branches.
+	// Single-use IDs keep the historical global rename behavior; reused IDs are
+	// split per branch context so one replacement cannot rewrite other branches.
+	occurrences := map[string]int{}
+	for _, stages := range state.Variants {
+		for _, edits := range stages {
+			for _, edit := range edits {
+				if edit.Remove {
+					continue
+				}
+				for _, segment := range edit.Segments {
+					id := strings.TrimSpace(segment.SkillProID)
+					if id != "" && strings.TrimSpace(segment.TemplateSkillProID) != "" && alloc.isSelfMade(id) {
+						occurrences[id]++
+					}
+				}
+			}
+		}
+	}
+	seenContext := map[string]string{}
+	changedContext := map[string]string{}
 	keys := make([]string, 0, len(state.Variants))
 	for key := range state.Variants {
 		keys = append(keys, key)
@@ -994,14 +1113,15 @@ func reassignConflictingVariantIDs(current *archive, state *weaponState, candida
 				for segmentIndex := range edit.Segments {
 					segment := &edit.Segments[segmentIndex]
 					id := strings.TrimSpace(segment.SkillProID)
-					if replacement := changed[id]; replacement != "" {
+					context := fmt.Sprintf("%s|%d|%d|%d", key, stage, edit.Condition, segmentIndex)
+					if replacement := changedContext[context]; replacement != "" {
 						segment.SkillProID = replacement
 						continue
 					}
 					if id == "" || strings.TrimSpace(segment.TemplateSkillProID) == "" || !alloc.isSelfMade(id) {
 						continue
 					}
-					conflict := seen[id] != ""
+					conflict := seenContext[id] != "" && seenContext[id] != context
 					for index, view := range archives {
 						viewAlloc := allocators[index]
 						if !viewAlloc.occupied[id] {
@@ -1021,7 +1141,7 @@ func reassignConflictingVariantIDs(current *archive, state *weaponState, candida
 						}
 					}
 					if !conflict {
-						seen[id] = key
+						seenContext[id] = context
 						continue
 					}
 					// 换号必须避让当前包、候选包和整个 workspace。
@@ -1029,12 +1149,21 @@ func reassignConflictingVariantIDs(current *archive, state *weaponState, candida
 					if nextErr != nil {
 						return nil, nextErr
 					}
-					if err := renameHitProperty(state, id, newID); err != nil {
+					if occurrences[id] <= 1 {
+						if err := renameHitProperty(state, id, newID); err != nil {
+							return nil, err
+						}
+						segment.SkillProID = newID
+						changed[id] = newID
+						seenContext[newID] = context
+						continue
+					}
+					if err := cloneVariantHitProperty(state, id, newID, key, stage, edit.Condition, *segment); err != nil {
 						return nil, err
 					}
 					segment.SkillProID = newID
-					changed[id] = newID
-					seen[newID] = key
+					changedContext[context] = newID
+					seenContext[newID] = context
 				}
 			}
 		}

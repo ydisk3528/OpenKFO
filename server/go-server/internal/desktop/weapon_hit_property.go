@@ -1,8 +1,11 @@
 package desktop
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +39,93 @@ type HitPropertyRef struct {
 	Condition int    `json:"condition,omitempty"`
 	Segment   string `json:"segment,omitempty"`
 	Kind      string `json:"kind,omitempty"`
+}
+
+// UnmarshalJSON keeps workspace snapshots written by older GM builds
+// compatible. Stage hit metadata used to carry buff as a string (for example
+// the XML value "0"), while the canonical Go model uses an int.
+func (p *HitProperty) UnmarshalJSON(data []byte) error {
+	type plain HitProperty
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	buffRaw, hasBuff := fields["buff"]
+	delete(fields, "buff")
+	valuesRaw, hasValues := fields["values"]
+	delete(fields, "values")
+	clean, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	var value plain
+	if err := json.Unmarshal(clean, &value); err != nil {
+		return err
+	}
+	if hasBuff && len(bytes.TrimSpace(buffRaw)) > 0 &&
+		!bytes.Equal(bytes.TrimSpace(buffRaw), []byte("null")) {
+		parsed, err := parseJSONInt(buffRaw, "buff")
+		if err != nil {
+			return err
+		}
+		value.Buff = parsed
+	}
+	if hasValues && len(bytes.TrimSpace(valuesRaw)) > 0 &&
+		!bytes.Equal(bytes.TrimSpace(valuesRaw), []byte("null")) {
+		var rawValues map[string]json.RawMessage
+		if err := json.Unmarshal(valuesRaw, &rawValues); err != nil {
+			return fmt.Errorf("命中属性 values 格式无效：%w", err)
+		}
+		value.Values = make(map[string]float64, len(rawValues))
+		for key, raw := range rawValues {
+			parsed, err := parseJSONFloat(raw, "values."+key)
+			if err != nil {
+				return err
+			}
+			value.Values[key] = parsed
+		}
+	}
+	*p = HitProperty(value)
+	return nil
+}
+
+func parseJSONText(raw json.RawMessage) (string, error) {
+	text := strings.TrimSpace(string(raw))
+	if len(text) > 0 && text[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return "", err
+		}
+		text = strings.TrimSpace(decoded)
+	}
+	if text == "" || text == "null" {
+		return "", fmt.Errorf("值不能为空")
+	}
+	return text, nil
+}
+
+func parseJSONInt(raw json.RawMessage, field string) (int, error) {
+	text, err := parseJSONText(raw)
+	if err != nil {
+		return 0, fmt.Errorf("命中属性 %s 格式无效：%w", field, err)
+	}
+	parsed, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, fmt.Errorf("命中属性 %s 必须为整数：%q", field, text)
+	}
+	return parsed, nil
+}
+
+func parseJSONFloat(raw json.RawMessage, field string) (float64, error) {
+	text, err := parseJSONText(raw)
+	if err != nil {
+		return 0, fmt.Errorf("命中属性 %s 格式无效：%w", field, err)
+	}
+	parsed, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return 0, fmt.Errorf("命中属性 %s 必须为数字：%q", field, text)
+	}
+	return parsed, nil
 }
 
 func (p *HitProperty) normalize(id string) {
@@ -196,9 +286,7 @@ func normalizeHitProperties(state *weaponState) error {
 				if property.State == 0 {
 					property.State = rule.Stage
 				}
-				if len(property.Values) == 0 {
-					property.Values = copyFloatMap(values)
-				}
+				property.Values = mergeFloatValues(property.Values, values)
 				if property.Source == "" {
 					property.Source = "rule"
 				}
@@ -212,7 +300,51 @@ func normalizeHitProperties(state *weaponState) error {
 	}
 	for id, property := range explicit {
 		property.normalize(id)
-		property.References = appendUniqueHitRefs(property.References, state.HitProperties[id].References...)
+		existing := state.HitProperties[id]
+		if property.TemplateID == "" {
+			property.TemplateID = existing.TemplateID
+		}
+		if property.Condition == 0 {
+			property.Condition = existing.Condition
+		}
+		if property.SegmentID == "" {
+			property.SegmentID = existing.SegmentID
+		}
+		property.Preallocated = property.Preallocated || existing.Preallocated
+		if property.OwnerWeapon == "" {
+			property.OwnerWeapon = existing.OwnerWeapon
+		}
+		if property.State == 0 {
+			property.State = existing.State
+		}
+		if property.Action == "" {
+			property.Action = existing.Action
+		}
+		if property.Source == "" {
+			property.Source = existing.Source
+		}
+		property.Values = mergeFloatValues(existing.Values, property.Values)
+		property.References = appendUniqueHitRefs(existing.References, property.References...)
+		state.HitProperties[id] = property
+	}
+	// 从最终 canonical 快照补缺失字段；本节点和较近模板优先，零值也算已定义。
+	templates := make(map[string]HitProperty, len(state.HitProperties))
+	for id, property := range state.HitProperties {
+		templates[id] = property
+	}
+	for id, property := range templates {
+		values := copyFloatMap(property.Values)
+		visited := map[string]bool{id: true}
+		for templateID := property.TemplateID; templateID != "" && !visited[templateID]; {
+			visited[templateID] = true
+			template, exists := templates[templateID]
+			if !exists {
+				break
+			}
+			values = mergeFloatValues(template.Values, values)
+			templateID = template.TemplateID
+		}
+		property.Values = values
 		state.HitProperties[id] = property
 	}
 	for id, property := range state.HitProperties {
@@ -223,6 +355,31 @@ func normalizeHitProperties(state *weaponState) error {
 		state.HitProperties[id] = property
 	}
 	return nil
+}
+
+func isVariantHitPropertyID(id string) bool {
+	number, err := strconv.Atoi(strings.TrimSpace(id))
+	return err == nil && number >= variantSkillProPrefix && number < variantSkillProLimit
+}
+
+func legacyHitValues(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(propertyFields))
+	for _, field := range propertyFields {
+		allowed[field.Key] = true
+	}
+	result := make(map[string]float64, len(values))
+	for key, value := range values {
+		if allowed[key] {
+			result[key] = value
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // projectHitPropertiesToLegacy keeps the existing XML writers as a compatibility
@@ -236,24 +393,19 @@ func projectHitPropertiesToLegacy(state *weaponState) {
 			for index := range rules {
 				for id := range rules[index].Properties {
 					property, exists := state.HitProperties[id]
-					if !exists || property.Removed || !hitPropertyReferencesRule(property, weapon, rules[index].Stage) {
+					if isVariantHitPropertyID(id) || !exists || property.Removed || !hitPropertyReferencesRule(property, weapon, rules[index].Stage) {
 						delete(rules[index].Properties, id)
 					}
 				}
 				for id, property := range state.HitProperties {
-					if property.Removed || !hitPropertyReferencesRule(property, weapon, rules[index].Stage) {
+					if property.Removed || isVariantHitPropertyID(id) || !hitPropertyReferencesRule(property, weapon, rules[index].Stage) {
 						continue
 					}
-					if len(property.Values) > 0 {
+					if values := legacyHitValues(property.Values); len(values) > 0 {
 						if rules[index].Properties == nil {
 							rules[index].Properties = map[string]map[string]float64{}
 						}
-						rules[index].Properties[id] = copyFloatMap(property.Values)
-					}
-					if property.Buff != 0 || property.Level != 0 || property.Duration != 0 {
-						rules[index].Buff = property.Buff
-						rules[index].Level = property.Level
-						rules[index].Duration = property.Duration
+						rules[index].Properties[id] = values
 					}
 				}
 			}
@@ -401,6 +553,7 @@ func deleteHitProperty(state *weaponState, id string) {
 						edits[editIndex].Segments[segmentIndex].SkillProID = ""
 						edits[editIndex].Segments[segmentIndex].TemplateSkillProID = ""
 						edits[editIndex].Segments[segmentIndex].Damage = 0
+						edits[editIndex].Segments[segmentIndex].DamagePresent = false
 					}
 				}
 			}
@@ -425,9 +578,7 @@ func mergeHitProperty(dst map[string]HitProperty, property HitProperty) {
 	if previous.Source == "" {
 		previous.Source = property.Source
 	}
-	if len(previous.Values) == 0 && len(property.Values) > 0 {
-		previous.Values = copyFloatMap(property.Values)
-	}
+	previous.Values = mergeFloatValues(previous.Values, property.Values)
 	previous.References = appendUniqueHitRefs(previous.References, property.References...)
 	previous.Preallocated = previous.Preallocated || property.Preallocated
 	previous.Removed = previous.Removed && property.Removed
@@ -456,6 +607,20 @@ func copyFloatMap(source map[string]float64) map[string]float64 {
 	}
 	result := make(map[string]float64, len(source))
 	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func mergeFloatValues(base, overlay map[string]float64) map[string]float64 {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	result := copyFloatMap(base)
+	if result == nil {
+		result = map[string]float64{}
+	}
+	for key, value := range overlay {
 		result[key] = value
 	}
 	return result

@@ -49,6 +49,8 @@ func TestReadOnlyOperationsBypassTheLock(t *testing.T) {
 		"weapon_template_resolve",
 		"weapon_effect_view",
 		"weapon_effects_preview",
+		"weapon_merge_preview",
+		"weapon_merge_packages",
 	}
 	for _, op := range readOnly {
 		if !readOnlyWeaponOperation(op) {
@@ -66,7 +68,7 @@ func TestReadOnlyOperationsBypassTheLock(t *testing.T) {
 		"weapon_scope_set", "weapon_combo_rule_set", "weapon_client_rebase",
 		"weapon_remap", "weapon_property_add", "weapon_state_clear",
 		"weapon_package", "weapon_merge_export", "weapon_merge_import",
-		"weapon_clients", "weapon_merge_packages",
+		"weapon_clients",
 	}
 	for _, op := range writes {
 		if readOnlyWeaponOperation(op) {

@@ -3,6 +3,10 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+class _StaleBuffRequest implements Exception {
+  const _StaleBuffRequest();
+}
+
 /// 状态/Buff 定制：可视化编辑 ustate.xml 的 <Data> 节点 + 对应
 /// ustateeventproc.lua 里的 OnGetUstate_<N> 函数，保存后一键应用到客户端。
 class BuffConfigPage extends StatefulWidget {
@@ -24,6 +28,10 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   String message = '';
   bool messageIsError = false;
   bool busy = false;
+  bool loadingDetail = false;
+  ({String profile, String hash, int generation})? _identity;
+  int _catalogGeneration = 0;
+  int _detailGeneration = 0;
 
   final typeCtrl = TextEditingController();
   final nameCtrl = TextEditingController();
@@ -47,32 +55,115 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
     super.dispose();
   }
 
-  Future<dynamic> _call(String op, [Map<String, dynamic>? extra]) =>
-      widget.api({'operation': op, ...?extra});
+  bool _isCurrent(({String profile, String hash, int generation})? identity) =>
+      mounted && identity != null && identity == _identity;
 
-  Future<void> _bootstrap() async {
-    await _catalog();
-    await _icons();
-    await _api();
+  Future<Map<String, dynamic>> _call(
+    String op, [
+    Map<String, dynamic>? extra,
+    ({String profile, String hash, int generation})? identity,
+  ]) async {
+    final captured = identity ?? _identity;
+    if (captured == null || !_isCurrent(captured)) {
+      throw const _StaleBuffRequest();
+    }
+    final Map<String, dynamic> r;
+    try {
+      r = Map<String, dynamic>.from(
+        await widget.api({
+          'operation': op,
+          ...?extra,
+          'active_profile': captured.profile,
+          'source_hash': captured.hash,
+        }),
+      );
+    } catch (_) {
+      if (!_isCurrent(captured)) throw const _StaleBuffRequest();
+      rethrow;
+    }
+    if (!_isCurrent(captured)) throw const _StaleBuffRequest();
+    // 按发出请求时的身份验证；普通回包不能更新 catalog 身份。
+    if (r['active_profile'] != captured.profile ||
+        r['source_hash'] != captured.hash) {
+      throw StateError('Buff 回包身份不匹配，请刷新 catalog 后重试');
+    }
+    return r;
   }
 
-  Future<void> _catalog() async {
+  Future<void> _bootstrap() async {
+    if (!await _catalog(refresh: true)) return;
+    final identity = _identity;
+    await _icons(identity);
+    if (!_isCurrent(identity)) return;
+    await _api(identity);
+  }
+
+  Future<bool> _catalog({
+    bool refresh = false,
+    ({String profile, String hash, int generation})? identity,
+  }) async {
+    final generation = ++_catalogGeneration;
+    final captured = identity ?? _identity;
     try {
-      final r = Map<String, dynamic>.from(await _call('weapon_buff_catalog'));
-      if (!mounted) return;
+      final r = refresh
+          ? Map<String, dynamic>.from(
+              await widget.api({'operation': 'weapon_buff_catalog'}),
+            )
+          : await _call('weapon_buff_catalog', null, captured);
+      if (!mounted ||
+          generation != _catalogGeneration ||
+          (!refresh && !_isCurrent(captured))) {
+        return false;
+      }
+      final profile = r['active_profile'];
+      final hash = r['source_hash'];
+      if (profile is! String ||
+          profile.isEmpty ||
+          hash is! String ||
+          hash.isEmpty) {
+        throw StateError('Buff catalog 缺少 profile/hash，请刷新后重试');
+      }
       setState(() {
+        if (_identity?.profile != profile || _identity?.hash != hash) {
+          _identity = (
+            profile: profile,
+            hash: hash,
+            generation: (_identity?.generation ?? 0) + 1,
+          );
+          ++_detailGeneration;
+          loadingDetail = false;
+          selected = null;
+          typeCtrl.clear();
+          nameCtrl.clear();
+          descriptionCtrl.clear();
+          nodeCtrl.clear();
+          luaCtrl.clear();
+          icons = [];
+          apiGroups = [];
+          apiEvents = [];
+          apiFields = [];
+          _images.clear();
+          message = '';
+          messageIsError = false;
+        }
         buffs = r['buffs'] as List? ?? [];
         luaEntry = '${r['lua_entry'] ?? ''}';
       });
+      return true;
     } catch (e) {
-      _fail(e);
+      if (generation == _catalogGeneration) _fail(e);
+      return false;
     }
   }
 
-  Future<void> _icons() async {
+  Future<void> _icons(
+    ({String profile, String hash, int generation})? identity,
+  ) async {
     try {
-      final r = Map<String, dynamic>.from(await _call('weapon_buff_icons'));
-      if (!mounted) return;
+      final r = Map<String, dynamic>.from(
+        await _call('weapon_buff_icons', null, identity),
+      );
+      if (!_isCurrent(identity)) return;
       setState(() {
         icons = (r['icons'] as List? ?? []).cast<String>();
       });
@@ -81,10 +172,14 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
     }
   }
 
-  Future<void> _api() async {
+  Future<void> _api(
+    ({String profile, String hash, int generation})? identity,
+  ) async {
     try {
-      final r = Map<String, dynamic>.from(await _call('weapon_buff_api'));
-      if (!mounted) return;
+      final r = Map<String, dynamic>.from(
+        await _call('weapon_buff_api', null, identity),
+      );
+      if (!_isCurrent(identity)) return;
       setState(() {
         apiGroups = r['groups'] as List? ?? [];
         apiEvents = r['events'] as List? ?? [];
@@ -96,6 +191,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   }
 
   void _fail(Object e) {
+    if (e is _StaleBuffRequest) return;
     if (mounted) {
       setState(() {
         message = '$e';
@@ -105,7 +201,7 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   }
 
   Future<void> _run(Future<void> Function() work) async {
-    if (busy) return;
+    if (!mounted || busy) return;
     setState(() => busy = true);
     try {
       await work();
@@ -117,32 +213,46 @@ class _BuffConfigPageState extends State<BuffConfigPage> {
   }
 
   Future<void> _select(String t) async {
+    final generation = ++_detailGeneration;
+    final identity = _identity;
+    setState(() {
+      selected = t;
+      loadingDetail = true;
+      typeCtrl.text = t;
+      nameCtrl.clear();
+      descriptionCtrl.clear();
+      nodeCtrl.clear();
+      luaCtrl.clear();
+      message = '';
+      messageIsError = false;
+    });
     try {
-      final d = Map<String, dynamic>.from(
-        await _call('weapon_buff_detail', {'key': t}),
-      );
-      if (!mounted) return;
+      final d = await _call('weapon_buff_detail', {'key': t}, identity);
+      if (!_isCurrent(identity) || generation != _detailGeneration) return;
       setState(() {
-        selected = t;
-        typeCtrl.text = t;
         nameCtrl.text = '${d['name'] ?? ''}';
         descriptionCtrl.text = '${d['note'] ?? ''}';
         final pending = '${d['pending'] ?? ''}';
         nodeCtrl.text = pending.isNotEmpty ? pending : '${d['node'] ?? ''}';
         final luaEdited = '${d['lua_edited'] ?? ''}';
         luaCtrl.text = luaEdited.isNotEmpty ? luaEdited : '${d['lua'] ?? ''}';
-        message = '';
-        messageIsError = false;
       });
     } catch (e) {
-      _fail(e);
+      if (_isCurrent(identity) && generation == _detailGeneration) _fail(e);
+    } finally {
+      if (_isCurrent(identity) && generation == _detailGeneration) {
+        setState(() => loadingDetail = false);
+      }
     }
   }
 
   void _newNode() {
+    ++_detailGeneration;
     setState(() {
+      loadingDetail = false;
       selected = null;
       typeCtrl.clear();
+      nameCtrl.clear();
       descriptionCtrl.clear();
       nodeCtrl.text = _templateNode();
       luaCtrl.text = _templateLua();
@@ -226,7 +336,11 @@ end''';
     }
     return Tooltip(
       message: icon,
-      child: SizedBox(width: 40, height: 40, child: _image(name, 40, fallback: placeholder)),
+      child: SizedBox(
+        width: 40,
+        height: 40,
+        child: _image(name, 40, fallback: placeholder),
+      ),
     );
   }
 
@@ -242,13 +356,15 @@ end''';
 
   /// 取一张已解码的异常状态图标；拿不到时显示 [fallback] 或破图占位。
   Widget _image(String name, double size, {Widget? fallback}) {
+    final identity = _identity;
     final future = _images.putIfAbsent(name, () async {
       try {
         final r = Map<String, dynamic>.from(
           await _call('weapon_buff_image', {
             'keys': [name],
-          }),
+          }, identity),
         );
+        if (!_isCurrent(identity)) return null;
         final data = (r['images'] as Map?)?[name];
         if (data is String) return base64Decode(data);
       } catch (_) {
@@ -288,6 +404,7 @@ end''';
   }
 
   Future<void> _save() async {
+    final identity = _identity;
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
       setState(() {
@@ -305,17 +422,21 @@ end''';
             'text': _nodeForType(t),
             'note': descriptionCtrl.text.trim(),
           },
-        }),
+        }, identity),
       );
+      if (!_isCurrent(identity)) return;
       setState(() {
         message = '${r['message']}';
+        messageIsError = false;
         selected = t;
       });
-      await _catalog();
+      await _catalog(identity: identity);
     });
   }
 
   Future<void> _delete() async {
+    final identity = _identity;
+    final generation = _detailGeneration;
     final t = typeCtrl.text.trim();
     if (t.isEmpty) return;
     final ok = await showDialog<bool>(
@@ -335,20 +456,26 @@ end''';
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true ||
+        !_isCurrent(identity) ||
+        generation != _detailGeneration) {
+      return;
+    }
     await _run(() async {
       final r = Map<String, dynamic>.from(
-        await _call('weapon_buff_delete', {'key': t}),
+        await _call('weapon_buff_delete', {'key': t}, identity),
       );
+      if (!_isCurrent(identity)) return;
       setState(() {
         message = '${r['message']}';
         messageIsError = false;
       });
-      await _catalog();
+      await _catalog(identity: identity);
     });
   }
 
   Future<void> _saveLua() async {
+    final identity = _identity;
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
       setState(() {
@@ -359,8 +486,12 @@ end''';
     }
     await _run(() async {
       final r = Map<String, dynamic>.from(
-        await _call('weapon_buff_lua_save', {'key': t, 'lua': luaCtrl.text}),
+        await _call('weapon_buff_lua_save', {
+          'key': t,
+          'lua': luaCtrl.text,
+        }, identity),
       );
+      if (!_isCurrent(identity)) return;
       setState(() {
         message = '${r['message']}';
         messageIsError = false;
@@ -369,6 +500,7 @@ end''';
   }
 
   Future<void> _apply() async {
+    final identity = _identity;
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -389,9 +521,10 @@ end''';
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true || !_isCurrent(identity)) return;
     await _run(() async {
-      final r = Map<String, dynamic>.from(await _call('weapon_buff_apply'));
+      final r = await _call('weapon_buff_apply', null, identity);
+      if (!_isCurrent(identity)) return;
       setState(() {
         message = '${r['message']}';
         messageIsError = false;
@@ -400,6 +533,7 @@ end''';
   }
 
   Future<void> _exportBuff() async {
+    final identity = _identity;
     final t = typeCtrl.text.trim();
     if (t.isEmpty) {
       setState(() {
@@ -414,28 +548,31 @@ end''';
           'key': t,
           'ustate': {'action': 'upsert', 'text': nodeCtrl.text},
           'lua': luaCtrl.text,
-        }),
+        }, identity),
       );
+      if (!_isCurrent(identity)) return;
       final manifest = r['manifest'] as Map?;
       final buffs = manifest?['buffs'] as List? ?? [];
       final types = buffs.map((b) => '${(b as Map)['type']}').join('、');
-      setState(
-        () => message = '已导出 ${buffs.length} 个状态（$types）：${r['path']}',
-      );
+      setState(() => message = '已导出 ${buffs.length} 个状态（$types）：${r['path']}');
     });
   }
 
   Future<void> _importBuff() async {
+    final identity = _identity;
     List<dynamic> pkgs;
     String dir;
     try {
-      final r = Map<String, dynamic>.from(await _call('weapon_buff_packages'));
+      final r = Map<String, dynamic>.from(
+        await _call('weapon_buff_packages', null, identity),
+      );
       pkgs = r['packages'] as List? ?? [];
       dir = '${r['directory'] ?? ''}';
     } catch (e) {
       _fail(e);
       return;
     }
+    if (!mounted || !_isCurrent(identity)) return;
     if (pkgs.isEmpty) {
       setState(() {
         message = '没有可导入的合并包（$dir）';
@@ -465,7 +602,7 @@ end''';
         ],
       ),
     );
-    if (chosen == null) return;
+    if (!mounted || chosen == null || !_isCurrent(identity)) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -486,7 +623,7 @@ end''';
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true || !_isCurrent(identity)) return;
     // 外层 _run 已接管 busy 与错误捕获；这里不能再包一层 _run——它的
     // `if (busy) return` 会让导入请求根本发不出去（表现为点了确定没反应）。
     // 合并导入要 10-30 秒，期间用模态进度框给出可见反馈。
@@ -507,9 +644,11 @@ end''';
     }
     try {
       final r = Map<String, dynamic>.from(
-        await _call('weapon_buff_merge_import', {'source_path': chosen}),
+        await _call('weapon_buff_merge_import', {
+          'source_path': chosen,
+        }, identity),
       );
-      if (!mounted) return;
+      if (!_isCurrent(identity)) return;
       setState(() {
         message = '${r['message']}';
         messageIsError = false;
@@ -517,7 +656,7 @@ end''';
     } finally {
       if (mounted) Navigator.of(context, rootNavigator: true).pop();
     }
-    await _catalog();
+    await _catalog(identity: identity);
   }
 
   @override
@@ -527,7 +666,9 @@ end''';
         title: const Text('状态/Buff 定制'),
         actions: [
           IconButton(
-            onPressed: busy ? null : () => _run(_importBuff),
+            onPressed: busy || _identity == null
+                ? null
+                : () => _run(_importBuff),
             icon: const Icon(Icons.file_download_outlined),
             tooltip: '导入合并包',
           ),
@@ -583,7 +724,7 @@ end''';
                                 ].where((e) => e.isNotEmpty).join(' · '),
                                 overflow: TextOverflow.ellipsis,
                               ),
-                              onTap: busy ? null : () => _run(() => _select(t)),
+                              onTap: busy ? null : () => _select(t),
                             );
                           },
                         ),
@@ -621,8 +762,9 @@ end''';
                       message,
                       style: messageIsError
                           ? TextStyle(
-                              color:
-                                  Theme.of(context).colorScheme.onErrorContainer,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onErrorContainer,
                             )
                           : null,
                     ),
@@ -682,7 +824,10 @@ end''';
         if (selName != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Text('当前客户端说明：$selName', style: const TextStyle(fontSize: 12)),
+            child: Text(
+              '当前客户端说明：$selName',
+              style: const TextStyle(fontSize: 12),
+            ),
           ),
         const SizedBox(height: 8),
         const Text('图标（点击缩略图替换节点里的 Icon）'),
@@ -752,24 +897,32 @@ end''';
           runSpacing: 8,
           children: [
             FilledButton(
-              onPressed: busy ? null : _save,
+              onPressed: busy || loadingDetail || _identity == null
+                  ? null
+                  : _save,
               child: const Text('保存状态'),
             ),
             FilledButton(
-              onPressed: busy ? null : _saveLua,
+              onPressed: busy || loadingDetail || _identity == null
+                  ? null
+                  : _saveLua,
               child: const Text('保存 lua'),
             ),
             OutlinedButton(
-              onPressed: busy ? null : _delete,
+              onPressed: busy || loadingDetail || _identity == null
+                  ? null
+                  : _delete,
               child: const Text('删除状态'),
             ),
             OutlinedButton.icon(
-              onPressed: busy ? null : _exportBuff,
+              onPressed: busy || loadingDetail || _identity == null
+                  ? null
+                  : _exportBuff,
               icon: const Icon(Icons.ios_share),
               label: const Text('导出合并包'),
             ),
             FilledButton.tonal(
-              onPressed: busy ? null : _apply,
+              onPressed: busy || _identity == null ? null : _apply,
               child: const Text('应用到客户端'),
             ),
           ],
@@ -813,9 +966,7 @@ end''';
           ),
         ExpansionTile(
           title: const Text('引擎回调函数名'),
-          children: [
-            for (final e in apiEvents) _apiItem(e as Map),
-          ],
+          children: [for (final e in apiEvents) _apiItem(e as Map)],
         ),
       ],
     );
@@ -824,7 +975,10 @@ end''';
   Widget _apiItem(Map m) {
     return ListTile(
       dense: true,
-      title: Text('${m['name']}', style: const TextStyle(fontFamily: 'monospace')),
+      title: Text(
+        '${m['name']}',
+        style: const TextStyle(fontFamily: 'monospace'),
+      ),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

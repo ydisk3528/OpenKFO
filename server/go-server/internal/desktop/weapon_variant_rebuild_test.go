@@ -231,6 +231,113 @@ func TestBuildVariantKeepsPreallocatedNumbers(t *testing.T) {
 	}
 }
 
+func TestVariantAnmDamagePresenceJSONRoundTrip(t *testing.T) {
+	cases := []struct {
+		name           string
+		input          string
+		wantPresent    bool
+		wantDamage     float64
+		wantSerialized string
+	}{
+		{name: "missing", input: `{"name":"600180","start":0,"end":4}`, wantPresent: false, wantSerialized: `"name":"600180"`},
+		{name: "null", input: `{"name":"600180","start":0,"end":4,"damage":null}`, wantPresent: false, wantSerialized: `"name":"600180"`},
+		{name: "empty string", input: `{"name":"600180","start":0,"end":4,"damage":""}`, wantPresent: false, wantSerialized: `"name":"600180"`},
+		{name: "explicit zero", input: `{"name":"600180","start":0,"end":4,"damage":0}`, wantPresent: true, wantDamage: 0, wantSerialized: `"damage":0`},
+		{name: "numeric string", input: `{"name":"600180","start":0,"end":4,"damage":"2.5"}`, wantPresent: true, wantDamage: 2.5, wantSerialized: `"damage":2.5`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var segment VariantAnm
+			if err := json.Unmarshal([]byte(tc.input), &segment); err != nil {
+				t.Fatal(err)
+			}
+			if segment.DamagePresent != tc.wantPresent || segment.Damage != tc.wantDamage {
+				t.Fatalf("解析 presence/value 错误：%+v", segment)
+			}
+			raw, err := json.Marshal(segment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), tc.wantSerialized) {
+				t.Fatalf("序列化结果缺少 %q：%s", tc.wantSerialized, raw)
+			}
+			var restored VariantAnm
+			if err := json.Unmarshal(raw, &restored); err != nil {
+				t.Fatal(err)
+			}
+			if restored.DamagePresent != tc.wantPresent || restored.Damage != tc.wantDamage {
+				t.Fatalf("回读 presence/value 错误：%+v", restored)
+			}
+		})
+	}
+}
+
+func TestVariantAnmConstructedDamageJSONRoundTrip(t *testing.T) {
+	cases := []struct {
+		name        string
+		damage      float64
+		present     bool
+		wantPresent bool
+	}{
+		{name: "直接构造非零", damage: 4.7, wantPresent: true},
+		{name: "直接构造负值", damage: -2.5, wantPresent: true},
+		{name: "显式零", present: true, wantPresent: true},
+		{name: "未填写零"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			segment := VariantAnm{
+				Name: "600180", Start: 0, End: 4, AnmID: "2", ReplayTimes: 3,
+				SkillProID: "910000106", TemplateSkillProID: "100",
+				Damage: tc.damage, DamagePresent: tc.present,
+			}
+			raw, err := json.Marshal(segment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := fields["damage"]; exists != tc.wantPresent {
+				t.Fatalf("序列化 damage 存在性错误：%s", raw)
+			}
+			var restored VariantAnm
+			if err := json.Unmarshal(raw, &restored); err != nil {
+				t.Fatal(err)
+			}
+			want := segment
+			want.DamagePresent = tc.wantPresent
+			if restored != want {
+				t.Fatalf("构造值回读错误：得到 %+v，期望 %+v", restored, want)
+			}
+			a, _ := variantFixture(t, nil)
+			alloc, err := newVariantAllocator(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := `<AnmDesc id="1"><Anm id="1" name="600180" startframe="0" endframe="4" /></AnmDesc>`
+			_, props, err := buildVariant(base, "1", "406", []VariantAnm{restored}, nil, alloc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(props) != 1 || props[0].hasOverride != tc.wantPresent || props[0].damage != tc.damage {
+				t.Fatalf("JSON 往返后 attach 伤害语义错误：%+v", props)
+			}
+			if err := alloc.record(props); err != nil {
+				t.Fatal(err)
+			}
+			wantDamage := "7"
+			if tc.wantPresent {
+				wantDamage = strconv.FormatFloat(tc.damage, 'f', -1, 64)
+			}
+			if len(alloc.added) != 1 || mustParse(t, alloc.added[0]).get("SkillDamage") != wantDamage {
+				t.Fatalf("JSON 往返后克隆伤害错误：%v", alloc.added)
+			}
+		})
+	}
+}
+
 func TestBuildVariantPreservesExplicitZeroDamage(t *testing.T) {
 	const template = `<PropertyItem SkillProId="5210111" SkillDamage="8" RepulseTarget="1" />`
 	alloc := &variantAllocator{
@@ -754,6 +861,35 @@ func TestReassignVariantIDsReservesWholeState(t *testing.T) {
 	}
 	if replacements["910000000"] != "910000005" {
 		t.Fatalf("重分配未跳过全部 workspace ID：%v", replacements)
+	}
+}
+
+func TestReassignVariantIDsSplitsLegacyReuseAcrossStates(t *testing.T) {
+	current, _ := variantFixture(t, map[string]string{
+		"skillproperty.xml":  `<SkillProperty><PropertyItem SkillProId="100" /><PropertyItem SkillProId="910000000" /></SkillProperty>`,
+		"animation/9999.xml": `<AnmInfo><Anm skillproid="910000000" /></AnmInfo>`,
+	})
+	state := &weaponState{
+		HitProperties: map[string]HitProperty{
+			"910000000": {ID: "910000000", OwnerWeapon: "253450", Values: map[string]float64{"SkillDamage": 3}},
+		},
+		Variants: map[string]map[int][]VariantEdit{
+			"253450": {
+				2011: {{Condition: 406, Segments: []VariantAnm{{Name: "600180", SkillProID: "910000000", TemplateSkillProID: "100"}}}},
+				2012: {{Condition: 406, Segments: []VariantAnm{{Name: "600180", SkillProID: "910000000", TemplateSkillProID: "100"}}}},
+			},
+		},
+	}
+	if _, err := reassignConflictingVariantIDs(current, state); err != nil {
+		t.Fatal(err)
+	}
+	first := state.Variants["253450"][2011][0].Segments[0].SkillProID
+	second := state.Variants["253450"][2012][0].Segments[0].SkillProID
+	if first == "910000000" || second == "910000000" || first == second {
+		t.Fatalf("跨状态复用旧号未拆分：%s, %s", first, second)
+	}
+	if state.HitProperties[first].Values["SkillDamage"] != 3 || state.HitProperties[second].Values["SkillDamage"] != 3 {
+		t.Fatalf("拆分后的 canonical 属性值丢失：%+v", state.HitProperties)
 	}
 }
 

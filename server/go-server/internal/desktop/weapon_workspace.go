@@ -40,12 +40,42 @@ func (edit *workspaceVariantEdit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func weaponWorkspaceFolder(folder string) string {
-	return filepath.Join(folder, "workspaces")
+func weaponWorkspaceFolder(folder string, profile ...string) string {
+	root := filepath.Join(folder, "workspaces")
+	if len(profile) > 0 && strings.TrimSpace(profile[0]) != "" {
+		return filepath.Join(root, strings.ToLower(strings.TrimSpace(profile[0])))
+	}
+	return root
 }
 
-func weaponWorkspacePath(folder string, weapon int) string {
-	return filepath.Join(weaponWorkspaceFolder(folder), "weapon-"+strconv.Itoa(weapon)+".json")
+func weaponWorkspacePath(folder string, weapon int, profile ...string) string {
+	return filepath.Join(weaponWorkspaceFolder(folder, profile...), "weapon-"+strconv.Itoa(weapon)+".json")
+}
+
+func validateWeaponProfileRequest(request Request, profile, sourceHash string, required bool) error {
+	wantProfile := strings.ToLower(strings.TrimSpace(profile))
+	wantHash := strings.ToLower(strings.TrimSpace(sourceHash))
+	gotProfile := strings.ToLower(strings.TrimSpace(request.ActiveProfile))
+	gotHash := strings.ToLower(strings.TrimSpace(request.SourceHash))
+	if gotProfile != "" && gotProfile != wantProfile {
+		return fmt.Errorf("武器编辑上下文已切换，请刷新当前客户端配置")
+	}
+	if gotHash != "" && gotHash != wantHash {
+		return fmt.Errorf("客户端 SPF2 已切换，请刷新当前武器配置")
+	}
+	if required && (gotProfile == "" || gotHash == "") {
+		return fmt.Errorf("请求缺少客户端配置档身份，请刷新当前武器配置后重试")
+	}
+	return nil
+}
+
+func withWeaponProfile(result map[string]any, profile, sourceHash string) map[string]any {
+	if result == nil {
+		result = map[string]any{}
+	}
+	result["active_profile"] = profile
+	result["source_hash"] = sourceHash
+	return result
 }
 
 func validateWorkspacePayload(weapon int, payload map[string]any) error {
@@ -86,7 +116,7 @@ func validateWorkspacePayload(weapon int, payload map[string]any) error {
 	return nil
 }
 
-func saveWeaponWorkspace(folder string, weapon int, payload map[string]any) (map[string]any, error) {
+func saveWeaponWorkspace(folder string, weapon int, payload map[string]any, profile ...string) (map[string]any, error) {
 	if err := validateWorkspacePayload(weapon, payload); err != nil {
 		return nil, err
 	}
@@ -96,7 +126,7 @@ func saveWeaponWorkspace(folder string, weapon int, payload map[string]any) (map
 	if err != nil {
 		return nil, fmt.Errorf("序列化武器暂存失败：%w", err)
 	}
-	path := weaponWorkspacePath(folder, weapon)
+	path := weaponWorkspacePath(folder, weapon, profile...)
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
@@ -112,11 +142,11 @@ func saveWeaponWorkspace(folder string, weapon int, payload map[string]any) (map
 	}, nil
 }
 
-func loadWeaponWorkspace(folder string, weapon int) (map[string]any, error) {
+func loadWeaponWorkspace(folder string, weapon int, profile ...string) (map[string]any, error) {
 	if weapon <= 0 {
 		return nil, fmt.Errorf("请选择有效武器")
 	}
-	path := weaponWorkspacePath(folder, weapon)
+	path := weaponWorkspacePath(folder, weapon, profile...)
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return map[string]any{
@@ -566,7 +596,7 @@ func deleteHitPropertyForWeapon(state *weaponState, weapon, id string) {
 			ruleSets[weaponKey] = rules
 		}
 	}
-	for _, stages := range state.Remaps {
+	if stages := state.Remaps[weapon]; stages != nil {
 		for _, remap := range stages {
 			if remap != nil && remap.PropertyID == id {
 				remap.PropertyID = ""
@@ -614,11 +644,11 @@ func removeWorkspaceHitPropertyRevivals(state *weaponState, key string, raw any)
 	}
 }
 
-func deleteWeaponWorkspace(folder string, weapon int) (map[string]any, error) {
+func deleteWeaponWorkspace(folder string, weapon int, profile ...string) (map[string]any, error) {
 	if weapon <= 0 {
 		return nil, fmt.Errorf("请选择有效武器")
 	}
-	path := weaponWorkspacePath(folder, weapon)
+	path := weaponWorkspacePath(folder, weapon, profile...)
 	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		err = nil

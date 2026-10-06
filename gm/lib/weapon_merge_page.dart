@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// ZIP imports have their own working copy; viewing a diff never writes a game.
@@ -13,13 +14,47 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
   final source = TextEditingController();
   List<dynamic> packages = [];
   Map<String, dynamic>? result;
-  String workspace = '', message = '';
+  String workspace = '',
+      workspaceProfile = '',
+      workspaceHash = '',
+      message = '';
   bool busy = false, needsSave = false, applied = false;
+  int clientGeneration = 0;
   @override
   void initState() {
     super.initState();
     loadPackages();
   }
+
+  @override
+  void didUpdateWidget(covariant WeaponMergePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!mapEquals(oldWidget.clientConfig, widget.clientConfig)) {
+      clientGeneration++;
+      workspace = workspaceProfile = workspaceHash = '';
+      result = null;
+      needsSave = applied = false;
+      message = '';
+    }
+  }
+
+  bool sameWorkspace(
+    String id,
+    String profile,
+    String hash,
+    Map<String, dynamic>? clientConfig,
+    int generation,
+  ) =>
+      mounted &&
+      clientGeneration == generation &&
+      workspace == id &&
+      workspaceProfile == profile &&
+      workspaceHash == hash &&
+      mapEquals(widget.clientConfig, clientConfig);
+
+  Map<String, dynamic>? captureClientConfig() => widget.clientConfig == null
+      ? null
+      : Map<String, dynamic>.from(widget.clientConfig!);
 
   @override
   void dispose() {
@@ -82,37 +117,56 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
       return;
     }
     Map<String, dynamic>? preview;
+    final compareWorkspace = workspace;
+    final compareProfile = workspaceProfile;
+    final compareHash = workspaceHash;
+    final clientConfig = captureClientConfig();
+    final generation = clientGeneration;
+    bool current() => sameWorkspace(
+      compareWorkspace,
+      compareProfile,
+      compareHash,
+      clientConfig,
+      generation,
+    );
     final ok = await task(() async {
       preview = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_merge_compare',
           'source_path': path,
-          'merge_workspace': workspace,
-          if (widget.clientConfig != null) 'client_config': widget.clientConfig,
+          'merge_workspace': compareWorkspace,
+          'client_config': ?clientConfig,
         }),
       );
     });
-    if (!ok || !mounted) return;
+    if (!ok || !mounted || !current()) return;
+    final comparedProfile = '${preview!['active_profile'] ?? ''}';
+    final comparedHash = '${preview!['source_hash'] ?? ''}';
     final ids = await showDialog<List<int>>(
       context: context,
       builder: (_) => _MergeSelection(preview: preview!),
     );
     if (ids == null || ids.isEmpty || !mounted) return;
+    if (!current()) return;
     await task(() async {
       final r = Map<String, dynamic>.from(
         await widget.api({
           'operation': 'weapon_merge_stage',
           'source_path': path,
-          'merge_workspace': workspace,
-          if (widget.clientConfig != null) 'client_config': widget.clientConfig,
+          'merge_workspace': compareWorkspace,
+          'client_config': ?clientConfig,
+          'active_profile': comparedProfile,
+          'source_hash': comparedHash,
           'merge_weapons': ids,
           'revision': preview!['revision'],
         }),
       );
-      if (!mounted) return;
+      if (!current()) return;
       setState(() {
         result = r;
-        workspace = r['workspace'];
+        workspace = '${r['workspace'] ?? ''}';
+        workspaceProfile = '${r['active_profile'] ?? comparedProfile}';
+        workspaceHash = '${r['source_hash'] ?? comparedHash}';
         needsSave = true;
         message = r['message'];
       });
@@ -122,21 +176,47 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
   Future<bool> save() async {
     // 原生保存对话框（file_selector）在部分部署下抛 MissingPluginException，
     // 改为不传路径，由后端存到固定快照目录；消息里会显示完整路径。
+    final saveWorkspace = workspace;
+    final saveProfile = workspaceProfile;
+    final saveHash = workspaceHash;
+    final clientConfig = captureClientConfig();
+    final generation = clientGeneration;
     return await task(() async {
       final r = await widget.api({
         'operation': 'weapon_merge_save',
-        'merge_workspace': workspace,
-        if (widget.clientConfig != null) 'client_config': widget.clientConfig,
+        'merge_workspace': saveWorkspace,
+        'active_profile': saveProfile,
+        'source_hash': saveHash,
+        'client_config': ?clientConfig,
       });
-      if (mounted)
+      if (sameWorkspace(
+        saveWorkspace,
+        saveProfile,
+        saveHash,
+        clientConfig,
+        generation,
+      )) {
         setState(() {
           needsSave = false;
           message = '${r['message']}\n${r['path']}';
         });
+      }
     });
   }
 
   Future<void> apply() async {
+    final applyWorkspace = workspace;
+    final applyProfile = workspaceProfile;
+    final applyHash = workspaceHash;
+    final clientConfig = captureClientConfig();
+    final generation = clientGeneration;
+    bool current() => sameWorkspace(
+      applyWorkspace,
+      applyProfile,
+      applyHash,
+      clientConfig,
+      generation,
+    );
     final confirm = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -156,20 +236,25 @@ class _WeaponMergePageState extends State<WeaponMergePage> {
         ],
       ),
     );
-    if (confirm != true || !mounted) return;
+    if (confirm != true || !current()) return;
     await task(() async {
       final r = await widget.api({
         'operation': 'weapon_merge_apply',
-        'merge_workspace': workspace,
-        if (widget.clientConfig != null) 'client_config': widget.clientConfig,
+        'merge_workspace': applyWorkspace,
+        'active_profile': applyProfile,
+        'source_hash': applyHash,
+        'client_config': ?clientConfig,
       });
-      if (mounted)
+      if (current()) {
         setState(() {
           applied = true;
           needsSave = false;
           workspace = '';
+          workspaceProfile = '${r['active_profile'] ?? workspaceProfile}';
+          workspaceHash = '${r['source_hash'] ?? workspaceHash}';
           message = '${r['message']}\n备份：${r['backup']}';
         });
+      }
     });
   }
 

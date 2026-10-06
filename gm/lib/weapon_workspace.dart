@@ -1,5 +1,19 @@
 import 'dart:convert';
 
+const _ruleFieldKeys = <String>{
+  'SkillDamage',
+  'SkillEnhanceDamage',
+  'RepulseTarget',
+  'TripTarget',
+  'TargetFlurr',
+  'StandHurt',
+  'StandHurtDown',
+  'StandHurtFly',
+  'FlyHurt',
+  'JumpHurtDown',
+  'JumpHurtFall',
+};
+
 /// 当前武器的完整编辑工作区。
 ///
 /// 编辑仅保存在内存，保存与应用传递完整快照。
@@ -120,7 +134,7 @@ class WeaponWorkspace {
     Map<String, dynamic> remaps = const {},
     Map<String, dynamic> cleared = const {},
     Map<String, dynamic> extraProperties = const {},
-    Map<String, dynamic> hitProperties = const {},
+    Map<String, dynamic>? hitProperties,
   }) {
     final pageValues = <String, dynamic>{
       for (final stage in (weapon['stages'] as List? ?? const []))
@@ -135,7 +149,7 @@ class WeaponWorkspace {
         };
       }
     }
-    for (final entry in hitProperties.entries) {
+    for (final entry in (hitProperties ?? const <String, dynamic>{}).entries) {
       pageValues[entry.key] = {
         ...?pageValues[entry.key] as Map?,
         ..._ruleValues(entry.value),
@@ -147,6 +161,7 @@ class WeaponWorkspace {
       variantsSaved,
       variantsEdit,
       pageValues,
+      hitProperties,
     );
     // JSON round-tripping gives every nested collection a concrete dynamic type
     // and guarantees that no mutable page object is retained.
@@ -358,7 +373,8 @@ Map<String, dynamic> _pageValues(Object? value) {
             entry.key != 'state' &&
             entry.key != 'condition' &&
             entry.key != 'segment_id' &&
-            entry.key != 'kind')
+            entry.key != 'kind' &&
+            entry.key != 'template')
           '${entry.key}': entry.value,
     };
   }
@@ -372,7 +388,9 @@ Map<String, dynamic> _ruleValues(Object? value) {
     final parsed = entry.value is num
         ? entry.value as num
         : num.tryParse('${entry.value}'.trim());
-    if (parsed != null && parsed.isFinite) {
+    if (_ruleFieldKeys.contains('${entry.key}') &&
+        parsed != null &&
+        parsed.isFinite) {
       result['${entry.key}'] = parsed;
     }
   }
@@ -385,6 +403,7 @@ Map<String, dynamic> _canonicalHitProperties(
   Map<String, List<Map<String, dynamic>>> variantsSaved,
   Map<String, List<Map<String, dynamic>>> variantsEdit,
   Map<String, dynamic> pageValues,
+  Map<String, dynamic>? canonical,
 ) {
   final references = <String, List<Map<String, dynamic>>>{};
   final metadata = <String, Map<String, dynamic>>{};
@@ -469,57 +488,125 @@ Map<String, dynamic> _canonicalHitProperties(
     }
   }
   return {
-    for (final id in <String>{...metadata.keys, ...pageValues.keys})
+    for (final id
+        in canonical?.keys ?? <String>{...metadata.keys, ...pageValues.keys})
       id: {
         ...metadata[id] ?? {'id': id, 'owner_weapon': '${weapon['id']}'},
+        ..._canonicalMetadata(canonical?[id]),
         'values': _deepCopy(pageValues[id] ?? const {}),
         if (references[id]?.isNotEmpty == true) 'references': references[id],
       },
   };
 }
 
-Map<String, dynamic> _canonicalValue(String id, Object? value) {
-  if (value is Map && value['values'] is Map) {
-    return {
-      for (final entry in value.entries) '${entry.key}': _deepCopy(entry.value),
-      'id': '${value['id'] ?? id}',
-      'values': _deepCopy(value['values']),
-    };
+dynamic _canonicalMetadataValue(String key, Object? value) {
+  if (key != 'buff') return _deepCopy(value);
+  if (value is int) return value;
+  if (value is num && value.isFinite && value == value.truncate()) {
+    return value.toInt();
   }
-  return {'id': id, 'values': _pageValues(value)};
+  return int.tryParse('${value ?? ''}'.trim());
+}
+
+Map<String, dynamic> _canonicalMetadata(Object? value) {
+  if (value is! Map) return const {};
+  final source = value['values'] is Map
+      ? {
+          for (final entry in value.entries)
+            if (entry.key != 'values') '${entry.key}': entry.value,
+        }
+      : {
+          for (final entry in value.entries)
+            if ({
+              'id',
+              'buff',
+              'variant',
+              'references',
+              'owner_weapon',
+              'action',
+              'state',
+              'condition',
+              'segment_id',
+              'kind',
+              'template',
+            }.contains('${entry.key}'))
+              '${entry.key}': entry.value,
+        };
+  return {
+    for (final entry in source.entries)
+      if (entry.key != 'buff' || _canonicalMetadataValue('buff', entry.value) != null)
+        '${entry.key}': _canonicalMetadataValue('${entry.key}', entry.value),
+  };
 }
 
 Map<String, dynamic> _decodeHitProperties(
   Map<String, dynamic> json,
   Map baseline,
 ) {
-  final explicit = json['hit_properties'];
-  if (explicit is Map) {
-    return {
-      for (final entry in explicit.entries)
-        '${entry.key}': _canonicalValue('${entry.key}', entry.value),
-    };
-  }
-  final migrated = <String, dynamic>{};
-  for (final rule in (json['rules'] as List? ?? const [])) {
-    for (final entry
-        in ((rule as Map)['properties'] as Map? ?? const {}).entries) {
-      migrated['${entry.key}'] = _canonicalValue('${entry.key}', entry.value);
+  final stageValues = <String, dynamic>{};
+  for (final stage
+      in ((json['weapon'] as Map?)?['stages'] as List? ?? const [])) {
+    for (final hit in ((stage as Map)['hits'] as List? ?? const [])) {
+      if (hit is Map) {
+        final id = '${hit['id']}';
+        if (id.isNotEmpty) stageValues[id] = hit;
+      }
     }
   }
-  final legacyRules = baseline['drafts'];
-  if (migrated.isEmpty && legacyRules is Map) {
-    for (final rules in legacyRules.values) {
-      for (final rule in (rules as List? ?? const [])) {
-        for (final entry
-            in ((rule as Map)['properties'] as Map? ?? const {}).entries) {
-          migrated['${entry.key}'] = _canonicalValue(
-            '${entry.key}',
-            entry.value,
-          );
+
+  final ruleValues = <String, dynamic>{};
+  for (final rule in (json['rules'] as List? ?? const [])) {
+    final properties = (rule as Map)['properties'];
+    if (properties is Map) {
+      for (final entry in properties.entries) {
+        ruleValues['${entry.key}'] = entry.value;
+      }
+    }
+  }
+
+  Map<String, dynamic> merged(String id, Object? canonical) {
+    final result = <String, dynamic>{
+      'id': id,
+      ..._canonicalMetadata(stageValues[id]),
+      ..._canonicalMetadata(ruleValues[id]),
+      ..._canonicalMetadata(canonical),
+      'values': {
+        ..._pageValues(stageValues[id]),
+        ..._pageValues(ruleValues[id]),
+        ..._pageValues(canonical),
+      },
+    };
+    return result;
+  }
+
+  final rawCanonical = json['hit_properties'];
+  if (json.containsKey('hit_properties') && rawCanonical is Map) {
+    return {
+      for (final entry in rawCanonical.entries)
+        '${entry.key}': merged('${entry.key}', entry.value),
+    };
+  }
+
+  final migrated = <String, dynamic>{};
+  final ids = <String>{...stageValues.keys, ...ruleValues.keys};
+  if (ids.isEmpty) {
+    final legacyRules = baseline['drafts'];
+    if (legacyRules is Map) {
+      for (final rules in legacyRules.values) {
+        for (final rule in (rules as List? ?? const [])) {
+          final properties = (rule as Map)['properties'];
+          if (properties is Map) {
+            for (final entry in properties.entries) {
+              ruleValues['${entry.key}'] = entry.value;
+              ids.add('${entry.key}');
+            }
+          }
         }
       }
     }
+  }
+  for (final id in ids) {
+    migrated[id] = merged(id, null);
   }
   return migrated;
 }
