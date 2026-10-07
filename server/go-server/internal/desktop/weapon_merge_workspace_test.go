@@ -664,9 +664,18 @@ func TestLegacyDirectMergeRejectsStaleIdentityAndRevisionWithoutWrites(t *testin
 			}
 			assertWeaponProfileFilesUnchanged(t, admin.Root, beforeAdmin)
 			assertWeaponProfileFilesUnchanged(t, client, beforeClient)
-			workspaceRoot := filepath.Join(admin.Root, "runtime-local", "weapon-merge-workspaces")
-			if _, err = os.Stat(workspaceRoot); !os.IsNotExist(err) {
-				t.Fatalf("stale %s 拒绝前创建了 workspace：%v", test.name, err)
+			// 取 revision 的前置 compare 已经建过这个目录，所以这里断言的是
+			//「拒绝时没有新增 workspace 条目」，而不是「目录不存在」。
+			entries, err := os.ReadDir(filepath.Join(admin.Root, "runtime-local", "weapon-merge-workspaces"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("stale %s 读取 workspace 目录失败：%v", test.name, err)
+			}
+			if len(entries) > 0 {
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				t.Fatalf("stale %s 拒绝时仍创建了 workspace：%v", test.name, names)
 			}
 			backups, err := filepath.Glob(filepath.Join(client, "before-apply-*"))
 			if err != nil || len(backups) != 0 {
